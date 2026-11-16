@@ -107,4 +107,33 @@ mod tests {
         assert_eq!(fs::read_to_string(data_dir.join("config.json")).unwrap(), "new");
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_leaves_no_data_folder_so_the_next_launch_retries() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch_space("retry");
+        let legacy = root.join(LEGACY_IDENTIFIER);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("config.json"), "{}").unwrap();
+        let history = legacy.join("history.json");
+        fs::write(&history, "turns").unwrap();
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&history).is_ok() {
+            // Running as root: permissions can't make the copy fail.
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let data_dir = root.join("ai.chatgsd.desktop");
+
+        assert!(migrate(&data_dir).is_err());
+        assert!(!data_dir.exists());
+
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(migrate(&data_dir).unwrap());
+
+        assert_eq!(fs::read_to_string(data_dir.join("history.json")).unwrap(), "turns");
+        assert!(!root.join("ai.chatgsd.desktop.migrating").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

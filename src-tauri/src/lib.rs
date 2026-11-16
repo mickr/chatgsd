@@ -3183,11 +3183,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Before anything reads app data: bring over what the app saved as
-            // Scratch, under its old bundle ID.
-            match app.path().app_data_dir().map(|dir| legacy_data::migrate(&dir)) {
-                Ok(Ok(true)) => eprintln!("Copied app data from Scratch"),
-                Ok(Err(error)) => eprintln!("Could not copy app data from Scratch: {error}"),
-                _ => {}
+            // Scratch, under its old bundle ID. A failed copy stops startup:
+            // carrying on would create the new data folder, and the copy only
+            // runs while that folder doesn't exist, so it would never retry.
+            if legacy_data::migrate(&app.path().app_data_dir()?)
+                .map_err(|error| format!("Couldn't copy your data from Scratch, so ChatGSD stopped to keep it safe. Open ChatGSD again to retry. ({error})"))?
+            {
+                eprintln!("Copied app data from Scratch");
             }
 
             // Load app config on startup (contains notes folder path)
