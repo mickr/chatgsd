@@ -72,7 +72,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBCRUM5NURCNkYzODk4NTUKUldSVm1EaHYyNVhzQzJpNnNsRWlaUDladlAwN2ExcGg5L2g3UC9GQWRlT1FQa1lMd29ySmNzQ00K",
       "endpoints": [
-        "https://github.com/mickr/scratch/releases/latest/download/latest.json"
+        "https://github.com/mickr/chatgsd/releases/latest/download/latest.json"
       ]
     }
   }

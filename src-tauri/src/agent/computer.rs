@@ -38,7 +38,7 @@ pub struct ComputerSession {
 impl ComputerSession {
     pub async fn start(host_bundle_id: &str) -> Result<Self, String> {
         let controller = CONTROLLER.try_lock()
-            .map_err(|_| "Another Scratch agent is using the computer. Stop that run first.")?;
+            .map_err(|_| "Another ChatGSD agent is using the computer. Stop that run first.")?;
         let binary = resolve_binary()?;
         let id = uuid::Uuid::new_v4().to_string();
         #[cfg(unix)]
@@ -72,7 +72,7 @@ impl ComputerSession {
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
             if session.daemon.as_mut().unwrap().try_wait().map_err(|e| e.to_string())?.is_some() {
-                return Err("Cua Driver exited during startup. Check the installed driver and Scratch permissions.".into());
+                return Err("Cua Driver exited during startup. Check the installed driver and ChatGSD's permissions.".into());
             }
             if socket_ready(&socket).await { break; }
             if Instant::now() >= deadline {
@@ -89,7 +89,7 @@ impl ComputerSession {
         session.output = child.stdout.take().map(BufReader::new);
         session.rpc("initialize", json!({
             "protocolVersion":"2024-11-05", "capabilities":{},
-            "clientInfo":{"name":"Scratch","version":env!("CARGO_PKG_VERSION")}
+            "clientInfo":{"name":"ChatGSD","version":env!("CARGO_PKG_VERSION")}
         })).await?;
         session.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
         #[cfg(target_os = "macos")]
@@ -99,7 +99,7 @@ impl ComputerSession {
             if permissions.get("accessibility").and_then(Value::as_bool) != Some(true)
                 || permissions.get("screen_recording").and_then(Value::as_bool) != Some(true)
             {
-                return Err("Cua needs Scratch's Accessibility and Screen Recording permissions. Use Set up Cua permissions, then fully quit and reopen Scratch.".into());
+                return Err("Cua needs ChatGSD's Accessibility and Screen Recording permissions. Use Set up Cua permissions, then fully quit and reopen ChatGSD.".into());
             }
         }
         let mut cursor: Option<String> = None;
@@ -289,7 +289,7 @@ fn validate_arguments(value: &Value) -> Result<(), String> {
         Value::Object(object) => {
             for (key, value) in object {
                 if key.starts_with('_') || HIDDEN_ARGUMENTS.contains(&key.as_str()) {
-                    return Err(format!("Computer argument {key} is owned by Scratch."));
+                    return Err(format!("Computer argument {key} is owned by ChatGSD."));
                 }
                 if key == "delivery_mode" && value.as_str() != Some("background") {
                     return Err("Foreground computer control is not enabled.".into());
@@ -301,7 +301,7 @@ fn validate_arguments(value: &Value) -> Result<(), String> {
                     return Err("Desktop input is not enabled. Use an exact background window.".into());
                 }
                 if key == "pid" && value.as_u64() == Some(std::process::id() as u64) {
-                    return Err("Use Scratch document tools for this editor, not computer input.".into());
+                    return Err("Use ChatGSD's document tools for this editor, not computer input.".into());
                 }
                 if key == "urls" {
                     let urls = value.as_array().ok_or("App URLs must be an array")?;

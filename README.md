@@ -8,7 +8,7 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 
-[Releases](https://github.com/mickr/scratch/releases)
+[Releases](https://github.com/mickr/chatgsd/releases)
 
 ## Features
 
@@ -39,7 +39,7 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 
 ### macOS (Apple Silicon)
 
-1. Download the latest `.dmg` from [Releases](https://github.com/mickr/scratch/releases)
+1. Download the latest `.dmg` from [Releases](https://github.com/mickr/chatgsd/releases)
 2. Open the DMG and drag ChatGSD to Applications
 3. Open ChatGSD from Applications. It updates itself from then on
 
@@ -50,8 +50,8 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 **macOS:** Xcode Command Line Tools
 
 ```bash
-git clone https://github.com/mickr/scratch.git
-cd scratch
+git clone https://github.com/mickr/chatgsd.git
+cd chatgsd
 npm install
 npm run tauri dev      # Development
 npm run tauri build    # Production build
@@ -148,7 +148,7 @@ Many more shortcuts and features are available in the app—explore via the comm
 
 ## Contributing
 
-Issues and pull requests are welcome at [mickr/scratch](https://github.com/mickr/scratch). Keep pull requests small and focused.
+Issues and pull requests are welcome at [mickr/chatgsd](https://github.com/mickr/chatgsd). Keep pull requests small and focused.
 
 ## License
 

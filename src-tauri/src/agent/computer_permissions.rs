@@ -4,11 +4,11 @@ pub fn agent_computer_permissions() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         macos::request()?;
-        Ok("Allow Scratch in System Settings → Privacy & Security → Accessibility and Screen Recording, then fully quit and reopen Scratch. Cua Driver 0.38 or later must be installed.".into())
+        Ok("Allow ChatGSD in System Settings → Privacy & Security → Accessibility and Screen Recording, then fully quit and reopen ChatGSD. Cua Driver 0.38 or later must be installed.".into())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok("Install Cua Driver 0.38 or later and run Scratch in your interactive desktop session. Computer use only supports background interactions.".into())
+        Ok("Install Cua Driver 0.38 or later and run ChatGSD in your interactive desktop session. Computer use only supports background interactions.".into())
     }
 }
 

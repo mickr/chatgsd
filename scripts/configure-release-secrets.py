@@ -16,7 +16,7 @@ import secrets
 import subprocess
 import tempfile
 
-REPO = "mickr/scratch"
+REPO = "mickr/chatgsd"
 ENVIRONMENT = "release"
 TEAM_ID = "M9G92WURV3"  # Must match APPLE_TEAM_ID in .github/workflows/release.yml.
 OPENSSL = "/usr/bin/openssl"
