@@ -53,9 +53,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Tags the commit here, while it's known to be main's tip: GitHub won't
-      # let the job token tag a commit whose workflow files differ from main's,
-      # so a tag created later would fail whenever a push lands mid-build.
+      # Tags the commit here, while it's known to be main's tip. GitHub refuses
+      # the job token any tag or release whose target commit has workflow files
+      # that differ from main's, which a push landing mid-build would cause.
       - id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -128,7 +128,8 @@ jobs:
 
       # Builds, signs, notarizes and staples the app, signs the updater bundle,
       # and uploads everything to a draft release with latest.json for the tag
-      # the plan created.
+      # the plan created. The release stays on that tag's commit; naming main as
+      # its commitish only keeps GitHub's workflow-file check passing.
       - name: Build and upload
         uses: tauri-apps/tauri-action@v0
         env:
@@ -141,7 +142,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Scratch v__VERSION__"
-          releaseCommitish: ${{ needs.plan.outputs.commit }}
+          releaseCommitish: main
           releaseBody: |
             ${{ needs.plan.outputs.notes }}
 
@@ -178,14 +179,7 @@ jobs:
         if: failure() || cancelled()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          draft=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2> /dev/null || echo missing)
-          if [ "$draft" = false ]; then
-            echo "v$VERSION is published; leaving it."
-            exit 0
-          fi
-          [ "$draft" = missing ] || gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION"
+        run: scripts/withdraw-release.sh "v$VERSION"
 
       - name: Remove signing identity
         if: always()
