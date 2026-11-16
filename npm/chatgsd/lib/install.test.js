@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { APP_NAME, install, isNewer } from "./install.js";
+import { APP_NAME, install, isNewer, swapIn } from "./install.js";
 
 const cleanup = [];
 
@@ -41,5 +41,27 @@ describe("install", () => {
 
     expect(readFileSync(join(folder, APP_NAME, "current"), "utf8")).toBe("1.1.6");
     expect(existsSync(join(folder, `${APP_NAME}.installing`))).toBe(false);
+  });
+});
+
+describe("swapIn", () => {
+  it("puts the current app back when the new one can't be moved into place", () => {
+    const folder = mkdtempSync(join(tmpdir(), "chatgsd-swap-"));
+    cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+    const target = join(folder, APP_NAME);
+    const incoming = `${target}.installing`;
+    mkdirSync(target);
+    writeFileSync(join(target, "current"), "1.1.6");
+    mkdirSync(incoming);
+    let moves = 0;
+    const failSecondMove = (from, to) => {
+      if (++moves === 2) throw new Error("rename failed");
+      renameSync(from, to);
+    };
+
+    expect(() => swapIn(incoming, target, failSecondMove)).toThrow("rename failed");
+
+    expect(readFileSync(join(target, "current"), "utf8")).toBe("1.1.6");
+    expect(existsSync(`${target}.replaced`)).toBe(false);
   });
 });

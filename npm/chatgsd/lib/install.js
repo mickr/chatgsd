@@ -79,7 +79,6 @@ export async function install(release, folder, base = RELEASES) {
   const mount = join(work, "mount");
   const target = join(folder, APP_NAME);
   const incoming = `${target}.installing`;
-  const outgoing = `${target}.replaced`;
   let mounted = false;
   try {
     const dmg = join(work, release.dmg);
@@ -90,13 +89,32 @@ export async function install(release, folder, base = RELEASES) {
     rmSync(incoming, { recursive: true, force: true });
     run("ditto", [join(mount, APP_NAME), incoming]);
     verifySignature(incoming);
-    if (existsSync(target)) renameSync(target, outgoing);
-    renameSync(incoming, target);
-    rmSync(outgoing, { recursive: true, force: true });
+    swapIn(incoming, target);
     return target;
   } finally {
     if (mounted) spawnSync("hdiutil", ["detach", "-quiet", mount]);
     rmSync(incoming, { recursive: true, force: true });
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+/**
+ * Moves the verified `incoming` app to `target`. Any app already there is set
+ * aside first and put back if the move fails, so a failure never leaves the
+ * user without ChatGSD.
+ */
+export function swapIn(incoming, target, rename = renameSync) {
+  const outgoing = `${target}.replaced`;
+  // A run killed between the two moves left the user's app set aside.
+  if (!existsSync(target) && existsSync(outgoing)) rename(outgoing, target);
+  rmSync(outgoing, { recursive: true, force: true });
+  const replacing = existsSync(target);
+  if (replacing) rename(target, outgoing);
+  try {
+    rename(incoming, target);
+  } catch (error) {
+    if (replacing) rename(outgoing, target);
+    throw error;
+  }
+  rmSync(outgoing, { recursive: true, force: true });
 }
