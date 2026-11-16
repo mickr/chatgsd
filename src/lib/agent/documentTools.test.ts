@@ -4,6 +4,15 @@ import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TableKit } from "@tiptap/extension-table";
+import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
+import Link from "@tiptap/extension-link";
+import Image from "@tiptap/extension-image";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
+import { Frontmatter } from "../../components/editor/Frontmatter";
+import { Wikilink } from "../../components/editor/Wikilink";
+import { ScratchBlockMath } from "../../components/editor/MathExtensions";
+import { lowlight } from "../../components/editor/lowlight";
 import {
   AgentChanges,
   ScratchDocument,
@@ -20,10 +29,26 @@ import {
 
 const editors: Editor[] = [];
 
+/** The markdown-relevant extensions of the app's editor (Editor.tsx), so
+ * parsing here matches parsing there, custom tokenizers included. */
 function openNote(markdown: string): Editor {
   const editor = new Editor({
     element: document.createElement("div"),
-    extensions: [StarterKit, TableKit, Markdown, ScratchDocument, AgentChanges],
+    extensions: [
+      ScratchDocument,
+      AgentChanges,
+      StarterKit.configure({ codeBlock: false }),
+      CodeBlockLowlight.configure({ lowlight, defaultLanguage: null }),
+      Link.configure({ openOnClick: false }),
+      Image.configure({ inline: false, allowBase64: false }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      TableKit,
+      Frontmatter,
+      Markdown,
+      Wikilink,
+      ScratchBlockMath,
+    ],
   });
   editor.commands.setContent(editor.storage.markdown.manager.parse(markdown));
   Object.assign(editor.storage.scratchDocument, {
@@ -220,7 +245,7 @@ describe("editedDocuments", () => {
       const [local] = editedDocuments(editor, markdown, [
         { old_text: oldText, new_text: newText },
       ]);
-      const full = parseDocument(editor, markdown.replace(oldText, newText));
+      const full = parseDocument(editor, markdown.replace(oldText, () => newText));
       expect(local.toJSON(), `${oldText} → ${newText}`).toEqual(full.toJSON());
     }
   });
@@ -238,7 +263,7 @@ describe("editedDocuments", () => {
     let expected = markdown;
     const documents = editedDocuments(editor, markdown, batch);
     batch.forEach((edit, index) => {
-      expected = expected.replace(edit.old_text, edit.new_text);
+      expected = expected.replace(edit.old_text, () => edit.new_text);
       expect(documents[index].toJSON()).toEqual(
         parseDocument(editor, expected).toJSON(),
       );
@@ -255,7 +280,8 @@ describe("editedDocuments", () => {
     const documents = editedDocuments(editor, markdown, edits);
     let expected = markdown;
     edits.forEach((edit, index) => {
-      expected = expected.replace(edit.old_text, edit.new_text);
+      // A replacer function keeps `$$` in new_text literal.
+      expected = expected.replace(edit.old_text, () => edit.new_text);
       expect(documents[index].toJSON(), `after edit ${index + 1}`).toEqual(
         parseDocument(editor, expected).toJSON(),
       );
@@ -286,6 +312,26 @@ describe("editedDocuments", () => {
   it("notices a link reference completed by a partial replacement", () => {
     sequential("See [docs].\n\nMiddle\n\nMore\n\n[docs] PENDING\n", [
       ["] PENDING", "]: https://example.com"],
+    ]);
+  });
+
+  // Block math pairs `$$` with the next `$$` anywhere below, unless a single
+  // `$` sits between them, so the closer can be far outside any window.
+  it("pairs a new block math opener with a distant closer", () => {
+    sequential("Alpha\n\nBravo\n\nCharlie\n\nDelta\n\n$$\n\nFoxtrot\n", [
+      ["Bravo", "$$\nBravo"],
+    ]);
+  });
+
+  it("re-pairs block math when a dollar sign between delimiters goes", () => {
+    sequential("$$\n\nPrice $180\n\nMiddle\n\nMore\n\nLater\n\n$$\n\nEnd\n", [
+      ["$180", "180"],
+    ]);
+  });
+
+  it("keeps a horizontal rule mid-note from becoming frontmatter", () => {
+    sequential("Intro\n\nOne\n\nTwo\n\n---\n\ntitle: x\n\n---\n\nEnd\n", [
+      ["title: x", "title: y"],
     ]);
   });
 });

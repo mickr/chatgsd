@@ -199,9 +199,10 @@ const PARSE_SENTINEL = "scratch-local-parse-boundary-5e1f9c";
  * tracked diff stays local too.
  *
  * Returns null when the edit can change how text outside that window parses:
- * a construct left open at the window's end (a fence, an HTML comment, block
- * math) runs on through the rest of the note, and a link reference definition
- * applies note-wide. The caller then parses the whole note.
+ * a construct left open at the window's end (a fence, an HTML comment) runs on
+ * through the rest of the note, block math pairs `$$` delimiters across any
+ * distance, a link reference definition applies note-wide, and frontmatter is
+ * only frontmatter at the very top. The caller then parses the whole note.
  */
 function editBlocks(
   editor: Editor,
@@ -226,6 +227,15 @@ function editBlocks(
   // that reads as one now was made by this edit, perhaps only partly by its text.
   if (REFERENCE_DEFINITION.test(next)) return null;
   const source = next.slice(from, to);
+  // Block math pairs `$$` with the next `$$` anywhere below it, and a single
+  // `$` between them stops it. In a note with any `$$`, a `$` changing inside
+  // the window can re-pair delimiters outside it, and the sentinel can't tell:
+  // an opener without its closer is plain text inside the window.
+  if (
+    (markdown.includes("$$") || next.includes("$$")) &&
+    (markdown.slice(from, to - delta).includes("$") || source.includes("$"))
+  )
+    return null;
   // Anything still open at the window's end swallows a following paragraph;
   // a closed window leaves it as its own last block.
   const nodes: ProseMirrorNode[] = [];
@@ -237,6 +247,10 @@ function editBlocks(
     sentinel?.type.name !== "paragraph" ||
     sentinel.textContent !== PARSE_SENTINEL
   )
+    return null;
+  // Frontmatter only parses as the note's first block, but every window parses
+  // as if it started the note.
+  if (from > 0 && nodes.some((node) => node.type.name === "frontmatter"))
     return null;
   const count = (list: Segment[]) =>
     list.reduce((sum, segment) => sum + segment.count, 0);
