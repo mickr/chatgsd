@@ -244,4 +244,42 @@ describe("editedDocuments", () => {
       );
     });
   });
+
+  // A construct left open (a fence, an HTML comment) runs past any local
+  // window, so these edits must give exactly what a full parse gives.
+  const PARAGRAPHS = "Alpha\n\nBravo\n\nCharlie\n\nDelta\n\nEcho\n\nFoxtrot\n";
+  const sequential = (note: string, batch: Array<[string, string]>) => {
+    const editor = openNote(note);
+    const markdown = serializeDocument(editor);
+    const edits = batch.map(([old_text, new_text]) => ({ old_text, new_text }));
+    const documents = editedDocuments(editor, markdown, edits);
+    let expected = markdown;
+    edits.forEach((edit, index) => {
+      expected = expected.replace(edit.old_text, edit.new_text);
+      expect(documents[index].toJSON(), `after edit ${index + 1}`).toEqual(
+        parseDocument(editor, expected).toJSON(),
+      );
+    });
+  };
+
+  it("opens a fence that runs to the end of the note, then closes it later", () => {
+    sequential(PARAGRAPHS, [
+      ["Bravo", "```text\nBravo"],
+      ["Echo", "Echo\n```"],
+    ]);
+  });
+
+  it("closes an existing code block early", () => {
+    sequential("Intro\n\n```\nline one\n\nline two\n```\n\nAfter\n\nEnd\n", [
+      ["line one", "line one\n```"],
+    ]);
+  });
+
+  it("opens an HTML comment that swallows later blocks", () => {
+    sequential(PARAGRAPHS, [["Bravo", "<!-- Bravo"]]);
+  });
+
+  it("adds a link reference that later blocks use", () => {
+    sequential("See [docs].\n\nMiddle\n\nMore\n\nEnd\n", [["End", "End\n\n[docs]: https://example.com"]]);
+  });
 });

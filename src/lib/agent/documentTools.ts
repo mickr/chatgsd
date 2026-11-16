@@ -189,11 +189,19 @@ function indexBlocks(
   return markdown.slice(cursor).trim() ? null : segments;
 }
 
+/** A paragraph no note contains, used to see whether a parse left anything open. */
+const PARSE_SENTINEL = "scratch-local-parse-boundary-5e1f9c";
+
 /**
  * Applies one located edit by re-parsing only the blocks it touches plus one
  * neighbour on each side, which catches merges such as a paragraph becoming
  * part of an adjacent list. Untouched blocks keep their node identity, so the
  * tracked diff stays local too.
+ *
+ * Returns null when the edit can change how text outside that window parses:
+ * a construct left open at the window's end (a fence, an HTML comment, block
+ * math) runs on through the rest of the note, and a link reference definition
+ * applies note-wide. The caller then parses the whole note.
  */
 function editBlocks(
   editor: Editor,
@@ -202,6 +210,7 @@ function editBlocks(
   markdown: string,
   edit: LocatedEdit,
 ) {
+  if (REFERENCE_DEFINITION.test(edit.text)) return null;
   const delta = edit.text.length - (edit.end - edit.start);
   let low = segments.findIndex((segment) => segment.end > edit.start);
   if (low < 0) low = segments.length - 1;
@@ -215,9 +224,18 @@ function editBlocks(
   const next =
     markdown.slice(0, edit.start) + edit.text + markdown.slice(edit.end);
   const source = next.slice(from, to);
+  // Anything still open at the window's end swallows a following paragraph;
+  // a closed window leaves it as its own last block.
   const nodes: ProseMirrorNode[] = [];
-  if (source.trim())
-    parseDocument(editor, source).forEach((node) => nodes.push(node));
+  parseDocument(editor, `${source}\n\n${PARSE_SENTINEL}\n`).forEach((node) =>
+    nodes.push(node),
+  );
+  const sentinel = nodes.pop();
+  if (
+    sentinel?.type.name !== "paragraph" ||
+    sentinel.textContent !== PARSE_SENTINEL
+  )
+    return null;
   const count = (list: Segment[]) =>
     list.reduce((sum, segment) => sum + segment.count, 0);
   const children: ProseMirrorNode[] = [];
@@ -250,8 +268,9 @@ function editBlocks(
 
 /**
  * The document after each edit in turn. Long notes are re-parsed only around
- * each edit; if the block index can't be built exactly, the whole note is
- * parsed per edit, which is always correct but slow on long notes.
+ * each edit. When the block index can't be built exactly, or an edit could
+ * change parsing beyond its window, the whole note is parsed from then on,
+ * which is always correct but slow on long notes.
  */
 export function editedDocuments(
   editor: Editor,
@@ -263,10 +282,12 @@ export function editedDocuments(
   let segments = indexBlocks(editor, doc, markdown);
   const documents: ProseMirrorNode[] = [];
   for (const edit of located) {
-    if (segments) {
-      const next = editBlocks(editor, doc, segments, markdown, edit);
-      ({ doc, segments, markdown } = next);
+    const local = segments && editBlocks(editor, doc, segments, markdown, edit);
+    if (local) {
+      ({ doc, segments, markdown } = local);
     } else {
+      // The index no longer describes the text, so later edits parse fully too.
+      segments = null;
       markdown =
         markdown.slice(0, edit.start) + edit.text + markdown.slice(edit.end);
       doc = parseDocument(editor, markdown);
