@@ -1,8 +1,12 @@
 mod bridge;
 pub mod chatgpt;
+pub mod conversations;
 pub mod events;
+pub mod note_edits;
 pub mod prompt;
+mod reading;
 pub mod tools;
+mod workspace;
 use events::{emit, AgentEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,6 +21,8 @@ pub struct RunContext {
     pub note_title: String,
     pub selection: Option<String>,
     pub notes_folder: PathBuf,
+    /// Scratch UI block guide from the frontend, generated from its component catalog.
+    pub ui_guide: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +72,7 @@ pub struct RequestContext {
 #[serde(rename_all = "camelCase")]
 pub struct StartRunRequest {
     model: Option<String>,
+    ui_guide: String,
     session_id: Option<String>,
     prompt: String,
     context: RequestContext,
@@ -102,6 +109,20 @@ pub async fn agent_status(app: tauri::AppHandle) -> AgentStatus {
 pub async fn agent_list_models(app: tauri::AppHandle) -> Result<Vec<ModelInfo>, String> {
     chatgpt::list_models(&app).await
 }
+/// The configured notes folder, canonicalized.
+pub(crate) async fn notes_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let folder = app
+        .state::<crate::AppState>()
+        .app_config
+        .read()
+        .expect("app config lock")
+        .notes_folder
+        .clone()
+        .ok_or("Choose a notes folder first")?;
+    tokio::fs::canonicalize(folder)
+        .await
+        .map_err(|e| format!("Cannot open notes folder: {e}"))
+}
 #[tauri::command]
 pub async fn agent_start_run(
     app: tauri::AppHandle,
@@ -111,17 +132,7 @@ pub async fn agent_start_run(
     if request.prompt.trim().is_empty() {
         return Err("Enter a message first".into());
     }
-    let folder = app
-        .state::<crate::AppState>()
-        .app_config
-        .read()
-        .expect("app config lock")
-        .notes_folder
-        .clone()
-        .ok_or("Choose a notes folder first")?;
-    let notes_folder = tokio::fs::canonicalize(folder)
-        .await
-        .map_err(|e| format!("Cannot open notes folder: {e}"))?;
+    let notes_folder = notes_folder(&app).await?;
     crate::abs_path_from_id(&notes_folder, &request.context.note_id)?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let ctx = RunContext {
@@ -129,6 +140,7 @@ pub async fn agent_start_run(
         note_id: request.context.note_id,
         note_title: request.context.note_title,
         selection: request.context.selection,
+        ui_guide: request.ui_guide,
         notes_folder,
     };
     let task_ctx = ctx.clone();

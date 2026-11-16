@@ -15,6 +15,10 @@ import { useNotes } from "./NotesContext";
 import * as agent from "../services/agent";
 import * as notes from "../services/notes";
 import type { Settings } from "../types/note";
+import type { Spec } from "@json-render/core";
+import { uiGuide } from "../lib/agent/ui/catalog";
+import { renderableSpec } from "../lib/agent/ui/content";
+import { clipPreview } from "../lib/agent/selection";
 import {
   captureRunBinding,
   releaseRunBinding,
@@ -23,7 +27,14 @@ import {
 } from "../lib/agent/documentTools";
 
 export type TranscriptItem =
-  | { id: string; type: "user" | "text"; text: string }
+  | { id: string; type: "text"; text: string }
+  | {
+      id: string;
+      type: "user";
+      text: string;
+      /** The opening of the selection the message was sent with. */
+      selection?: string;
+    }
   | {
       id: string;
       type: "tool";
@@ -31,7 +42,115 @@ export type TranscriptItem =
       input: unknown;
       ok?: boolean;
       output?: string;
+    }
+  | {
+      id: string;
+      type: "question";
+      runId: string;
+      requestId: string;
+      question: string;
+      options: string[];
+      form: Spec | null;
+      answer: string | null;
+    }
+  | {
+      id: string;
+      type: "note_edit";
+      runId: string;
+      requestId: string;
+      noteId: string;
+      title: string;
+      summary: string;
+      edits: NoteEdit[];
+      preview: NoteEditPreview[];
+      status: "pending" | "applying" | "applied" | "declined" | "failed";
+      /** The decline feedback or the save error. */
+      message: string | null;
     };
+export type QuestionItem = Extract<TranscriptItem, { type: "question" }>;
+export type NoteEditItem = Extract<TranscriptItem, { type: "note_edit" }>;
+export interface NoteEdit {
+  old_text: string;
+  new_text: string;
+}
+/** One edit as reviewed: the replaced text with the rest of its line. */
+export interface NoteEditPreview {
+  before: string;
+  removed: string;
+  added: string;
+  after: string;
+}
+export type NoteEditDecision =
+  | { approve: true }
+  | { approve: false; feedback?: string };
+/** A form submission (the bound answers object) or a typed/picked answer. */
+export type QuestionAnswer = string | Record<string, unknown>;
+
+const MAX_QUESTION_OPTIONS = 6;
+
+function parseQuestion(args: unknown) {
+  const input =
+    args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const question =
+    typeof input.question === "string" ? input.question.trim() : "";
+  const options = Array.isArray(input.options)
+    ? input.options
+        .filter(
+          (option): option is string =>
+            typeof option === "string" && option.trim() !== "",
+        )
+        .slice(0, MAX_QUESTION_OPTIONS)
+    : [];
+  return { question, options, form: renderableSpec(input.form) };
+}
+
+const isString = (value: unknown): value is string => typeof value === "string";
+const hasStrings = (value: unknown, keys: string[]) =>
+  !!value &&
+  typeof value === "object" &&
+  keys.every((key) => isString((value as Record<string, unknown>)[key]));
+
+/** An edit_note request from the backend, or null if it's malformed. */
+function parseNoteEdit(args: unknown) {
+  const input =
+    args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const { id, title, summary, edits, preview } = input;
+  if (
+    !isString(id) ||
+    !isString(title) ||
+    !isString(summary) ||
+    !Array.isArray(edits) ||
+    !Array.isArray(preview) ||
+    !edits.every((edit) => hasStrings(edit, ["old_text", "new_text"])) ||
+    !preview.every((hunk) =>
+      hasStrings(hunk, ["before", "removed", "added", "after"]),
+    )
+  )
+    return null;
+  return {
+    noteId: id,
+    title,
+    summary,
+    edits: edits as NoteEdit[],
+    preview: preview as NoteEditPreview[],
+  };
+}
+
+/** Tools that show as their own card instead of a tool row. */
+const CARD_TOOLS = new Set(["ask_user", "edit_note"]);
+
+function describeAnswer(answer: QuestionAnswer) {
+  if (typeof answer === "string")
+    return { display: answer, output: `The user answered: ${answer}` };
+  const display = Object.values(answer)
+    .map((value) => (Array.isArray(value) ? value.join(", ") : String(value)))
+    .filter((value) => value && value !== "null")
+    .join(" · ");
+  return {
+    display: display || "Sent",
+    output: `The user submitted the form. Answers: ${JSON.stringify(answer)}`,
+  };
+}
 export interface Conversation {
   items: TranscriptItem[];
   sessionId: string | null;
@@ -48,6 +167,18 @@ const emptyConversation = (): Conversation => ({
   error: null,
   cancelled: false,
 });
+const TRANSCRIPT_TYPES = new Set(["user", "text", "tool", "question", "note_edit"]);
+/** A saved transcript, keeping only items this version knows how to show. */
+function parseTranscript(value: unknown): TranscriptItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is TranscriptItem =>
+      !!item &&
+      typeof item === "object" &&
+      typeof item.id === "string" &&
+      TRANSCRIPT_TYPES.has(item.type),
+  );
+}
 interface ActiveRun {
   binding: RunBinding;
   noteId: string;
@@ -70,10 +201,19 @@ export interface AgentContextValue {
   statusLoading: boolean;
   statusError: string | null;
   refreshStatus: () => Promise<void>;
+  /** The current note's unanswered ask_user question while its run is active. */
+  pendingQuestion: QuestionItem | null;
+  answerQuestion: (answer: QuestionAnswer) => Promise<void>;
+  /** The current note's proposed edit to another note, while its run waits. */
+  pendingEdit: NoteEditItem | null;
+  reviewNoteEdit: (decision: NoteEditDecision) => Promise<void>;
   conversation: Conversation;
   send: (prompt: string) => Promise<boolean>;
   stop: () => Promise<void>;
   newConversation: () => void;
+  /** The current note's saved conversations, most recent first. */
+  history: agent.ConversationSummary[];
+  openConversation: (sessionId: string) => Promise<void>;
   signingIn: boolean;
   signIn: () => Promise<void>;
   cancelSignIn: () => Promise<void>;
@@ -132,6 +272,29 @@ export function AgentProvider({
     },
     [],
   );
+  const [history, setHistory] = useState<agent.ConversationSummary[]>([]);
+  // The note whose history is showing; late list responses for other notes are dropped.
+  const historyNote = useRef<string | null>(null);
+  const refreshHistory = useCallback(async (noteId: string) => {
+    const list = await agent.listConversations(noteId);
+    if (historyNote.current === noteId) setHistory(list);
+    return list;
+  }, []);
+  const saveConversation = useCallback(
+    (noteId: string) => {
+      const conversation = conversationsRef.current[noteId];
+      if (!conversation?.sessionId || !conversation.items.length) return;
+      agent
+        .saveConversation(noteId, conversation.sessionId, conversation.items)
+        .then(() => refreshHistory(noteId))
+        .catch((error) =>
+          toast.error(
+            `Couldn't save this conversation: ${agent.errorMessage(error)}`,
+          ),
+        );
+    },
+    [refreshHistory],
+  );
   const persist = useCallback((patch: Partial<Settings>) => {
     const folder = folderRef.current;
     persistQueue.current = persistQueue.current
@@ -167,6 +330,7 @@ export function AgentProvider({
     setSavedModel(null);
     updateWidth(PANEL_DEFAULT);
     conversationsRef.current = {};
+    setHistory([]);
     setConversations({});
     for (const [runId, run] of runs.current) {
       releaseRunBinding(editorRef.current, run.binding);
@@ -288,7 +452,8 @@ export function AgentProvider({
             });
           return { ...conversation, items };
         }
-        if (event.type === "tool_call")
+        // Questions and note edit proposals show as cards, not tool rows.
+        if (event.type === "tool_call" && !CARD_TOOLS.has(event.name))
           return {
             ...conversation,
             items: [
@@ -301,6 +466,7 @@ export function AgentProvider({
               },
             ],
           };
+        if (event.type === "tool_call") return conversation;
         if (event.type === "tool_result")
           return {
             ...conversation,
@@ -326,11 +492,12 @@ export function AgentProvider({
       if (event.type === "done" || event.type === "error") {
         releaseRunBinding(editorRef.current, run.binding);
         runs.current.delete(payload.runId);
+        saveConversation(run.noteId);
         if (event.type === "error" && event.kind === "auth")
           void refreshStatus();
       }
     },
-    [editorRef, refreshStatus, updateConversation],
+    [editorRef, refreshStatus, saveConversation, updateConversation],
   );
   const processTool = useCallback(
     async (request: agent.ToolRequest) => {
@@ -338,6 +505,60 @@ export function AgentProvider({
       if (!run) {
         if ([...runs.current.keys()].some((id) => id.startsWith("pending:")))
           buffered.current.push(request);
+        return;
+      }
+      if (request.name === "edit_note") {
+        const proposal = parseNoteEdit(request.args);
+        if (!proposal) {
+          await agent
+            .toolRespond(request.requestId, false, "The edit proposal was malformed")
+            .catch(() => {});
+          return;
+        }
+        updateConversation(run.noteId, (conversation) => ({
+          ...conversation,
+          items: [
+            ...conversation.items,
+            {
+              id: request.requestId,
+              type: "note_edit",
+              runId: request.runId,
+              requestId: request.requestId,
+              ...proposal,
+              status: "pending",
+              message: null,
+            },
+          ],
+        }));
+        saveConversation(run.noteId);
+        return;
+      }
+      if (request.name === "ask_user") {
+        const { question, options, form } = parseQuestion(request.args);
+        if (!question) {
+          await agent
+            .toolRespond(request.requestId, false, "question must be a nonempty string")
+            .catch(() => {});
+          return;
+        }
+        updateConversation(run.noteId, (conversation) => ({
+          ...conversation,
+          items: [
+            ...conversation.items,
+            {
+              id: request.requestId,
+              type: "question",
+              runId: request.runId,
+              requestId: request.requestId,
+              question,
+              options,
+              form,
+              answer: null,
+            },
+          ],
+        }));
+        // The run may wait here for a long time; keep the question if the app closes.
+        saveConversation(run.noteId);
         return;
       }
       let result: { ok: boolean; output: string };
@@ -362,7 +583,7 @@ export function AgentProvider({
         toast.error(`Couldn't answer the agent: ${agent.errorMessage(error)}`);
       }
     },
-    [editorRef],
+    [editorRef, saveConversation, updateConversation],
   );
   useEffect(() => {
     let disposed = false;
@@ -427,7 +648,14 @@ export function AgentProvider({
         cancelled: false,
         items: [
           ...conversation.items,
-          { id: crypto.randomUUID(), type: "user", text: prompt.trim() },
+          {
+            id: crypto.randomUUID(),
+            type: "user",
+            text: prompt.trim(),
+            ...(binding.selectionMarkdown && {
+              selection: clipPreview(binding.selectionMarkdown).markdown,
+            }),
+          },
         ],
       }));
       try {
@@ -435,6 +663,7 @@ export function AgentProvider({
         if (runs.current.get(temporaryId) !== run) return false;
         const { runId } = await agent.startRun({
           model: model || null,
+          uiGuide,
           sessionId,
           prompt: prompt.trim(),
           context,
@@ -528,6 +757,60 @@ export function AgentProvider({
     if (currentNote && !conversationsRef.current[currentNote.id]?.runId)
       updateConversation(currentNote.id, emptyConversation);
   }, [currentNote, updateConversation]);
+  const currentNoteId = currentNote?.id ?? null;
+  const openConversation = useCallback(
+    async (sessionId: string) => {
+      const noteId = currentNoteId;
+      if (!noteId || conversationsRef.current[noteId]?.runId) return;
+      try {
+        const items = parseTranscript(
+          await agent.loadConversation(noteId, sessionId),
+        );
+        if (conversationsRef.current[noteId]?.runId) return;
+        updateConversation(noteId, () => ({
+          ...emptyConversation(),
+          sessionId,
+          items,
+        }));
+      } catch (error) {
+        toast.error(
+          `Couldn't open that conversation: ${agent.errorMessage(error)}`,
+        );
+      }
+    },
+    [currentNoteId, updateConversation],
+  );
+  // Opening the panel on a note lists its conversations and, the first time,
+  // picks up the most recent one where it left off.
+  useEffect(() => {
+    historyNote.current = open ? currentNoteId : null;
+    setHistory([]);
+    if (!open || !currentNoteId) return;
+    const noteId = currentNoteId;
+    let active = true;
+    refreshHistory(noteId)
+      .then(async (list) => {
+        if (!active || conversationsRef.current[noteId] || !list.length) return;
+        const items = parseTranscript(
+          await agent.loadConversation(noteId, list[0].id),
+        );
+        if (!active || conversationsRef.current[noteId]) return;
+        updateConversation(noteId, () => ({
+          ...emptyConversation(),
+          sessionId: list[0].id,
+          items,
+        }));
+      })
+      .catch((error) => {
+        if (active)
+          toast.error(
+            `Couldn't load this note's conversations: ${agent.errorMessage(error)}`,
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [open, currentNoteId, notesFolder, refreshHistory, updateConversation]);
   const signIn = useCallback(async () => {
     setSigningIn(true);
     try {
@@ -565,6 +848,92 @@ export function AgentProvider({
   const conversation = currentNote
     ? (conversations[currentNote.id] ?? emptyConversation())
     : emptyConversation();
+  // Only the active run's card can take a decision: a stopped run leaves its
+  // unanswered question or proposal in history, where nothing waits on it.
+  const { pendingQuestion, pendingEdit } = useMemo(() => {
+    let question: QuestionItem | null = null;
+    let edit: NoteEditItem | null = null;
+    if (conversation.runId)
+      for (const item of conversation.items) {
+        if (item.type === "question" && item.runId === conversation.runId)
+          question = item.answer === null ? item : null;
+        if (item.type === "note_edit" && item.runId === conversation.runId)
+          edit = item.status === "pending" ? item : null;
+      }
+    return { pendingQuestion: question, pendingEdit: edit };
+  }, [conversation]);
+  const answerQuestion = useCallback(
+    async (answer: QuestionAnswer) => {
+      if (!pendingQuestion || !runs.current.has(pendingQuestion.runId)) return;
+      const run = runs.current.get(pendingQuestion.runId)!;
+      const { display, output } = describeAnswer(answer);
+      try {
+        await agent.toolRespond(pendingQuestion.requestId, true, output);
+      } catch (error) {
+        toast.error(`Couldn't send your answer: ${agent.errorMessage(error)}`);
+        return;
+      }
+      updateConversation(run.noteId, (current) => ({
+        ...current,
+        items: current.items.map((item) =>
+          item.id === pendingQuestion.id && item.type === "question"
+            ? { ...item, answer: display }
+            : item,
+        ),
+      }));
+    },
+    [pendingQuestion, updateConversation],
+  );
+  const reviewNoteEdit = useCallback(
+    async (decision: NoteEditDecision) => {
+      const item = pendingEdit;
+      const run = item && runs.current.get(item.runId);
+      if (!item || !run) return;
+      const update = (patch: Partial<NoteEditItem>) =>
+        updateConversation(run.noteId, (current) => ({
+          ...current,
+          items: current.items.map((entry) =>
+            entry.id === item.id && entry.type === "note_edit"
+              ? { ...entry, ...patch }
+              : entry,
+          ),
+        }));
+      let result: { ok: boolean; output: string };
+      if (decision.approve) {
+        update({ status: "applying" });
+        try {
+          await agent.applyNoteEdit(item.noteId, item.edits);
+          update({ status: "applied", message: null });
+          result = {
+            ok: true,
+            output: `The user approved, and the edit to "${item.title}" is saved.`,
+          };
+        } catch (error) {
+          const message = agent.errorMessage(error);
+          update({ status: "failed", message });
+          result = {
+            ok: false,
+            output: `The user approved, but the edit couldn't be saved: ${message}`,
+          };
+        }
+      } else {
+        const feedback = decision.feedback?.trim() || null;
+        update({ status: "declined", message: feedback });
+        result = {
+          ok: false,
+          output: feedback
+            ? `The user declined this edit and said: ${feedback}`
+            : "The user declined this edit.",
+        };
+      }
+      try {
+        await agent.toolRespond(item.requestId, result.ok, result.output);
+      } catch (error) {
+        toast.error(`Couldn't tell ChatGPT: ${agent.errorMessage(error)}`);
+      }
+    },
+    [pendingEdit, updateConversation],
+  );
   const value = useMemo<AgentContextValue>(
     () => ({
       open,
@@ -583,10 +952,16 @@ export function AgentProvider({
       statusLoading,
       statusError,
       refreshStatus,
+      pendingQuestion,
+      answerQuestion,
+      pendingEdit,
+      reviewNoteEdit,
       conversation,
       send,
       stop,
       newConversation,
+      history,
+      openConversation,
       signingIn,
       signIn,
       cancelSignIn,
@@ -611,10 +986,16 @@ export function AgentProvider({
       statusLoading,
       statusError,
       refreshStatus,
+      pendingQuestion,
+      answerQuestion,
+      pendingEdit,
+      reviewNoteEdit,
       conversation,
       send,
       stop,
       newConversation,
+      history,
+      openConversation,
       signingIn,
       signIn,
       cancelSignIn,

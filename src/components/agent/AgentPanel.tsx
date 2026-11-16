@@ -1,17 +1,40 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useMemo,
+  useState,
+} from "react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   useAgent,
   PANEL_DEFAULT,
   PANEL_MAX,
   PANEL_MIN,
   clampPanelWidth,
+  type QuestionAnswer,
   type TranscriptItem,
 } from "../../context/AgentContext";
 import { useNotes } from "../../context/NotesContext";
-import { useAgentChanges } from "../editor/AgentChanges";
+import {
+  activeFocusRange,
+  attachedRange,
+  detachSelection,
+  scrollPositionIntoView,
+  useAgentChanges,
+} from "../editor/AgentChanges";
+import {
+  summarizeMarkdown,
+  summarizeRange,
+  type SelectionSummary,
+} from "../../lib/agent/selection";
 import {
   AgentIcon,
   ChatGPTIcon,
+  CheckIcon,
+  HistoryIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   PlusIcon,
@@ -19,14 +42,26 @@ import {
   XIcon,
 } from "../icons";
 import { IconButton, Tooltip } from "../ui";
+import { formatDate } from "../../lib/utils";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "./ChatGPTAccount";
+import { AgentQuestion } from "./AgentQuestion";
+import { NoteEditCard } from "./NoteEditCard";
+import { OpenNoteContext } from "./ui/registry";
+import { SelectionCard, SelectionQuote } from "./SelectionCard";
+/** " (lines 120–260)" for a ranged read, otherwise nothing. */
+function lineRange(input: Record<string, unknown>) {
+  const start = typeof input.start_line === "number" ? input.start_line : null;
+  const end = typeof input.end_line === "number" ? input.end_line : null;
+  if (start === null && end === null) return "";
+  return ` (lines ${start ?? 1}–${end ?? "end"})`;
+}
 function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
   const input =
     item.input && typeof item.input === "object"
       ? (item.input as Record<string, unknown>)
       : {};
-  if (item.name === "read_document") return "Read note";
+  if (item.name === "read_document") return `Read note${lineRange(input)}`;
   if (item.name === "replace_selection")
     return item.ok ? "Edited selection" : "Edit selection";
   if (item.name === "edit_document") {
@@ -35,16 +70,81 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
   }
   if (item.name === "search_notes")
     return `Search: ${String(input.query ?? "notes")}`;
-  if (item.name === "read_note") return `Read: ${String(input.id ?? "note")}`;
+  if (item.name === "list_notes")
+    return input.folder ? `Listed notes in ${String(input.folder)}` : "Listed notes";
+  if (item.name === "read_notes") {
+    const ids = Array.isArray(input.ids) ? input.ids.map(String) : [];
+    return ids.length
+      ? `Read: ${ids.join(", ")}${lineRange(input)}`
+      : "Read notes";
+  }
+  if (item.name === "find_in_note")
+    return `Find “${String(input.query ?? "")}”${input.id ? ` in ${String(input.id)}` : ""}`;
+  if (item.name === "note_links")
+    return input.id ? `Links: ${String(input.id)}` : "Links for this note";
   return item.name.replace(/_/g, " ");
+}
+/** User messages longer than this start collapsed. */
+const USER_CLAMP_CHARS = 1200;
+const USER_CLAMP_LINES = 14;
+function UserMessage({ text, selection }: { text: string; selection?: string }) {
+  const long =
+    text.length > USER_CLAMP_CHARS ||
+    text.split("\n", USER_CLAMP_LINES + 1).length > USER_CLAMP_LINES;
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      className="agent-panel-user"
+      data-clamped={(long && !expanded) || undefined}
+    >
+      {selection && <SelectionQuote markdown={selection} />}
+      <p>{text}</p>
+      {long && (
+        <button
+          type="button"
+          className="agent-panel-link agent-panel-link-quiet"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "Show less" : `Show all ${text.length.toLocaleString()} characters`}
+        </button>
+      )}
+    </div>
+  );
 }
 const Message = memo(function Message({
   item,
   streaming,
+  pendingQuestionId,
+  pendingEditId,
+  onAnswer,
+  onApproveEdit,
+  onDeclineEdit,
 }: {
   item: TranscriptItem;
   streaming: boolean;
+  pendingQuestionId: string | null;
+  pendingEditId: string | null;
+  onAnswer: (answer: QuestionAnswer) => void;
+  onApproveEdit: () => void;
+  onDeclineEdit: () => void;
 }) {
+  if (item.type === "question")
+    return (
+      <AgentQuestion
+        item={item}
+        pending={item.id === pendingQuestionId}
+        onAnswer={onAnswer}
+      />
+    );
+  if (item.type === "note_edit")
+    return (
+      <NoteEditCard
+        item={item}
+        active={item.id === pendingEditId}
+        onApprove={onApproveEdit}
+        onDecline={onDeclineEdit}
+      />
+    );
   if (item.type === "tool")
     return (
       <details className="agent-panel-tool">
@@ -65,11 +165,7 @@ const Message = memo(function Message({
       </details>
     );
   if (item.type === "user")
-    return (
-      <div className="agent-panel-user">
-        <p>{item.text}</p>
-      </div>
-    );
+    return <UserMessage text={item.text} selection={item.selection} />;
   return <AgentMarkdown text={item.text} streaming={streaming} />;
 });
 function ResizeHandle() {
@@ -146,10 +242,12 @@ function ResizeHandle() {
 }
 export function AgentPanel({ visible }: { visible: boolean }) {
   const agent = useAgent();
-  const { currentNote } = useNotes();
+  const { currentNote, selectNote } = useNotes();
   const changes = useAgentChanges(agent.editor);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [selection, setSelection] = useState("");
+  const [selection, setSelection] = useState<SelectionSummary | null>(null);
+  // The run's selection as it maps through edits, for its section and scrolling.
+  const [focusRange, setFocusRange] = useState<{ from: number; to: number } | null>(null);
   const [reviewIndex, setReviewIndex] = useState(-1);
   const [sending, setSending] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -161,9 +259,16 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const contextTitle = running
     ? conversation.context?.noteTitle
     : currentNote?.title;
-  const contextSelection = running
-    ? conversation.context?.selection?.slice(0, 160)
-    : selection;
+  const runSelection = conversation.context?.selection ?? null;
+  const selectionSummary = useMemo(
+    () =>
+      running
+        ? runSelection
+          ? summarizeMarkdown(runSelection, agent.editor, focusRange)
+          : null
+        : selection,
+    [running, runSelection, agent.editor, focusRange, selection],
+  );
   const draft = currentNote ? (drafts[currentNote.id] ?? "") : "";
   const needsPlanNotice =
     status?.account?.planUsage && !status.account.planNoticeSeen;
@@ -189,15 +294,32 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   useEffect(() => {
     const editor = agent.editor;
     if (!editor) {
-      setSelection("");
+      setSelection(null);
+      setFocusRange(null);
       return;
     }
+    // Runs on every transaction, so only store values that actually changed:
+    // an equal state keeps the panel from re-rendering on each keystroke.
+    let summarized = editor.state.doc;
     const update = () => {
-      const { from, to } = editor.state.selection;
-      setSelection(
-        from === to
-          ? ""
-          : editor.state.doc.textBetween(from, to, " ").slice(0, 160),
+      const { doc } = editor.state;
+      const attached = attachedRange(editor);
+      setSelection((previous) => {
+        if (!attached) return null;
+        if (
+          doc === summarized &&
+          previous?.range?.from === attached.from &&
+          previous.range.to === attached.to
+        )
+          return previous;
+        summarized = doc;
+        return summarizeRange(editor, attached.from, attached.to);
+      });
+      const range = activeFocusRange(editor);
+      setFocusRange((previous) =>
+        previous?.from === range?.from && previous?.to === range?.to
+          ? previous
+          : range && { from: range.from, to: range.to },
       );
     };
     update();
@@ -208,6 +330,13 @@ export function AgentPanel({ visible }: { visible: boolean }) {
       editor.off("transaction", update);
     };
   }, [agent.editor, currentNote?.id]);
+  const revealSelection = useCallback(() => {
+    if (agent.editor && selectionSummary?.range)
+      scrollPositionIntoView(agent.editor, selectionSummary.range.from);
+  }, [agent.editor, selectionSummary]);
+  const clearSelection = useCallback(() => {
+    if (agent.editor) detachSelection(agent.editor);
+  }, [agent.editor]);
   useEffect(() => {
     if (visible && !reason) composer.current?.focus();
   }, [visible, agent.focusComposer, reason]);
@@ -219,9 +348,48 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     follow.current = true;
     setReviewIndex(-1);
   }, [currentNote?.id]);
+  const { pendingQuestion, pendingEdit, answerQuestion, reviewNoteEdit } =
+    agent;
+  /** A card is waiting on the user; the run is paused until they decide. */
+  const waiting = !!(pendingQuestion || pendingEdit);
+  const sendLabel = pendingQuestion
+    ? "Send answer"
+    : pendingEdit
+      ? "Decline with this note"
+      : "Send message";
+  const answer = useCallback(
+    (value: QuestionAnswer) => {
+      follow.current = true;
+      void answerQuestion(value);
+    },
+    [answerQuestion],
+  );
+  const approveEdit = useCallback(() => {
+    follow.current = true;
+    void reviewNoteEdit({ approve: true });
+  }, [reviewNoteEdit]);
+  const declineEdit = useCallback(() => {
+    follow.current = true;
+    void reviewNoteEdit({ approve: false });
+  }, [reviewNoteEdit]);
+  const openNote = useCallback(
+    (id: string) => {
+      void selectNote(id);
+    },
+    [selectNote],
+  );
   const submit = async () => {
-    if (!currentNote || reason || running || sending || !draft.trim()) return;
+    if (!currentNote || reason || sending || !draft.trim()) return;
     const id = currentNote.id;
+    if (pendingQuestion || pendingEdit) {
+      const text = draft.trim();
+      setDrafts((previous) => ({ ...previous, [id]: "" }));
+      follow.current = true;
+      if (pendingQuestion) await answerQuestion(text);
+      else await reviewNoteEdit({ approve: false, feedback: text });
+      return;
+    }
+    if (running) return;
     const text = draft;
     setSending(true);
     setDrafts((previous) => ({ ...previous, [id]: "" }));
@@ -280,6 +448,44 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               </select>
             )}
           </div>
+          <DropdownMenu.Root>
+            <Tooltip content="Earlier conversations">
+              <DropdownMenu.Trigger asChild>
+                <IconButton
+                  tabIndex={0}
+                  aria-label="Earlier conversations"
+                  disabled={running || !agent.history.length}
+                >
+                  <HistoryIcon className="w-4 h-4" />
+                </IconButton>
+              </DropdownMenu.Trigger>
+            </Tooltip>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className="agent-panel-history"
+                sideOffset={5}
+                align="end"
+              >
+                <DropdownMenu.Label className="agent-panel-history-label">
+                  Conversations about this note
+                </DropdownMenu.Label>
+                {agent.history.map((entry) => (
+                  <DropdownMenu.Item
+                    key={entry.id}
+                    className="agent-panel-history-item"
+                    data-current={entry.id === conversation.sessionId || undefined}
+                    onSelect={() => void agent.openConversation(entry.id)}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{entry.title}</span>
+                    <span className="shrink-0 text-xs text-text-muted">
+                      {formatDate(entry.updatedAt / 1000)}
+                    </span>
+                    <CheckIcon className="agent-panel-history-check w-3.5 h-3.5" />
+                  </DropdownMenu.Item>
+                ))}
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
           <Tooltip content="New conversation">
             <IconButton
               tabIndex={0}
@@ -306,50 +512,60 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           <span className="truncate text-xs font-medium" title={contextTitle}>
             {contextTitle || "No note selected"}
           </span>
-          {contextSelection && (
-            <span className="agent-panel-selection" title={contextSelection}>
-              “{contextSelection}”
-            </span>
+          {selectionSummary && (
+            <SelectionCard
+              summary={selectionSummary}
+              running={running}
+              onReveal={revealSelection}
+              onClear={clearSelection}
+            />
           )}
         </div>
-        <div
-          ref={scroll}
-          className="agent-panel-messages"
-          role="log"
-          aria-label="Conversation"
-          aria-busy={running}
-          onScroll={() => {
-            const element = scroll.current;
-            if (element)
-              follow.current =
-                element.scrollHeight -
-                  element.scrollTop -
-                  element.clientHeight <
-                60;
-          }}
-        >
-          {!conversation.items.length && (
-            <div className="agent-panel-empty">
-              <AgentIcon className="w-7 h-7 text-text-muted/50" />
-              <h2 className="text-sm font-medium">A second pair of eyes.</h2>
-              <p className="text-xs leading-relaxed text-text-muted">
-                Ask a question, refine a passage, or work through an idea. Edits
-                appear in your note for you to review.
-              </p>
-            </div>
-          )}
-          {conversation.items.map((item, index) => (
-            <Message
-              key={item.id}
-              item={item}
-              streaming={
-                running &&
-                index === conversation.items.length - 1 &&
-                item.type === "text"
-              }
-            />
-          ))}
+        <OpenNoteContext.Provider value={openNote}>
+          <div
+            ref={scroll}
+            className="agent-panel-messages"
+            role="log"
+            aria-label="Conversation"
+            aria-busy={running}
+            onScroll={() => {
+              const element = scroll.current;
+              if (element)
+                follow.current =
+                  element.scrollHeight -
+                    element.scrollTop -
+                    element.clientHeight <
+                  60;
+            }}
+          >
+            {!conversation.items.length && (
+              <div className="agent-panel-empty">
+                <AgentIcon className="w-7 h-7 text-text-muted/50" />
+                <h2 className="text-sm font-medium">A second pair of eyes.</h2>
+                <p className="text-xs leading-relaxed text-text-muted">
+                  Ask a question, refine a passage, or work through an idea.
+                  Edits appear in your note for you to review.
+                </p>
+              </div>
+            )}
+            {conversation.items.map((item, index) => (
+              <Message
+                key={item.id}
+                item={item}
+                streaming={
+                  running &&
+                  index === conversation.items.length - 1 &&
+                  item.type === "text"
+                }
+                pendingQuestionId={pendingQuestion?.id ?? null}
+                pendingEditId={pendingEdit?.id ?? null}
+                onAnswer={answer}
+                onApproveEdit={approveEdit}
+                onDeclineEdit={declineEdit}
+              />
+            ))}
           {running &&
+            !waiting &&
             conversation.items[conversation.items.length - 1]?.type !==
               "text" && (
               <div className="flex gap-2 items-center text-xs text-text-muted">
@@ -399,7 +615,8 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             </section>
           )}
           <PlanNotice />
-        </div>
+          </div>
+        </OpenNoteContext.Provider>
         {changes.length > 0 && (
           <div className="agent-panel-review" aria-label="Review changes">
             <span className="mr-auto font-medium">
@@ -481,7 +698,13 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               ref={composer}
               rows={3}
               aria-label="Message agent"
-              placeholder="Ask or describe an edit…"
+              placeholder={
+                pendingQuestion
+                  ? "Type your answer…"
+                  : pendingEdit
+                    ? "Or say what to change instead…"
+                    : "Ask or describe an edit…"
+              }
               value={draft}
               disabled={!!reason || sending}
               onChange={(event) => {
@@ -506,35 +729,46 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                 }
               }}
             />
-            <div className="flex items-center justify-between px-2.5 pb-2">
+            <div className="flex items-center justify-between gap-2 px-2.5 pb-2">
               <span className="text-[10px] text-text-muted">
-                {running
-                  ? "You can keep editing."
-                  : "Enter to send · ⇧ Enter for newline"}
+                {pendingQuestion
+                  ? "Enter to answer · ⇧ Enter for newline"
+                  : pendingEdit
+                    ? "Enter to decline with this note"
+                    : running
+                      ? "You can keep editing."
+                      : "Enter to send · ⇧ Enter for newline"}
               </span>
-              {running ? (
-                <button
-                  type="button"
-                  className="agent-panel-primary"
-                  onClick={() => {
-                    void agent.stop();
-                  }}
-                >
-                  Stop
-                </button>
-              ) : (
-                <IconButton
-                  tabIndex={0}
-                  aria-label="Send message"
-                  title="Send message"
-                  disabled={!!reason || sending || !draft.trim()}
-                  onClick={() => {
-                    void submit();
-                  }}
-                >
-                  <ArrowUpIcon className="w-4 h-4" />
-                </IconButton>
-              )}
+              <div className="flex items-center gap-1.5">
+                {running && (
+                  <button
+                    type="button"
+                    className={
+                      waiting
+                        ? "agent-panel-link agent-panel-link-quiet"
+                        : "agent-panel-primary"
+                    }
+                    onClick={() => {
+                      void agent.stop();
+                    }}
+                  >
+                    Stop
+                  </button>
+                )}
+                {(!running || waiting) && (
+                  <IconButton
+                    tabIndex={0}
+                    aria-label={sendLabel}
+                    title={sendLabel}
+                    disabled={!!reason || sending || !draft.trim()}
+                    onClick={() => {
+                      void submit();
+                    }}
+                  >
+                    <ArrowUpIcon className="w-4 h-4" />
+                  </IconButton>
+                )}
+              </div>
             </div>
           </div>
           {status?.account?.planUsage && (

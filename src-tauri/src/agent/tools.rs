@@ -1,21 +1,37 @@
-use super::{events::canonical_tool_name, AgentState};
+use super::{events::canonical_tool_name, note_edits, reading, workspace, AgentState, RunContext};
 use serde_json::{json, Value};
+use std::time::Duration;
 use tauri::Manager;
+
+/// Editor tools answer within milliseconds; a longer wait means the editor is gone.
+const EDITOR_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_NOTES_PER_READ: usize = 5;
+const DEFAULT_LIST_LIMIT: u64 = 30;
+const MAX_LIST_LIMIT: u64 = 100;
+const SEARCH_RESULT_LIMIT: usize = 8;
 
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub parameters: Value,
+    /// Responses strict mode needs closed schemas; ask_user's form is an open
+    /// json-render spec, validated by the frontend instead.
+    pub strict: bool,
 }
 pub fn catalog() -> Vec<ToolSpec> {
     vec![
-        ToolSpec { name: "read_document", description: "Read the current live note and selection. Always call before editing.", parameters: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}) },
+        ToolSpec { name: "read_document", description: "Read the current live note, including unsaved typing, and the user's selection. Always call before editing. Short notes come back whole; a long note comes back as an outline with line numbers and its opening, so pass start_line and end_line (1-based, inclusive, up to 400 lines) to read further. Pass null for both to start.", parameters: json!({"type":"object","properties":{"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["start_line","end_line"],"additionalProperties":false}), strict: true },
         // Bounds live in the description and the executor: Responses strict mode rejects
         // some JSON Schema validation keywords (minLength and friends).
-        ToolSpec { name: "edit_document", description: "Apply 1 to 20 precise replacements atomically, in order. Each old_text must be nonempty and match exactly once in the markdown from read_document; include surrounding text to make it unique. Preserve unchanged markdown.", parameters: json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["edits"],"additionalProperties":false}) },
-        ToolSpec { name: "replace_selection", description: "Replace the selection captured when the user sent their message.", parameters: json!({"type":"object","properties":{"new_text":{"type":"string"}},"required":["new_text"],"additionalProperties":false}) },
-        ToolSpec { name: "search_notes", description: "Search other notes in the workspace. Returns the top eight results.", parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}) },
-        ToolSpec { name: "read_note", description: "Read the markdown of another workspace note by its ID.", parameters: json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}) },
+        ToolSpec { name: "edit_document", description: "Apply 1 to 20 precise replacements atomically, in order. Each old_text must be nonempty and match exactly once in the markdown from read_document; include surrounding text to make it unique. Preserve unchanged markdown.", parameters: json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["edits"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "replace_selection", description: "Replace the selection captured when the user sent their message.", parameters: json!({"type":"object","properties":{"new_text":{"type":"string"}},"required":["new_text"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "ask_user", description: "Ask the user one short clarifying question and wait for the answer. Use it when the request is ambiguous in a way that changes what you would write and the answer isn't in this note or other notes. Give 2 to 4 short options when the choices are discrete, or an empty options array for a free-text answer. For a question with several parts or that needs context alongside it, also pass form: a Scratch UI spec {root, elements, state} with inputs bound to /answers/<key>; otherwise form is null.", parameters: json!({"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"form":{"type":["object","null"]}},"required":["question","options","form"],"additionalProperties":false}), strict: false },
+        ToolSpec { name: "search_notes", description: "Full-text search across the user's notes. Returns up to eight matches with ID, title, last-modified time and a preview; follow up with read_notes for the full text.", parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "list_notes", description: "List notes to find related context. folder limits to a folder path (\"\" for every note), sort is \"recent\" or \"title\", limit is 1 to 100.", parameters: json!({"type":"object","properties":{"folder":{"type":"string"},"sort":{"type":"string","enum":["recent","title"]},"limit":{"type":"integer"}},"required":["folder","sort","limit"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "read_notes", description: "Read the latest saved markdown of 1 to 5 other notes by ID, with each note's title and last-modified time. Long notes come back as an outline and their opening; to read further, pass one ID with start_line and end_line (1-based, inclusive, up to 400 lines), otherwise null. For the open note use read_document instead.", parameters: json!({"type":"object","properties":{"ids":{"type":"array","items":{"type":"string"}},"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["ids","start_line","end_line"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "find_in_note", description: "Find the lines of one note that contain some text (case-insensitive), with line numbers, to jump around long notes. id \"\" means the open note, including unsaved typing.", parameters: json!({"type":"object","properties":{"id":{"type":"string"},"query":{"type":"string"}},"required":["id","query"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "edit_note", description: "Propose 1 to 20 precise replacements to another note (not the open one; use edit_document for that). Each old_text must be nonempty and match exactly once in that note as read with read_notes, applied in order. The user sees a preview and approves or declines, and this call returns their decision; nothing is written unless they approve. summary is one short sentence saying what changes and why.", parameters: json!({"type":"object","properties":{"id":{"type":"string"},"summary":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["id","summary","edits"],"additionalProperties":false}), strict: true },
+        ToolSpec { name: "note_links", description: "Show a note's [[wikilinks]] and the notes that link back to it. id \"\" means the open note.", parameters: json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}), strict: true },
     ]
 }
 pub struct ToolOutput {
@@ -23,6 +39,12 @@ pub struct ToolOutput {
     pub text: String,
 }
 impl ToolOutput {
+    pub fn ok(text: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            text: text.into(),
+        }
+    }
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             ok: false,
@@ -36,63 +58,304 @@ pub async fn execute(app: &tauri::AppHandle, run_id: &str, name: &str, args: Val
     let Some(ctx) = state.context(run_id) else {
         return ToolOutput::error("This agent run has ended");
     };
+    let range = (line_arg(&args, "start_line"), line_arg(&args, "end_line"));
     match name {
-        "read_document" | "edit_document" | "replace_selection" => {
-            state.bridge.execute(app, run_id, name, args).await
+        "read_document" => match live_note(app, run_id).await {
+            Ok(note) => ToolOutput::ok(format!(
+                "{}\n---\n{}",
+                note.header,
+                reading::view(&note.markdown, range.0, range.1)
+            )),
+            Err(error) => error,
+        },
+        "edit_document" | "replace_selection" => {
+            state
+                .bridge
+                .execute(app, run_id, name, args, Some(EDITOR_TOOL_TIMEOUT))
+                .await
         }
-        "search_notes" => {
-            let Some(query) = args.get("query").and_then(Value::as_str) else {
-                return ToolOutput::error("query must be a string");
-            };
-            let current_folder = app
-                .state::<crate::AppState>()
-                .app_config
-                .read()
-                .expect("app config lock")
-                .notes_folder
-                .clone();
-            if !is_run_folder(current_folder, &ctx.notes_folder).await {
-                return ToolOutput::error("The notes folder changed. Start a new conversation.");
+        // Waits for the user, however long they take; Stop cancels the run.
+        "ask_user" => state.bridge.execute(app, run_id, name, args, None).await,
+        "search_notes" | "list_notes" | "read_notes" | "note_links" | "find_in_note" | "edit_note" => {
+            if let Err(error) = ensure_run_folder(app, &ctx).await {
+                return error;
             }
-            match crate::search_notes(query.into(), app.state::<crate::AppState>()).await {
-                Ok(results) => ToolOutput {
-                    ok: true,
-                    text: results
-                        .into_iter()
-                        .take(8)
-                        .map(|r| format!("{} — {}: {}", r.id, r.title, r.preview))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                },
-                Err(error) => ToolOutput::error(error),
-            }
-        }
-        "read_note" => {
-            let Some(id) = args
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            else {
-                return ToolOutput::error("id must be a nonempty string");
-            };
-            let path = match crate::abs_path_from_id(&ctx.notes_folder, id) {
-                Ok(p) => p,
-                Err(e) => return ToolOutput::error(e),
-            };
-            let canonical = match tokio::fs::canonicalize(path).await {
-                Ok(p) => p,
-                Err(e) => return ToolOutput::error(format!("Cannot read note: {e}")),
-            };
-            if !canonical.starts_with(&ctx.notes_folder) {
-                return ToolOutput::error("This note is outside the notes folder");
-            }
-            match tokio::fs::read_to_string(canonical).await {
-                Ok(text) => ToolOutput { ok: true, text },
-                Err(e) => ToolOutput::error(format!("Cannot read note: {e}")),
+            match name {
+                "search_notes" => search_notes(app, &args).await,
+                "list_notes" => list_notes(app, &ctx, &args).await,
+                "read_notes" => read_notes(&ctx, &args, range).await,
+                "find_in_note" => find_in_note(app, run_id, &ctx, &args).await,
+                "edit_note" => note_edits::propose(app, run_id, &ctx, &args).await,
+                _ => note_links(app, run_id, &ctx, &args).await,
             }
         }
         _ => ToolOutput::error(format!("Unknown Scratch tool: {name}")),
     }
+}
+
+fn line_arg(args: &Value, key: &str) -> Option<usize> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .filter(|line| *line > 0)
+        .map(|line| line as usize)
+}
+
+/// The open note as the editor has it now, unsaved typing included.
+struct LiveNote {
+    /// The title and selection lines read_document reports above the text.
+    header: String,
+    markdown: String,
+}
+
+async fn live_note(app: &tauri::AppHandle, run_id: &str) -> Result<LiveNote, ToolOutput> {
+    let live = app
+        .state::<AgentState>()
+        .bridge
+        .execute(app, run_id, "read_document", json!({}), Some(EDITOR_TOOL_TIMEOUT))
+        .await;
+    if !live.ok {
+        return Err(live);
+    }
+    let (header, markdown) = live.text.split_once("\n---\n").unwrap_or((&live.text, ""));
+    Ok(LiveNote {
+        header: header.to_owned(),
+        markdown: markdown.to_owned(),
+    })
+}
+
+async fn find_in_note(app: &tauri::AppHandle, run_id: &str, ctx: &RunContext, args: &Value) -> ToolOutput {
+    let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+    let Some(query) = args.get("query").and_then(Value::as_str) else {
+        return ToolOutput::error("query must be a string");
+    };
+    let markdown = if id.is_empty() || id == ctx.note_id {
+        match live_note(app, run_id).await {
+            Ok(note) => note.markdown,
+            Err(error) => return error,
+        }
+    } else {
+        let path = match workspace::note_path(&ctx.notes_folder, id).await {
+            Ok(path) => path,
+            Err(error) => return ToolOutput::error(error),
+        };
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => content,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        }
+    };
+    ToolOutput::ok(reading::find(&markdown, query))
+}
+
+async fn ensure_run_folder(app: &tauri::AppHandle, ctx: &RunContext) -> Result<(), ToolOutput> {
+    let configured = app
+        .state::<crate::AppState>()
+        .app_config
+        .read()
+        .expect("app config lock")
+        .notes_folder
+        .clone();
+    if is_run_folder(configured, &ctx.notes_folder).await {
+        Ok(())
+    } else {
+        Err(ToolOutput::error(
+            "The notes folder changed. Start a new conversation.",
+        ))
+    }
+}
+
+async fn search_notes(app: &tauri::AppHandle, args: &Value) -> ToolOutput {
+    let Some(query) = args.get("query").and_then(Value::as_str) else {
+        return ToolOutput::error("query must be a string");
+    };
+    match crate::search_notes(query.into(), app.state::<crate::AppState>()).await {
+        Ok(results) if results.is_empty() => ToolOutput::ok(format!("No notes match {query:?}.")),
+        Ok(results) => ToolOutput::ok(
+            results
+                .into_iter()
+                .take(SEARCH_RESULT_LIMIT)
+                .map(|r| {
+                    format!(
+                        "- {} — {} (modified {}): {}",
+                        r.id,
+                        r.title,
+                        workspace::modified_label(r.modified),
+                        r.preview
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        Err(error) => ToolOutput::error(error),
+    }
+}
+
+async fn list_notes(app: &tauri::AppHandle, ctx: &RunContext, args: &Value) -> ToolOutput {
+    let folder = args
+        .get("folder")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_matches('/');
+    let by_title = args.get("sort").and_then(Value::as_str) == Some("title");
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .min(MAX_LIST_LIMIT) as usize;
+    let mut notes = match workspace::load(app, &ctx.notes_folder).await {
+        Ok(notes) => notes,
+        Err(error) => return ToolOutput::error(error),
+    };
+    let prefix = format!("{folder}/");
+    notes.retain(|note| folder.is_empty() || note.id.starts_with(&prefix));
+    if by_title {
+        notes.sort_by_key(|note| note.title.to_lowercase());
+    } else {
+        notes.sort_by_key(|note| std::cmp::Reverse(note.modified));
+    }
+    if notes.is_empty() {
+        return ToolOutput::ok(if folder.is_empty() {
+            "There are no notes.".to_string()
+        } else {
+            format!("No notes in {folder:?}.")
+        });
+    }
+    let lines: Vec<String> = notes
+        .iter()
+        .take(limit)
+        .map(|note| {
+            let open = if note.id == ctx.note_id { " [open]" } else { "" };
+            format!(
+                "- {} — {} (modified {}){open}",
+                note.id,
+                note.title,
+                workspace::modified_label(note.modified)
+            )
+        })
+        .collect();
+    ToolOutput::ok(format!(
+        "Showing {} of {} notes.\n{}",
+        lines.len(),
+        notes.len(),
+        lines.join("\n")
+    ))
+}
+
+async fn read_notes(ctx: &RunContext, args: &Value, range: (Option<usize>, Option<usize>)) -> ToolOutput {
+    let ids: Vec<&str> = args
+        .get("ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() || ids.len() > MAX_NOTES_PER_READ {
+        return ToolOutput::error(format!("ids must list 1 to {MAX_NOTES_PER_READ} note IDs"));
+    }
+    if ids.len() > 1 && (range.0.is_some() || range.1.is_some()) {
+        return ToolOutput::error("Line ranges work with one note at a time");
+    }
+    let mut sections = Vec::with_capacity(ids.len());
+    let mut any_read = false;
+    for id in ids {
+        match read_saved_note(ctx, id, range).await {
+            Ok(section) => {
+                any_read = true;
+                sections.push(section);
+            }
+            Err(error) => sections.push(format!("## {id}\nCould not read: {error}")),
+        }
+    }
+    ToolOutput {
+        ok: any_read,
+        text: sections.join("\n\n"),
+    }
+}
+
+async fn read_saved_note(ctx: &RunContext, id: &str, range: (Option<usize>, Option<usize>)) -> Result<String, String> {
+    if id == ctx.note_id {
+        return Ok(format!(
+            "## {}\nID: {id}\nThis is the open note. Use read_document for its live version, including unsaved typing.",
+            ctx.note_title
+        ));
+    }
+    let canonical = workspace::note_path(&ctx.notes_folder, id).await?;
+    let content = tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|e| e.to_string())?;
+    let modified = tokio::fs::metadata(&canonical)
+        .await
+        .map(|metadata| workspace::modified_secs(&metadata))
+        .unwrap_or(0);
+    Ok(format!(
+        "## {}\nID: {id}\nModified: {}\n{}",
+        crate::extract_title(&content),
+        workspace::modified_label(modified),
+        reading::view(&content, range.0, range.1)
+    ))
+}
+
+async fn note_links(
+    app: &tauri::AppHandle,
+    run_id: &str,
+    ctx: &RunContext,
+    args: &Value,
+) -> ToolOutput {
+    let requested = args.get("id").and_then(Value::as_str).unwrap_or("");
+    let notes = match workspace::load(app, &ctx.notes_folder).await {
+        Ok(notes) => notes,
+        Err(error) => return ToolOutput::error(error),
+    };
+    let (id, title, content) = if requested.is_empty() || requested == ctx.note_id {
+        // The open note's live text, so links typed but not yet saved count.
+        let live = match live_note(app, run_id).await {
+            Ok(live) => live,
+            Err(error) => return error,
+        };
+        let title = live
+            .header
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("Note: "))
+            .unwrap_or(&ctx.note_title)
+            .to_string();
+        (ctx.note_id.clone(), title, live.markdown)
+    } else {
+        match notes.iter().find(|note| note.id == requested) {
+            Some(note) => (note.id.clone(), note.title.clone(), note.content.clone()),
+            None => {
+                return ToolOutput::error(
+                    "No note has this ID. Use list_notes or search_notes to find IDs.",
+                )
+            }
+        }
+    };
+    let outgoing: Vec<String> = workspace::wikilinks(&content)
+        .into_iter()
+        .map(|link| match workspace::find_by_title(&notes, &link) {
+            Some(note) => format!("- [[{link}]] → {}", note.id),
+            None => format!("- [[{link}]] → no note with this title yet"),
+        })
+        .collect();
+    let incoming: Vec<String> = workspace::backlinks(&notes, &title, &id)
+        .into_iter()
+        .map(|note| format!("- {} — {}", note.id, note.title))
+        .collect();
+    let list = |lines: Vec<String>| {
+        if lines.is_empty() {
+            "- none".to_string()
+        } else {
+            lines.join("\n")
+        }
+    };
+    ToolOutput::ok(format!(
+        "Links for {title} ({id})\nLinks out:\n{}\nLinked from:\n{}",
+        list(outgoing),
+        list(incoming)
+    ))
 }
 
 /// The run stores the canonical notes folder; the config may spell the same

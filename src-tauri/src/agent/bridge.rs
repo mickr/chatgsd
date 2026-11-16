@@ -24,12 +24,15 @@ struct ToolRequest<'a> {
     args: Value,
 }
 impl ToolBridge {
+    /// Ask the frontend to run `name`. `timeout` is `None` for tools that wait on
+    /// the user (ask_user); those end only when answered or the run is cancelled.
     pub async fn execute(
         &self,
         app: &tauri::AppHandle,
         run_id: &str,
         name: &str,
         args: Value,
+        timeout: Option<Duration>,
     ) -> ToolOutput {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
@@ -65,15 +68,18 @@ impl ToolBridge {
                 return ToolOutput::error("Scratch could not reach the editor");
             }
         }
-        let response = tokio::time::timeout(Duration::from_secs(30), receiver).await;
+        let response = match timeout {
+            Some(limit) => tokio::time::timeout(limit, receiver).await.ok(),
+            None => Some(receiver.await),
+        };
         self.pending
             .lock()
             .expect("agent tools mutex")
             .remove(&request_id);
         match response {
-            Ok(Ok(output)) => output,
-            Ok(Err(_)) => ToolOutput::error("This agent run has ended"),
-            Err(_) => {
+            Some(Ok(output)) => output,
+            Some(Err(_)) => ToolOutput::error("This agent run has ended"),
+            None => {
                 ToolOutput::error("Scratch did not respond. Re-read the document and try again.")
             }
         }

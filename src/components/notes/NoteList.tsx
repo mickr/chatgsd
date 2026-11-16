@@ -13,7 +13,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui";
-import { cleanTitle } from "../../lib/utils";
+import { cleanTitle, formatDate } from "../../lib/utils";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
 import {
@@ -27,41 +27,6 @@ const menuItemClass =
   "px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2 rounded-sm";
 
 const menuSeparatorClass = "h-px bg-border my-1";
-
-function formatDate(timestamp: number): string {
-  const date = new Date(timestamp * 1000);
-  const now = new Date();
-
-  const startOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate()
-  );
-  const startOfYesterday = new Date(startOfToday.getTime() - 86400000);
-
-  if (date >= startOfToday) {
-    return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  }
-  if (date >= startOfYesterday) {
-    return "Yesterday";
-  }
-
-  const daysAgo =
-    Math.floor((startOfToday.getTime() - date.getTime()) / 86400000) + 1;
-  if (daysAgo <= 6) {
-    return `${daysAgo} days ago`;
-  }
-
-  if (date.getFullYear() === now.getFullYear()) {
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
-  }
-
-  return date.toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
 
 // Memoized note item component (used in flat list)
 interface NoteItemProps {

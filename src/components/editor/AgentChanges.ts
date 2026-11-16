@@ -1,6 +1,11 @@
 import { Extension, type Editor } from "@tiptap/core";
 import { DOMSerializer, type Slice } from "@tiptap/pm/model";
-import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
+import {
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { closeHistory } from "@tiptap/pm/history";
 import { useCallback, useSyncExternalStore } from "react";
@@ -186,12 +191,14 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
         ),
       );
     }
-    // Anchor controls at the end of the hunk's last textblock. A block hunk ends
-    // between nodes, and a widget there would render inside the following block.
+    // Anchor controls at the end of the last textblock the hunk changes. A hunk
+    // can end between blocks or at the very start of the next paragraph (an
+    // inserted paragraph's minimal diff does), and a widget there would render
+    // inside that untouched block.
     let controlsAt = to;
     if (from < to)
       doc.nodesBetween(from, to, (node, pos) => {
-        if (node.isTextblock)
+        if (node.isTextblock && pos + 1 < to)
           controlsAt = Math.min(to, pos + node.nodeSize - 1);
       });
     result.push(
@@ -236,7 +243,115 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
       ),
     );
   }
+  // The selection a run was sent with, so the note shows what the agent is working on.
+  for (const range of state.focusRanges)
+    if (range.from < range.to)
+      result.push(
+        Decoration.inline(range.from, range.to, { class: "agent-selection" }),
+      );
   return DecorationSet.create(doc, result);
+}
+
+export function scrollPositionIntoView(editor: Editor, pos: number): void {
+  const dom = editor.view.domAtPos(pos).node;
+  (dom instanceof HTMLElement ? dom : dom.parentElement)?.scrollIntoView({
+    block: "center",
+    behavior: "smooth",
+  });
+}
+
+/** The selection the current run was sent with, as it maps through later edits. */
+export function activeFocusRange(editor: Editor): FocusRange | null {
+  return agentChangesKey.getState(editor.state)?.focusRanges[0] ?? null;
+}
+
+/**
+ * The selection attached to the agent panel. Selecting text attaches it; it
+ * then stays attached, mapped through edits, when the user clicks elsewhere to
+ * read or scroll, until they select something else, clear it, delete the text,
+ * or send it with a message.
+ */
+interface AttachedSelection {
+  range: { from: number; to: number } | null;
+  /** The editor has focus, so the browser paints a live selection itself. */
+  focused: boolean;
+}
+type AttachedMeta = { focused: boolean } | { clear: true };
+const attachedSelectionKey = new PluginKey<AttachedSelection>("attachedSelection");
+const attachedSelection = new Plugin<AttachedSelection>({
+  key: attachedSelectionKey,
+  state: {
+    init: () => ({ range: null, focused: false }),
+    apply(tr, previous, _, state) {
+      const meta = tr.getMeta(attachedSelectionKey) as AttachedMeta | undefined;
+      const focused = meta && "focused" in meta ? meta.focused : previous.focused;
+      if (meta && "clear" in meta) return { range: null, focused };
+      const { from, to, empty } = state.selection;
+      let range = empty ? previous.range : { from, to };
+      if (range && empty && tr.docChanged) {
+        range = {
+          from: tr.mapping.map(range.from, 1),
+          to: tr.mapping.map(range.to, -1),
+        };
+        if (range.from >= range.to) range = null;
+      }
+      if (
+        range === previous.range ||
+        (range &&
+          previous.range &&
+          range.from === previous.range.from &&
+          range.to === previous.range.to)
+      )
+        range = previous.range;
+      return range === previous.range && focused === previous.focused
+        ? previous
+        : { range, focused };
+    },
+  },
+  props: {
+    decorations(state) {
+      const { range, focused } = attachedSelectionKey.getState(state)!;
+      // Not while the browser paints the live selection, nor during a run,
+      // whose own highlight covers the selection it was sent with.
+      if (
+        !range ||
+        (focused && !state.selection.empty) ||
+        agentChangesKey.getState(state)?.focusRanges.length
+      )
+        return null;
+      return DecorationSet.create(state.doc, [
+        Decoration.inline(range.from, range.to, { class: "agent-selection" }),
+      ]);
+    },
+    handleDOMEvents: {
+      focus: (view) => {
+        view.dispatch(
+          view.state.tr.setMeta(attachedSelectionKey, { focused: true }),
+        );
+        return false;
+      },
+      blur: (view) => {
+        view.dispatch(
+          view.state.tr.setMeta(attachedSelectionKey, { focused: false }),
+        );
+        return false;
+      },
+    },
+  },
+});
+
+export function attachedRange(editor: Editor) {
+  return attachedSelectionKey.getState(editor.state)?.range ?? null;
+}
+
+/** Detaches the selection, collapsing a live one so it doesn't re-attach. */
+export function detachSelection(editor: Editor): void {
+  const { tr } = editor.state;
+  if (!tr.selection.empty)
+    tr.setSelection(TextSelection.create(tr.doc, tr.selection.to));
+  editor.view.dispatch(
+    tr.setMeta(attachedSelectionKey, { clear: true }).setMeta("addToHistory", false),
+  );
 }
 
 export const AgentChanges = Extension.create({
@@ -299,11 +414,7 @@ export const AgentChanges = Extension.create({
           .getState(editor.state)
           ?.hunks.find((h) => h.id === id);
         if (!hunk) return false;
-        const dom = editor.view.domAtPos(hunk.from).node;
-        (dom instanceof HTMLElement ? dom : dom.parentElement)?.scrollIntoView({
-          block: "center",
-          behavior: "smooth",
-        });
+        scrollPositionIntoView(editor, hunk.from);
         return true;
       },
     };
@@ -355,6 +466,7 @@ export const AgentChanges = Extension.create({
             decorations(editor, agentChangesKey.getState(state)!),
         },
       }),
+      attachedSelection,
     ];
   },
 });

@@ -11,7 +11,9 @@ import {
 } from "../../components/editor/AgentChanges";
 import {
   captureRunBinding,
+  editedDocuments,
   executeDocumentTool,
+  parseDocument,
   serializeDocument,
   trimTrailingEmptyParagraph,
 } from "./documentTools";
@@ -99,6 +101,18 @@ describe("trimTrailingEmptyParagraph", () => {
 });
 
 describe("edit_document", () => {
+  it("puts review controls inside an inserted paragraph, not the next one", async () => {
+    const editor = openNote("First paragraph.\n\nLast paragraph.\n");
+    await edit(editor, [
+      {
+        old_text: "First paragraph.",
+        new_text: "First paragraph.\n\nInserted paragraph.",
+      },
+    ]);
+    const controls = editor.view.dom.querySelector(".agent-change-controls");
+    expect(controls?.closest("p")?.textContent).toContain("Inserted paragraph.");
+  });
+
   it("tracks a replaced word as the whole word", async () => {
     const editor = openNote("Leave **Friday** at 9am.\n");
     await edit(editor, [{ old_text: "**Friday**", new_text: "**Saturday**" }]);
@@ -145,5 +159,89 @@ describe("edit_document", () => {
     });
     expect(editor.getJSON()).toEqual(before);
     expect(hunks(editor)).toHaveLength(0);
+  });
+});
+
+describe("editedDocuments", () => {
+  const NOTE = [
+    "# Trip notes",
+    "",
+    "Intro paragraph with **bold** text.",
+    "",
+    "- tight one",
+    "- tight two",
+    "",
+    "1. first",
+    "2. second",
+    "",
+    "```js",
+    "const a = 1;",
+    "",
+    "const b = 2;",
+    "```",
+    "",
+    "> A quote",
+    "> over lines",
+    "",
+    "| Day | Plan |",
+    "| --- | --- |",
+    "| Mon | Hike |",
+    "",
+    "---",
+    "",
+    "## Packing",
+    "",
+    "- loose one",
+    "",
+    "- loose two",
+    "",
+    "Closing paragraph.",
+  ].join("\n");
+
+  const EDITS: Array<[string, string]> = [
+    ["bold", "strong"],
+    ["Intro paragraph with **bold** text.", "Intro paragraph.\n\n- now a list item"],
+    ["- tight two", "- tight two\n- tight three"],
+    ["- tight two\n", ""],
+    ["const a = 1;\n", "const a = 1;\n\n\nconst z = 0;\n"],
+    ["> over lines", "> over lines\n\nNot a quote"],
+    ["| Mon | Hike |", "| Mon | Hike |\n| Tue | Swim |"],
+    ["---\n\n## Packing", "## Packing"],
+    ["## Packing", "Packing\n======="],
+    ["Closing paragraph.", "Closing paragraph.\n\n- appended item"],
+    ["# Trip notes\n\nIntro", "# Trip notes\nIntro"],
+    ["2. second\n\n```js", "2. second\n3. third\n\n```js"],
+  ];
+
+  it("matches a full parse for every kind of block edit", () => {
+    const editor = openNote(NOTE);
+    const markdown = serializeDocument(editor);
+    for (const [oldText, newText] of EDITS) {
+      const [local] = editedDocuments(editor, markdown, [
+        { old_text: oldText, new_text: newText },
+      ]);
+      const full = parseDocument(editor, markdown.replace(oldText, newText));
+      expect(local.toJSON(), `${oldText} → ${newText}`).toEqual(full.toJSON());
+    }
+  });
+
+  it("matches a full parse across a sequential batch", () => {
+    const editor = openNote(NOTE);
+    const markdown = serializeDocument(editor);
+    const batch = [
+      { old_text: "Intro paragraph", new_text: "Opening paragraph" },
+      { old_text: "- tight two", new_text: "- tight two\n- tight three" },
+      { old_text: "- tight three", new_text: "- tight 3" },
+      { old_text: "Closing paragraph.", new_text: "Closing.\n\nPostscript." },
+      { old_text: "Postscript.", new_text: "P.S." },
+    ];
+    let expected = markdown;
+    const documents = editedDocuments(editor, markdown, batch);
+    batch.forEach((edit, index) => {
+      expected = expected.replace(edit.old_text, edit.new_text);
+      expect(documents[index].toJSON()).toEqual(
+        parseDocument(editor, expected).toJSON(),
+      );
+    });
   });
 });

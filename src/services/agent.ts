@@ -22,6 +22,8 @@ export interface RunContext {
 }
 export interface StartRunRequest {
   model: string | null;
+  /** Scratch UI block guide, generated from the json-render catalog. */
+  uiGuide: string;
   sessionId: string | null;
   prompt: string;
   context: RunContext;
@@ -44,6 +46,14 @@ export interface ToolRequest {
   name: string;
   args: unknown;
 }
+export interface ConversationSummary {
+  id: string;
+  documentId: string;
+  title: string;
+  /** Unix milliseconds. */
+  createdAt: number;
+  updatedAt: number;
+}
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const listModels = () => invoke<ModelInfo[]>("agent_list_models");
@@ -53,6 +63,20 @@ export const cancelRun = (runId: string) =>
   invoke<void>("agent_cancel_run", { runId });
 export const toolRespond = (requestId: string, ok: boolean, output: string) =>
   invoke<void>("agent_tool_respond", { requestId, ok, output });
+/** The note's saved conversations, most recently updated first. */
+export const listConversations = (noteId: string) =>
+  invoke<ConversationSummary[]>("agent_list_conversations", { noteId });
+export const loadConversation = (noteId: string, sessionId: string) =>
+  invoke<unknown>("agent_load_conversation", { noteId, sessionId });
+export const saveConversation = (
+  noteId: string,
+  sessionId: string,
+  items: unknown[],
+) => invoke<void>("agent_save_conversation", { noteId, sessionId, items });
+export const applyNoteEdit = (
+  noteId: string,
+  edits: Array<{ old_text: string; new_text: string }>,
+) => invoke<void>("agent_apply_note_edit", { noteId, edits });
 export const signIn = () => invoke<ChatGptAccount>("chatgpt_sign_in");
 export const cancelSignIn = () => invoke<void>("chatgpt_cancel_sign_in");
 export const signOut = () => invoke<void>("chatgpt_sign_out");

@@ -8,6 +8,8 @@ import { closeHistory } from "@tiptap/pm/history";
 import type { Transaction } from "@tiptap/pm/state";
 import {
   agentChangesKey,
+  attachedRange,
+  detachSelection,
   setChangeMeta,
   type AgentChange,
 } from "../../components/editor/AgentChanges";
@@ -32,6 +34,8 @@ export interface DocumentEdit {
  * structurally before serializing and only the marker is replaced.
  */
 const EMPTY_CELL_MARKER = "\uE000";
+/** The most of a selection read_document quotes; the agent reads the rest by lines. */
+const SELECTION_PREVIEW_CHARS = 2000;
 
 function markEmptyCells(node: JSONContent): JSONContent {
   const [only, ...rest] = node.content ?? [];
@@ -90,13 +94,18 @@ export function parseDocument(
   return doc;
 }
 
-export function applySequentialEdits(
-  markdown: string,
-  edits: DocumentEdit[],
-): string[] {
+/** Where one edit lands in the note's markdown as the earlier edits left it. */
+interface LocatedEdit {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** Validates edits and finds each in turn; every old_text must match exactly once. */
+function locateEdits(markdown: string, edits: DocumentEdit[]): LocatedEdit[] {
   if (edits.length < 1 || edits.length > 20)
     throw new Error("Supply between 1 and 20 edits.");
-  const results: string[] = [];
+  const located: LocatedEdit[] = [];
   for (const [index, edit] of edits.entries()) {
     const prefix = `Edit ${index + 1}`;
     if (
@@ -124,13 +133,147 @@ export function applySequentialEdits(
       throw new Error(
         `${prefix} matches ${count} places: include more surrounding text.`,
       );
+    located.push({
+      start: first,
+      end: first + edit.old_text.length,
+      text: edit.new_text,
+    });
     markdown =
       markdown.slice(0, first) +
       edit.new_text +
       markdown.slice(first + edit.old_text.length);
-    results.push(markdown);
   }
-  return results;
+  return located;
+}
+
+/** A run of top-level blocks and where its markdown sits in the note's text. */
+interface Segment {
+  start: number;
+  end: number;
+  count: number;
+}
+
+/** Link reference definitions resolve note-wide, so a partial parse could miss one. */
+const REFERENCE_DEFINITION = /^ {0,3}\[[^\]\n]+\]:/m;
+
+/**
+ * Where each top-level block's markdown sits in `markdown` (the note as
+ * read_document returned it), or null when that can't be established exactly.
+ */
+function indexBlocks(
+  editor: Editor,
+  doc: ProseMirrorNode,
+  markdown: string,
+): Segment[] | null {
+  const manager = editor.storage.markdown?.manager;
+  if (
+    !manager ||
+    !doc.childCount ||
+    doc.textContent.includes(EMPTY_CELL_MARKER) ||
+    REFERENCE_DEFINITION.test(markdown)
+  )
+    return null;
+  const segments: Segment[] = [];
+  let cursor = 0;
+  for (let index = 0; index < doc.childCount; index++) {
+    const text = manager
+      .serialize({ type: "doc", content: [markEmptyCells(doc.child(index).toJSON())] })
+      .split(EMPTY_CELL_MARKER)
+      .join(" ")
+      .trim();
+    const start = text ? markdown.indexOf(text, cursor) : -1;
+    if (start < 0 || markdown.slice(cursor, start).trim()) return null;
+    segments.push({ start, end: start + text.length, count: 1 });
+    cursor = start + text.length;
+  }
+  return markdown.slice(cursor).trim() ? null : segments;
+}
+
+/**
+ * Applies one located edit by re-parsing only the blocks it touches plus one
+ * neighbour on each side, which catches merges such as a paragraph becoming
+ * part of an adjacent list. Untouched blocks keep their node identity, so the
+ * tracked diff stays local too.
+ */
+function editBlocks(
+  editor: Editor,
+  doc: ProseMirrorNode,
+  segments: Segment[],
+  markdown: string,
+  edit: LocatedEdit,
+) {
+  const delta = edit.text.length - (edit.end - edit.start);
+  let low = segments.findIndex((segment) => segment.end > edit.start);
+  if (low < 0) low = segments.length - 1;
+  let high = low;
+  while (high + 1 < segments.length && segments[high + 1].start < edit.end)
+    high++;
+  low = Math.max(0, low - 1);
+  high = Math.min(segments.length - 1, high + 1);
+  const from = Math.min(segments[low].start, edit.start);
+  const to = Math.max(segments[high].end, edit.end) + delta;
+  const next =
+    markdown.slice(0, edit.start) + edit.text + markdown.slice(edit.end);
+  const source = next.slice(from, to);
+  const nodes: ProseMirrorNode[] = [];
+  if (source.trim())
+    parseDocument(editor, source).forEach((node) => nodes.push(node));
+  const count = (list: Segment[]) =>
+    list.reduce((sum, segment) => sum + segment.count, 0);
+  const children: ProseMirrorNode[] = [];
+  doc.forEach((node) => children.push(node));
+  children.splice(
+    count(segments.slice(0, low)),
+    count(segments.slice(low, high + 1)),
+    ...nodes,
+  );
+  const target = children.length
+    ? doc.type.create(doc.attrs, children)
+    : doc.type.createAndFill();
+  if (!target)
+    throw new Error("The markdown could not be represented in this editor.");
+  target.check();
+  return {
+    doc: target,
+    markdown: next,
+    segments: [
+      ...segments.slice(0, low),
+      ...(nodes.length ? [{ start: from, end: to, count: nodes.length }] : []),
+      ...segments.slice(high + 1).map((segment) => ({
+        ...segment,
+        start: segment.start + delta,
+        end: segment.end + delta,
+      })),
+    ],
+  };
+}
+
+/**
+ * The document after each edit in turn. Long notes are re-parsed only around
+ * each edit; if the block index can't be built exactly, the whole note is
+ * parsed per edit, which is always correct but slow on long notes.
+ */
+export function editedDocuments(
+  editor: Editor,
+  markdown: string,
+  edits: DocumentEdit[],
+): ProseMirrorNode[] {
+  const located = locateEdits(markdown, edits);
+  let doc = editor.state.doc;
+  let segments = indexBlocks(editor, doc, markdown);
+  const documents: ProseMirrorNode[] = [];
+  for (const edit of located) {
+    if (segments) {
+      const next = editBlocks(editor, doc, segments, markdown, edit);
+      ({ doc, segments, markdown } = next);
+    } else {
+      markdown =
+        markdown.slice(0, edit.start) + edit.text + markdown.slice(edit.end);
+      doc = parseDocument(editor, markdown);
+    }
+    documents.push(doc);
+  }
+  return documents;
 }
 
 export function minimalDocumentDiff(
@@ -269,26 +412,32 @@ export function applyTrackedReplacement(
   applyTrackedDocuments(editor, [tr.doc], origin, runId);
 }
 
+/**
+ * Captures what a run works on: the note, and the selection attached to the
+ * panel (which may have been made before the user clicked elsewhere). The
+ * selection becomes the run's focus range and is detached from the panel.
+ */
 export function captureRunBinding(
   editor: Editor,
   runId: string,
 ): RunBinding | null {
   const document = editor.storage.scratchDocument;
   if (!document?.noteId) return null;
-  const { from, to, empty } = editor.state.selection;
+  const range = attachedRange(editor);
   let selectionMarkdown: string | null = null;
   let focusRangeId: string | null = null;
-  if (!empty) {
+  if (range) {
     const manager = editor.storage.markdown?.manager;
     if (!manager) return null;
     selectionMarkdown = manager.serialize({
       type: "doc",
-      content: editor.state.doc.slice(from, to).content.toJSON(),
+      content: editor.state.doc.slice(range.from, range.to).content.toJSON(),
     });
     focusRangeId = crypto.randomUUID();
+    detachSelection(editor);
     editor.view.dispatch(
       setChangeMeta(editor.state.tr, {
-        focus: { id: focusRangeId, from, to },
+        focus: { id: focusRangeId, from: range.from, to: range.to },
       }).setMeta("addToHistory", false),
     );
   }
@@ -350,7 +499,10 @@ export async function executeDocumentTool(
             .slice(range.from, range.to)
             .content.toJSON(),
         });
-        selection = JSON.stringify(markdown.slice(0, 2000));
+        selection =
+          markdown.length > SELECTION_PREVIEW_CHARS
+            ? `(first ${SELECTION_PREVIEW_CHARS} of ${markdown.length} characters) ${JSON.stringify(markdown.slice(0, SELECTION_PREVIEW_CHARS))}`
+            : JSON.stringify(markdown);
       }
       return {
         ok: true,
@@ -360,15 +512,13 @@ export async function executeDocumentTool(
     if (name === "edit_document") {
       if (!Array.isArray(input.edits))
         throw new Error("edits must be an array of replacements.");
-      const results = applySequentialEdits(
+      const documents = editedDocuments(
+        editor,
         serializeDocument(editor),
         input.edits as DocumentEdit[],
       );
-      const documents = results.map((markdown) =>
-        parseDocument(editor, markdown),
-      );
       applyTrackedDocuments(editor, documents, "agent", binding.runId);
-      return { ok: true, output: `Applied ${results.length} edit(s).` };
+      return { ok: true, output: `Applied ${documents.length} edit(s).` };
     }
     if (name === "replace_selection") {
       if (typeof input.new_text !== "string")

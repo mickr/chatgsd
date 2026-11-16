@@ -1061,6 +1061,7 @@ async fn checked_write(
 
 #[tauri::command]
 async fn save_note(
+    app: AppHandle,
     id: Option<String>,
     content: String,
     expected_hash: Option<String>,
@@ -1135,10 +1136,11 @@ async fn save_note(
     }
 
     // Delete old file AFTER successful write (to prevent data loss)
-    if let Some((_, ref old_file_path)) = old_id {
+    if let Some((old_id_str, old_file_path)) = &old_id {
         if old_file_path.exists() && *old_file_path != file_path {
             let _ = fs::remove_file(old_file_path).await;
         }
+        agent::conversations::notes_moved(&app, &folder_path, old_id_str, &final_id).await;
     }
 
     let metadata = fs::metadata(&file_path)
@@ -1178,7 +1180,7 @@ async fn save_note(
 }
 
 #[tauri::command]
-async fn delete_note(id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_note(app: AppHandle, id: String, state: State<'_, AppState>) -> Result<(), String> {
     let folder = {
         let app_config = state.app_config.read().expect("app_config read lock");
         app_config
@@ -1208,6 +1210,7 @@ async fn delete_note(id: String, state: State<'_, AppState>) -> Result<(), Strin
         let mut cache = state.notes_cache.write().expect("cache write lock");
         cache.remove(&id);
     }
+    agent::conversations::notes_deleted(&app, &folder_path, &id).await;
 
     Ok(())
 }
@@ -1414,7 +1417,7 @@ async fn create_folder(path: String, state: State<'_, AppState>) -> Result<(), S
 }
 
 #[tauri::command]
-async fn delete_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_folder(app: AppHandle, path: String, state: State<'_, AppState>) -> Result<(), String> {
     let folder = {
         let app_config = state.app_config.read().expect("app_config read lock");
         app_config
@@ -1459,12 +1462,14 @@ async fn delete_folder(path: String, state: State<'_, AppState>) -> Result<(), S
     fs::remove_dir_all(&target)
         .await
         .map_err(|e| e.to_string())?;
+    agent::conversations::notes_deleted(&app, Path::new(&folder), &format!("{}/", path)).await;
 
     Ok(())
 }
 
 #[tauri::command]
 async fn rename_folder(
+    app: AppHandle,
     old_path: String,
     new_name: String,
     state: State<'_, AppState>,
@@ -1522,6 +1527,7 @@ async fn rename_folder(
     tokio::fs::rename(&old_target, &new_target)
         .await
         .map_err(|e| e.to_string())?;
+    agent::conversations::notes_moved(&app, &folder_root, &old_prefix, &new_prefix).await;
 
     // Update pinned note IDs in settings
     {
@@ -1575,6 +1581,7 @@ async fn rename_folder(
 
 #[tauri::command]
 async fn move_note(
+    app: AppHandle,
     id: String,
     target_folder: String,
     state: State<'_, AppState>,
@@ -1623,6 +1630,7 @@ async fn move_note(
     tokio::fs::rename(&source_path, &dest_path)
         .await
         .map_err(|e| e.to_string())?;
+    agent::conversations::notes_moved(&app, &folder_root, &id, &new_id).await;
 
     // Update pinned note IDs
     {
@@ -1663,6 +1671,7 @@ async fn move_note(
 
 #[tauri::command]
 async fn move_folder(
+    app: AppHandle,
     path: String,
     target_parent: String,
     state: State<'_, AppState>,
@@ -1728,6 +1737,7 @@ async fn move_folder(
     tokio::fs::rename(&source, &dest)
         .await
         .map_err(|e| e.to_string())?;
+    agent::conversations::notes_moved(&app, &folder_root, &old_prefix, &new_prefix).await;
 
     // Update pinned note IDs
     {
@@ -3332,6 +3342,10 @@ pub fn run() {
             agent::agent_start_run,
             agent::agent_cancel_run,
             agent::agent_tool_respond,
+            agent::conversations::agent_list_conversations,
+            agent::conversations::agent_load_conversation,
+            agent::conversations::agent_save_conversation,
+            agent::note_edits::agent_apply_note_edit,
             agent::chatgpt::chatgpt_sign_in,
             agent::chatgpt::chatgpt_cancel_sign_in,
             agent::chatgpt::chatgpt_sign_out,

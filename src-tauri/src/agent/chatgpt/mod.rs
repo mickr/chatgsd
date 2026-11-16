@@ -1,3 +1,4 @@
+mod context;
 mod errors;
 mod oauth;
 mod storage;
@@ -15,6 +16,7 @@ use tokio::sync::{watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use super::{
+    conversations,
     events::{self, AgentEvent},
     prompt, tools, AgentError, AgentStatus, ChatGptAccount, ModelInfo, RunContext, RunResult,
 };
@@ -22,14 +24,17 @@ use errors::{auth, other, response_error};
 use storage::Storage;
 
 const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
-const MAX_ITERATIONS: usize = 25;
+/// Tool rounds per message; reading a long note in parts takes several.
+const MAX_ITERATIONS: usize = 50;
+const OTHER_ACCOUNT: &str =
+    "This conversation was with another ChatGPT account. Start a new conversation.";
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 // Credential mutations and rotating refreshes must not race one another.
 static STORAGE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 static ACCOUNT_CHANGED: LazyLock<watch::Sender<()>> = LazyLock::new(|| watch::channel(()).0);
 
+/// In-memory cache of a conversation's model input; `conversations` persists it.
 struct Session {
-    note_id: String,
     account: String,
     history: Arc<AsyncMutex<Vec<Value>>>,
 }
@@ -213,6 +218,9 @@ async fn run_session(
     if Uuid::parse_str(&session_id).is_err() {
         return Err(other("Invalid ChatGPT session ID"));
     }
+    conversations::begin(&app, &ctx.notes_folder, &ctx.note_id, &session_id, &user_prompt)
+        .await
+        .map_err(other)?;
     events::emit(
         &app,
         &ctx.run_id,
@@ -230,20 +238,39 @@ async fn run_session(
             .ok_or_else(|| auth("Continue with ChatGPT to use your plan"))?;
         format!("{}:{}", credentials.subject, credentials.client_id)
     };
-    let history = {
-        let mut sessions = SESSIONS.lock().unwrap_or_else(|error| error.into_inner());
-        let session = sessions.entry(session_id).or_insert_with(|| Session {
-            note_id: ctx.note_id.clone(),
-            account: account.clone(),
-            history: Arc::new(AsyncMutex::new(Vec::new())),
-        });
-        if session.note_id != ctx.note_id || session.account != account {
-            return Err(other("This ChatGPT session belongs to another note or account. Start a new conversation."));
+    let cached = SESSIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&session_id)
+        .map(|session| (session.account.clone(), session.history.clone()));
+    let history = match cached {
+        Some((owner, history)) if owner == account => history,
+        Some(_) => return Err(other(OTHER_ACCOUNT)),
+        None => {
+            // Reasoning items are encrypted for the account that produced them.
+            let saved = match conversations::load_model(&app, &ctx.notes_folder, &session_id)
+                .await
+                .map_err(other)?
+            {
+                Some(saved) if saved.account != account => return Err(other(OTHER_ACCOUNT)),
+                Some(saved) => saved.items,
+                None => Vec::new(),
+            };
+            SESSIONS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entry(session_id.clone())
+                .or_insert_with(|| Session {
+                    account: account.clone(),
+                    history: Arc::new(AsyncMutex::new(saved)),
+                })
+                .history
+                .clone()
         }
-        session.history.clone()
     };
     let mut saved_history = history.lock().await;
     let mut input = saved_history.clone();
+    context::compact(&mut input);
     input.push(json!({"role": "user", "content": prompt::user_message(&user_prompt, &ctx)}));
     let model = match model.filter(|model| !model.is_empty()) {
         Some(model) => model,
@@ -262,7 +289,7 @@ async fn run_session(
         .map(|tool| {
             json!({
                 "type":"function", "name":tool.name, "description":tool.description,
-                "parameters":tool.parameters, "strict":true,
+                "parameters":tool.parameters, "strict":tool.strict,
             })
         })
         .collect();
@@ -270,6 +297,7 @@ async fn run_session(
         json!({"type":"namespace", "name":"scratch", "description":"Read and precisely edit the live Scratch note, or read workspace notes.", "tools":functions}),
     ];
     for _ in 0..MAX_ITERATIONS {
+        context::fit(&mut input, context::MAX_INPUT_BYTES);
         let body = ResponseRequest {
             model: &model,
             instructions: &instructions,
@@ -321,13 +349,18 @@ async fn run_session(
         }
         // Commit only complete rounds, so cancellation cannot leave dangling tool calls in history.
         saved_history.clone_from(&input);
+        if let Err(error) =
+            conversations::save_model(&app, &ctx.notes_folder, &session_id, &account, &input).await
+        {
+            eprintln!("Couldn't save ChatGPT conversation {session_id}: {error}");
+        }
         if calls.is_empty() {
             return Ok(());
         }
     }
-    Err(other(
-        "ChatGPT reached the limit of 25 tool rounds. Send another message to continue.",
-    ))
+    Err(other(format!(
+        "ChatGPT reached the limit of {MAX_ITERATIONS} tool rounds. Send another message to continue."
+    )))
 }
 
 struct ToolCall {

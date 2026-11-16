@@ -1,8 +1,10 @@
-import { memo, useMemo, type ReactNode } from "react";
+import { Fragment, memo, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { CodeCopyButton } from "../ui";
 import { errorMessage } from "../../services/agent";
+import { renderableSpec, splitReply } from "../../lib/agent/ui/content";
+import { AgentSpec } from "./ui/AgentSpec";
 
 function inline(text: string): ReactNode[] {
   const pattern =
@@ -126,6 +128,15 @@ function parseMarkdown(text: string): ReactNode[] {
   }
   return blocks;
 }
+/** User-written markdown (a selection, say): rendered as written, with no UI blocks. */
+export const MarkdownPreview = memo(function MarkdownPreview({
+  text,
+}: {
+  text: string;
+}) {
+  const content = useMemo(() => parseMarkdown(text), [text]);
+  return <div className="agent-panel-markdown">{content}</div>;
+});
 export const AgentMarkdown = memo(function AgentMarkdown({
   text,
   streaming = false,
@@ -133,7 +144,24 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   text: string;
   streaming?: boolean;
 }) {
-  const content = useMemo(() => parseMarkdown(text), [text]);
+  const content = useMemo(
+    () =>
+      splitReply(text, streaming).map((segment, index) => {
+        if (segment.type === "text")
+          return <Fragment key={index}>{parseMarkdown(segment.text)}</Fragment>;
+        const spec = renderableSpec(segment.spec);
+        if (spec)
+          return (
+            <AgentSpec key={index} spec={spec} loading={!segment.complete} />
+          );
+        return segment.complete ? (
+          <p key={index} className="text-xs text-text-muted">
+            This view couldn't be displayed.
+          </p>
+        ) : null;
+      }),
+    [text, streaming],
+  );
   return (
     <div className="agent-panel-markdown">
       {content}
