@@ -1,4 +1,7 @@
-use super::{events::canonical_tool_name, note_edits, reading, workspace, AgentState, RunContext};
+use super::{
+    events::{canonical_tool_name, emit, AgentEvent},
+    note_edits, reading, skills, web, workspace, AgentState, RunContext,
+};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::Manager;
@@ -18,8 +21,10 @@ pub struct ToolSpec {
     /// json-render spec, validated by the frontend instead.
     pub strict: bool,
 }
-pub fn catalog() -> Vec<ToolSpec> {
-    vec![
+/// The agent's tools for one message. Web tools are listed only when the
+/// message was sent with internet access on.
+pub fn catalog(web_access: bool) -> Vec<ToolSpec> {
+    let mut tools = vec![
         ToolSpec { name: "read_document", description: "Read the current live note, including unsaved typing, and the user's selection. Always call before editing. Short notes come back whole; a long note comes back as an outline with line numbers and its opening, so pass start_line and end_line (1-based, inclusive, up to 400 lines) to read further. Pass null for both to start.", parameters: json!({"type":"object","properties":{"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["start_line","end_line"],"additionalProperties":false}), strict: true },
         // Bounds live in the description and the executor: Responses strict mode rejects
         // some JSON Schema validation keywords (minLength and friends).
@@ -32,7 +37,15 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec { name: "find_in_note", description: "Find the lines of one note that contain some text (case-insensitive), with line numbers, to jump around long notes. id \"\" means the open note, including unsaved typing.", parameters: json!({"type":"object","properties":{"id":{"type":"string"},"query":{"type":"string"}},"required":["id","query"],"additionalProperties":false}), strict: true },
         ToolSpec { name: "edit_note", description: "Apply 1 to 20 precise replacements atomically to another note (not the open one; use edit_document for that). Each old_text must be nonempty and match exactly once in that note as read with read_notes, applied in order. Conflicting writes (if the note changed since it was read) are rejected with an error. summary is one short sentence saying what changes and why.", parameters: json!({"type":"object","properties":{"id":{"type":"string"},"summary":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["id","summary","edits"],"additionalProperties":false}), strict: true },
         ToolSpec { name: "note_links", description: "Show a note's [[wikilinks]] and the notes that link back to it. id \"\" means the open note.", parameters: json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}), strict: true },
-    ]
+        ToolSpec { name: "read_skill", description: "Load one of the user's installed skills by name before doing a task its description covers. Returns the skill's full instructions; follow them for that task. A skill may list files that came with it: pass file to read one, otherwise null.", parameters: json!({"type":"object","properties":{"name":{"type":"string"},"file":{"type":["string","null"]}},"required":["name","file"],"additionalProperties":false}), strict: true },
+    ];
+    if web_access {
+        tools.extend([
+            ToolSpec { name: "research", description: "Ask the research assistant to search and read the web, then report what it found with source URLs. Use it for documentation, current facts and anything the notes don't contain. It sees neither the notes nor this conversation, so question must stand on its own: say exactly what you need, name the product and version, and include a URL when the user gave one. Can take a minute.", parameters: json!({"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false}), strict: true },
+            ToolSpec { name: "offer_skill", description: "Show the user a card offering to save a skill from the web, given the URL of its SKILL.md. research lists the skills published by the sites it consulted. Offer a skill only when it fits what the user is working on, and only once. The user decides on the card; this returns right away.", parameters: json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}), strict: true },
+        ]);
+    }
+    tools
 }
 pub struct ToolOutput {
     pub ok: bool,
@@ -89,8 +102,42 @@ pub async fn execute(app: &tauri::AppHandle, run_id: &str, name: &str, args: Val
                 _ => note_links(app, run_id, &ctx, &args).await,
             }
         }
+        "read_skill" => match args.get("name").and_then(Value::as_str) {
+            Some(skill) => match skills::read(app, skill, args.get("file").and_then(Value::as_str)).await {
+                Ok(text) => ToolOutput::ok(text),
+                Err(error) => ToolOutput::error(error),
+            },
+            None => ToolOutput::error("name must be a string"),
+        },
+        "offer_skill" if ctx.web_access => offer_skill(app, run_id, &args).await,
+        "offer_skill" => ToolOutput::error("Internet access is off for this message"),
         _ => ToolOutput::error(format!("Unknown Scratch tool: {name}")),
     }
+}
+
+/// Fetches and checks the skill, then shows the user its card. Saving is theirs.
+async fn offer_skill(app: &tauri::AppHandle, run_id: &str, args: &Value) -> ToolOutput {
+    let Some(address) = args.get("url").and_then(Value::as_str) else {
+        return ToolOutput::error("url must be a string");
+    };
+    // The agent has only the address; hold the download to what its index published.
+    let published = web::http_url(address)
+        .map(|url| web::listed_digests(url.as_str()))
+        .unwrap_or_default();
+    let offer = match skills::fetch_offer(web::PUBLIC, address, &published).await {
+        Ok(offer) => offer,
+        Err(error) => return ToolOutput::error(error),
+    };
+    let name = offer.name.clone();
+    if skills::is_installed(app, &offer).await {
+        return ToolOutput::ok(format!(
+            "The skill {name:?} is already installed. Load it with read_skill when it applies."
+        ));
+    }
+    emit(app, run_id, AgentEvent::SkillOffer(offer));
+    ToolOutput::ok(format!(
+        "The user now sees a card offering to save the skill {name:?}. The choice is theirs: don't describe the card or ask again in your reply."
+    ))
 }
 
 fn line_arg(args: &Value, key: &str) -> Option<usize> {

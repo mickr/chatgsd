@@ -13,21 +13,42 @@ const MAX_OUTLINE: usize = 150;
 const MAX_MATCHES: usize = 40;
 const MATCH_LINE_CHARS: usize = 200;
 
+/// What a paged view is of, so its wording fits notes and web pages alike.
+pub struct Subject {
+    name: &'static str,
+    /// How to get around a long one.
+    long_hint: &'static str,
+}
+
+pub const NOTE: Subject = Subject {
+    name: "note",
+    long_hint: "Read it in parts with start_line/end_line, or use find_in_note.",
+};
+pub const PAGE: Subject = Subject {
+    name: "page",
+    long_hint: "Read it in parts with start_line/end_line.",
+};
+
 /// The note's text for a read: all of it when short, otherwise an outline and
 /// the opening, or the requested 1-based inclusive line range.
 pub fn view(markdown: &str, start: Option<usize>, end: Option<usize>) -> String {
+    view_of(&NOTE, markdown, start, end)
+}
+
+pub fn view_of(subject: &Subject, markdown: &str, start: Option<usize>, end: Option<usize>) -> String {
+    let Subject { name, long_hint } = subject;
     let lines: Vec<&str> = markdown.lines().collect();
     let total = lines.len();
     if total == 0 {
-        return "The note is empty.".into();
+        return format!("The {name} is empty.");
     }
     if start.is_none() && end.is_none() {
         if total <= FULL_LINES && markdown.len() <= FULL_CHARS {
-            return format!("Lines 1-{total} of {total} (the whole note)\n\n{markdown}");
+            return format!("Lines 1-{total} of {total} (the whole {name})\n\n{markdown}");
         }
         let (shown, text) = page(&lines, 1, OPENING_LINES);
         return format!(
-            "This note is long: {total} lines. Read it in parts with start_line/end_line, or use find_in_note.\n\nOutline (line: heading):\n{}\n\nLines 1-{shown} of {total}:\n\n{text}",
+            "This {name} is long: {total} lines. {long_hint}\n\nOutline (line: heading):\n{}\n\nLines 1-{shown} of {total}:\n\n{text}",
             outline(&lines)
         );
     }

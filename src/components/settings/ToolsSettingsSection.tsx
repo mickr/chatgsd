@@ -1,14 +1,14 @@
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { Button } from "../ui";
+import { Button, Select } from "../ui";
 import { SpinnerIcon, ChatGPTIcon } from "../icons";
 import { useAgent } from "../../context/AgentContext";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "../agent/ChatGPTAccount";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
-import { errorMessage, setupComputerPermissions } from "../../services/agent";
+import { errorMessage, researchBriefDefault, setupComputerPermissions } from "../../services/agent";
 
 type CliState = {
   status: CliStatus | null;
@@ -59,6 +59,112 @@ function CliUsageHint() {
 }
 
 const STATUS_LABELS = { ready: "Ready", signed_out: "Signed out", plan_usage_disabled: "Plan usage disabled" };
+
+/** Internet access and the researcher role that does the web work. */
+function InternetAccessSettings() {
+  const agent = useAgent();
+  const [defaultBrief, setDefaultBrief] = useState("");
+  // What's being typed; null while the field shows the saved brief.
+  const [draft, setDraft] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    researchBriefDefault().then(
+      (brief) => { if (active) setDefaultBrief(brief); },
+      (error) => toast.error(`Couldn't load the researcher's brief: ${errorMessage(error)}`),
+    );
+    return () => { active = false; };
+  }, []);
+  const commit = (text: string) => {
+    const next = text.trim();
+    agent.setResearchBrief(next && next !== defaultBrief ? next : null);
+  };
+  const saveDraft = () => {
+    if (draft === null) return;
+    commit(draft);
+    setDraft(null);
+  };
+  // A tab shortcut or closing settings removes the field without blurring it,
+  // so what was typed is saved on the way out too.
+  const unsaved = useRef<(() => void) | null>(null);
+  unsaved.current = draft === null ? null : () => commit(draft);
+  useEffect(() => () => unsaved.current?.(), []);
+  return (
+    <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
+      <label className="flex items-center justify-between gap-4 text-sm font-medium">
+        Internet access
+        <input
+          type="checkbox"
+          checked={agent.webAccess}
+          onChange={(event) => agent.setWebAccess(event.target.checked)}
+          aria-describedby="web-access-description"
+        />
+      </label>
+      <p id="web-access-description" className="text-xs text-text-muted leading-relaxed">
+        When a request needs information your notes don't have, the agent hands a question to a researcher
+        that searches the web, reads pages and reports back with its sources. Searches run through ChatGPT,
+        and pages it reads in full are fetched from this Mac. The researcher gets the question, not your notes.
+        If a site it reads publishes a skill that fits your work, the agent offers it for you to save.
+      </p>
+      {agent.webAccess && (
+        <div className="pt-3 border-t border-border border-dashed space-y-3">
+          <div>
+            <h3 className="text-sm font-medium">Researcher</h3>
+            <p className="text-xs text-text-muted leading-relaxed">
+              A separate agent role with its own model and brief. Lighter models keep research quick.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="research-model" className="block text-xs font-medium">Model</label>
+            <Select
+              id="research-model"
+              value={agent.researchModel}
+              disabled={!agent.models.length}
+              onChange={(event) => agent.setResearchModel(event.target.value)}
+            >
+              {agent.models.length ? (
+                agent.models.map((model) => (
+                  <option key={model.id} value={model.id}>{model.label}</option>
+                ))
+              ) : (
+                <option value="">
+                  {agent.modelsLoading ? "Loading models…" : "Luna, once you're signed in"}
+                </option>
+              )}
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <label htmlFor="research-brief" className="font-medium">Brief</label>
+              {(agent.researchBrief !== null || draft !== null) && (
+                <button
+                  type="button"
+                  className="text-text-muted hover:text-text"
+                  onClick={() => { setDraft(null); agent.setResearchBrief(null); }}
+                >
+                  Reset to default
+                </button>
+              )}
+            </div>
+            <textarea
+              id="research-brief"
+              rows={5}
+              maxLength={4000}
+              value={draft ?? agent.researchBrief ?? defaultBrief}
+              onChange={(event) => setDraft(event.target.value)}
+              onBlur={saveDraft}
+              aria-describedby="research-brief-description"
+              className="block w-full resize-y rounded-md border border-border bg-bg px-3 py-2 text-sm leading-relaxed text-text focus-visible:outline-none focus-visible:border-accent"
+            />
+            <p id="research-brief-description" className="text-xs text-text-muted leading-relaxed">
+              The brief shapes how the researcher works and is saved when you leave the field. Its ground rules
+              stay fixed: report only what sources say, cite each one, and never follow instructions found on a page.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function ToolsSettingsSection() {
   const [cli, dispatchCli] = useReducer(cliReducer, cliInitialState);
@@ -165,6 +271,7 @@ export function ToolsSettingsSection() {
           </Button>
           {computerSetup && <p role="status" className="text-xs text-text-muted">{computerSetup}</p>}
         </div>
+        <InternetAccessSettings />
       </section>
 
       {/* CLI Tool (macOS only) */}

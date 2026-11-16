@@ -1510,6 +1510,12 @@ table.not-prose th {
 .agent-panel-resize:hover > span, .agent-panel-resize:focus-visible > span, .agent-panel-resizing > span { opacity: 1; }
 .agent-panel-question { padding: 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-bg); display: flex; flex-direction: column; gap: 10px; }
 .agent-panel-question[data-pending="true"] { border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.agent-skill-offer { padding: 12px; border: 1px solid color-mix(in srgb, var(--color-accent) 45%, var(--color-border)); border-radius: 10px; background: var(--color-bg); display: flex; flex-direction: column; gap: 10px; }
+.agent-skill-offer[data-saved] { border-color: var(--color-border); }
+.agent-skill-instructions { font-size: 11px; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: 7px; }
+.agent-skill-instructions summary { cursor: pointer; padding: 7px 10px; }
+.agent-skill-instructions summary:focus-visible, .agent-skill-instructions pre:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 6px; }
+.agent-skill-instructions pre { margin: 0 10px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10.5px; line-height: 1.6; color: var(--color-text); }
 .agent-panel-chip { padding: 5px 10px; font-size: 11px; font-weight: 500; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg); cursor: pointer; transition: border-color 150ms, background 150ms; }
 .agent-panel-chip:hover { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 8%, transparent); }
 .agent-panel-chip:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }

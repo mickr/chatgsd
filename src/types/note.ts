@@ -59,6 +59,9 @@ export interface Settings {
   agentModel?: string;
   agentPanelWidthPx?: number;
   agentComputerAccess?: boolean;
+  agentWebAccess?: boolean;
+  agentResearchModel?: string;
+  agentResearchBrief?: string;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;

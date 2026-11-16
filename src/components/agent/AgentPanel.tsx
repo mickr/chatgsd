@@ -50,6 +50,7 @@ import { AgentQuestion } from "./AgentQuestion";
 import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
 import { OpenNoteContext } from "./ui/registry";
 import { SelectionCard, SelectionQuote } from "./SelectionCard";
+import { SkillOfferCard, sourceHost } from "./SkillOfferCard";
 /** " (lines 120–260)" for a ranged read, otherwise nothing. */
 function lineRange(input: Record<string, unknown>) {
   const start = typeof input.start_line === "number" ? input.start_line : null;
@@ -85,6 +86,20 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
     return `Find “${String(input.query ?? "")}”${input.id ? ` in ${String(input.id)}` : ""}`;
   if (item.name === "note_links")
     return input.id ? `Links: ${String(input.id)}` : "Links for this note";
+  if (item.name === "research")
+    return `Research: ${String(input.question ?? "the web")}`;
+  if (item.name === "web_search") {
+    if (input.type === "open_page") return `Opened ${sourceHost(String(input.url ?? ""))}`;
+    if (input.type === "find_in_page") return `Searched in ${sourceHost(String(input.url ?? ""))}`;
+    const queries = Array.isArray(input.queries) ? input.queries.map(String) : [];
+    return queries.length ? `Searched: ${queries.join("; ")}` : "Searched the web";
+  }
+  if (item.name === "web_fetch")
+    return `Read ${sourceHost(String(input.url ?? ""))}${lineRange(input)}`;
+  if (item.name === "read_skill")
+    return `Used skill: ${String(input.name ?? "")}`;
+  if (item.name === "offer_skill")
+    return item.ok === false ? "Couldn't offer a skill" : "Offered a skill";
   return item.name.replace(/_/g, " ");
 }
 /** User messages longer than this start collapsed. */
@@ -120,12 +135,14 @@ const Message = memo(function Message({
   active,
   pendingQuestionId,
   onAnswer,
+  onDismissOffer,
 }: {
   item: TranscriptItem;
   streaming: boolean;
   active: boolean;
   pendingQuestionId: string | null;
   onAnswer: (answer: QuestionAnswer) => void;
+  onDismissOffer: (id: string) => void;
 }) {
   if (item.type === "changes") return null;
   if (item.type === "question")
@@ -134,6 +151,14 @@ const Message = memo(function Message({
         item={item}
         pending={item.id === pendingQuestionId}
         onAnswer={onAnswer}
+      />
+    );
+  if (item.type === "skill_offer")
+    return (
+      <SkillOfferCard
+        offer={item}
+        dismissed={item.dismissed}
+        onDismiss={() => onDismissOffer(item.id)}
       />
     );
   if (item.type === "activity")
@@ -572,6 +597,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                     }
                     pendingQuestionId={pendingQuestion?.id ?? null}
                     onAnswer={answer}
+                    onDismissOffer={agent.dismissSkillOffer}
                   />
                 ))}
                 <AgentTurnChanges changes={turn.changes} turn={turnIndex + 1} />

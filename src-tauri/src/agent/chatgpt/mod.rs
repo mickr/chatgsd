@@ -1,6 +1,7 @@
 mod context;
 mod errors;
 mod oauth;
+mod research;
 mod storage;
 mod stream;
 
@@ -18,7 +19,8 @@ use uuid::Uuid;
 use super::{
     computer::ComputerSession, conversations,
     events::{self, AgentEvent},
-    prompt, tools, AgentError, AgentStatus, ChatGptAccount, ModelInfo, RunContext, RunResult,
+    prompt, skills, tools, AgentError, AgentErrorKind, AgentStatus, ChatGptAccount, ModelInfo,
+    RunContext, RunResult,
 };
 use errors::{auth, other, response_error};
 use storage::Storage;
@@ -293,8 +295,9 @@ async fn run_session(
                 .id
         }
     };
-    let instructions = prompt::instructions(&ctx);
-    let mut functions: Vec<_> = tools::catalog()
+    let instructions = prompt::instructions(&ctx, &skills::enabled(&app).await);
+    let research_model = ctx.research_model.as_deref().unwrap_or(&model);
+    let mut functions: Vec<_> = tools::catalog(ctx.web_access)
         .into_iter()
         .map(|tool| {
             json!({
@@ -328,7 +331,10 @@ async fn run_session(
                 .json(&body)
         })
         .await?;
-        let items = stream::consume(&app, &ctx.run_id, response).await?;
+        let items = stream::consume(response, |text| {
+            events::emit(&app, &ctx.run_id, AgentEvent::TextDelta { text: text.to_owned() });
+        })
+        .await?;
         let calls: Vec<_> = items
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
@@ -356,6 +362,18 @@ async fn run_session(
                         let error = "Computer access is off for this message".to_owned();
                         (false, error.clone(), Value::String(error))
                     }
+                }
+            } else if name == "research" {
+                // Runs here rather than in tools::execute: it is a model loop of its own.
+                // A failed lookup is the agent's to report and work around; only what
+                // would fail the conversation too (sign-in, plan limits) ends the run.
+                match research::run(&app, &ctx, research_model, &call.id, &call.args).await {
+                    Ok(output) => (output.ok, output.text.clone(), Value::String(output.text)),
+                    Err(error) if matches!(error.kind, AgentErrorKind::Other) => {
+                        let text = format!("Research failed: {}", error.message);
+                        (false, text.clone(), Value::String(text))
+                    }
+                    Err(error) => return Err(error),
                 }
             } else {
                 let output = tools::execute(&app, &ctx.run_id, name, call.args.clone()).await;

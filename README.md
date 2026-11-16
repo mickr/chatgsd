@@ -24,6 +24,8 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 - **Slash commands** - Type `/` to quickly insert headings, lists, code blocks, diagrams, and more
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
 - **Agent panel** - Co-edit with ChatGPT through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret shows where it is working without adding highlights or taking your selection. During an active coediting session, it observes your edits and checks in after you pause typing. Each note keeps its conversation history
+- **Web research** - With internet access on, the agent hands questions your notes can't answer to a researcher: a separate agent role that searches the web, reads pages and reports back with sources. Its model (Luna by default) and brief are yours to change in Settings → Integrations
+- **Skills** - Save [Agent Skills](https://agentskills.io) for the agent to follow. When a site the researcher reads publishes a skill that fits your work, the agent offers it on a card with its full instructions, and you decide whether to save it. Manage, switch off, remove or add skills by address in Settings → Skills
 - **Works with other AI agents** - Changes made to an open note on disk merge in live, and conflicting edits show up as changes to review
 - **Folders** - Opt-in collapsible folder tree with drag-and-drop to organize notes
 - **Keyboard optimized** - Lots of shortcuts and a command palette

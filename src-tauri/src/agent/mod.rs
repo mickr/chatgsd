@@ -7,7 +7,9 @@ pub mod events;
 pub mod note_edits;
 pub mod prompt;
 mod reading;
+pub mod skills;
 pub mod tools;
+mod web;
 mod workspace;
 use events::{emit, AgentEvent};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,12 @@ pub struct RunContext {
     pub note_title: String,
     pub selection: Option<String>,
     pub computer_access: bool,
+    /// Internet access for this message: research and skill offers.
+    pub web_access: bool,
+    /// Model for the research role; `None` runs it on the conversation's model.
+    pub research_model: Option<String>,
+    /// The user's brief for the research role; `None` uses the default.
+    pub research_brief: Option<String>,
     pub notes_folder: PathBuf,
     /// Scratch UI block guide from the frontend, generated from its component catalog.
     pub ui_guide: String,
@@ -80,6 +88,10 @@ pub struct StartRunRequest {
     prompt: String,
     #[serde(default)]
     computer_access: bool,
+    #[serde(default)]
+    web_access: bool,
+    research_model: Option<String>,
+    research_brief: Option<String>,
     context: RequestContext,
 }
 #[derive(Serialize)]
@@ -115,6 +127,11 @@ pub async fn agent_status(app: tauri::AppHandle) -> AgentStatus {
 pub async fn agent_list_models(app: tauri::AppHandle) -> Result<Vec<ModelInfo>, String> {
     chatgpt::list_models(&app).await
 }
+/// The research role's built-in brief, shown in settings until the user edits it.
+#[tauri::command]
+pub fn agent_research_brief_default() -> &'static str {
+    prompt::DEFAULT_RESEARCH_BRIEF
+}
 /// The configured notes folder, canonicalized.
 pub(crate) async fn notes_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let folder = app
@@ -147,6 +164,12 @@ pub async fn agent_start_run(
         note_title: request.context.note_title,
         selection: request.context.selection,
         computer_access: request.computer_access,
+        web_access: request.web_access,
+        research_model: request.research_model.filter(|model| !model.is_empty()),
+        research_brief: request
+            .research_brief
+            .map(|brief| brief.trim().chars().take(prompt::MAX_BRIEF_CHARS).collect::<String>())
+            .filter(|brief| !brief.is_empty()),
         ui_guide: request.ui_guide,
         notes_folder,
     };

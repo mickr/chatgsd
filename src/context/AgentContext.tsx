@@ -57,8 +57,10 @@ export type TranscriptItem =
       answer: string | null;
     }
   | { id: string; type: "activity"; text: string }
-  | { id: string; type: "changes"; change: NoteChange };
+  | { id: string; type: "changes"; change: NoteChange }
+  | ({ id: string; type: "skill_offer"; dismissed?: boolean } & agent.SkillOffer);
 export type QuestionItem = Extract<TranscriptItem, { type: "question" }>;
+export type SkillOfferItem = Extract<TranscriptItem, { type: "skill_offer" }>;
 /** A form submission (the bound answers object) or a typed/picked answer. */
 export type QuestionAnswer = string | Record<string, unknown>;
 
@@ -111,7 +113,15 @@ const emptyConversation = (): Conversation => ({
 });
 const TRANSCRIPT_TYPES: Record<string, true> = {
   user: true, text: true, tool: true, question: true, activity: true, changes: true,
+  skill_offer: true,
 };
+/** An offer card reads all of these; a saved item missing any is not shown. */
+const isSkillOffer = (item: Record<string, unknown>) =>
+  ["name", "description", "source", "content", "digest"].every(
+    (key) => typeof item[key] === "string",
+  ) &&
+  Array.isArray(item.files) &&
+  typeof item.archive === "boolean";
 /** A saved transcript, keeping only items this version knows how to show. */
 function parseTranscript(value: unknown): TranscriptItem[] {
   if (!Array.isArray(value)) return [];
@@ -120,7 +130,8 @@ function parseTranscript(value: unknown): TranscriptItem[] {
       !!item &&
       typeof item === "object" &&
       typeof item.id === "string" &&
-      typeof item.type === "string" && TRANSCRIPT_TYPES[item.type] === true,
+      typeof item.type === "string" && TRANSCRIPT_TYPES[item.type] === true &&
+      (item.type !== "skill_offer" || isSkillOffer(item)),
   );
 }
 interface ActiveRun {
@@ -155,6 +166,16 @@ export interface AgentContextValue {
   resumeCoediting: () => void;
   computerAccess: boolean;
   setComputerAccess: (enabled: boolean) => void;
+  /** Internet access: the research role and skill offers. */
+  webAccess: boolean;
+  setWebAccess: (enabled: boolean) => void;
+  /** The research role's model: the saved one, else Luna, else `model`. */
+  researchModel: string;
+  setResearchModel: (model: string) => void;
+  /** The user's brief for the research role; null means the built-in one. */
+  researchBrief: string | null;
+  setResearchBrief: (brief: string | null) => void;
+  dismissSkillOffer: (id: string) => void;
   newConversation: () => void;
   /** The current note's saved conversations, most recent first. */
   history: agent.ConversationSummary[];
@@ -195,6 +216,9 @@ export function AgentProvider({
   const [statusError, setStatusError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [computerAccess, updateComputerAccess] = useState(true);
+  const [webAccess, updateWebAccess] = useState(true);
+  const [savedResearchModel, setSavedResearchModel] = useState<string | null>(null);
+  const [researchBrief, updateResearchBrief] = useState<string | null>(null);
   const [coeditingSession, setCoeditingSession] = useState<number | null>(null);
   const [conversations, setConversations] = useState<
     Record<string, Conversation>
@@ -276,6 +300,8 @@ export function AgentProvider({
   useEffect(() => {
     let active = true;
     setSavedModel(null);
+    setSavedResearchModel(null);
+    updateResearchBrief(null);
     setCoeditingSession(null);
     updateWidth(PANEL_DEFAULT);
     conversationsRef.current = {};
@@ -294,6 +320,9 @@ export function AgentProvider({
         if (!active) return;
         setSavedModel(settings.agentModel ?? null);
         updateComputerAccess(settings.agentComputerAccess ?? true);
+        updateWebAccess(settings.agentWebAccess ?? true);
+        setSavedResearchModel(settings.agentResearchModel ?? null);
+        updateResearchBrief(settings.agentResearchBrief ?? null);
         updateWidth(
           clampPanelWidth(settings.agentPanelWidthPx ?? PANEL_DEFAULT),
         );
@@ -354,6 +383,10 @@ export function AgentProvider({
   const model = models.some((item) => item.id === savedModel)
     ? (savedModel ?? "")
     : (models[0]?.id ?? "");
+  // Research defaults to Luna, the light model, when the account lists one.
+  const researchModel = models.some((item) => item.id === savedResearchModel)
+    ? (savedResearchModel ?? "")
+    : (models.find((item) => item.id.includes("luna"))?.id ?? model);
   useEffect(() => {
     if (!editor) return;
     let previous: { noteId: string | null; session: number } | null = null;
@@ -441,6 +474,18 @@ export function AgentProvider({
             items.push({ id: `${toolId}:changes`, type: "changes", change });
           return { ...conversation, items };
         }
+        if (event.type === "skill_offer") {
+          const { type: _type, ...offer } = event;
+          // One card per download of a skill, however often it is offered. The
+          // digest covers an archive's bundled files as well as its instructions.
+          if (conversation.items.some((item) =>
+            item.type === "skill_offer" && item.source === offer.source && item.digest === offer.digest))
+            return conversation;
+          return {
+            ...conversation,
+            items: [...conversation.items, { id: crypto.randomUUID(), type: "skill_offer", ...offer }],
+          };
+        }
         if (event.type === "error")
           return {
             ...conversation,
@@ -458,6 +503,8 @@ export function AgentProvider({
             item.type === "tool" && item.id === `${payload.runId}:${event.callId}` &&
             ["edit_document", "replace_selection", "edit_note"].includes(item.name)))
         saveConversation(run.noteId);
+      // Keep the offer if the run is interrupted before its reply.
+      if (event.type === "skill_offer") saveConversation(run.noteId);
       if (event.type === "done" || event.type === "error") {
         releaseRunBinding(editorRef.current, run.binding,
           event.type === "done" && event.stopReason === "completed" && !run.cancelRequested);
@@ -595,6 +642,7 @@ export function AgentProvider({
         noteTitle: binding.noteTitle,
         selection: binding.selectionMarkdown,
         computerAccess: allowComputer,
+        webAccess,
       };
       updateConversation(binding.noteId, (conversation) => ({
         ...conversation,
@@ -624,6 +672,9 @@ export function AgentProvider({
           sessionId,
           prompt: prompt.trim(),
           computerAccess: allowComputer,
+          webAccess,
+          researchModel: researchModel || null,
+          researchBrief,
           context,
         });
         if (runs.current.get(temporaryId) !== run) {
@@ -671,6 +722,9 @@ export function AgentProvider({
       computerAccess,
       editorRef,
       model,
+      webAccess,
+      researchModel,
+      researchBrief,
       processEvent,
       processTool,
       ready,
@@ -697,6 +751,19 @@ export function AgentProvider({
     persist({ agentComputerAccess: enabled });
     if (!enabled) void stop();
   }, [persist, stop]);
+  const setWebAccess = useCallback((enabled: boolean) => {
+    updateWebAccess(enabled);
+    persist({ agentWebAccess: enabled });
+  }, [persist]);
+  const setResearchModel = useCallback((next: string) => {
+    setSavedResearchModel(next);
+    persist({ agentResearchModel: next });
+  }, [persist]);
+  const setResearchBrief = useCallback((brief: string | null) => {
+    const next = brief?.trim() || null;
+    updateResearchBrief(next);
+    persist({ agentResearchBrief: next ?? undefined });
+  }, [persist]);
   const setModel = useCallback(
     (next: string) => {
       setSavedModel(next);
@@ -734,6 +801,21 @@ export function AgentProvider({
     updateConversation(currentNote.id, emptyConversation);
   }, [currentNote, editorRef, updateConversation]);
   const currentNoteId = currentNote?.id ?? null;
+  const dismissSkillOffer = useCallback(
+    (id: string) => {
+      if (!currentNoteId) return;
+      updateConversation(currentNoteId, (conversation) => ({
+        ...conversation,
+        items: conversation.items.map((item) =>
+          item.id === id && item.type === "skill_offer"
+            ? { ...item, dismissed: true }
+            : item,
+        ),
+      }));
+      saveConversation(currentNoteId);
+    },
+    [currentNoteId, saveConversation, updateConversation],
+  );
   const openConversation = useCallback(
     async (sessionId: string) => {
       const noteId = currentNoteId;
@@ -917,6 +999,13 @@ export function AgentProvider({
       resumeCoediting,
       computerAccess,
       setComputerAccess,
+      webAccess,
+      setWebAccess,
+      researchModel,
+      setResearchModel,
+      researchBrief,
+      setResearchBrief,
+      dismissSkillOffer,
       conversation,
       send,
       stop,
@@ -953,6 +1042,13 @@ export function AgentProvider({
       resumeCoediting,
       computerAccess,
       setComputerAccess,
+      webAccess,
+      setWebAccess,
+      researchModel,
+      setResearchModel,
+      researchBrief,
+      setResearchBrief,
+      dismissSkillOffer,
       conversation,
       send,
       stop,

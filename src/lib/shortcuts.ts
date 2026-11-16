@@ -58,10 +58,12 @@ export const shortcutCategories: ShortcutCategory[] = [
   {
     title: "Settings",
     shortcuts: [
-      { keys: [mod, "1"], description: "General" },
-      { keys: [mod, "2"], description: "Appearance" },
-      { keys: [mod, "3"], description: "Shortcuts" },
-      { keys: [mod, "4"], description: "About" },
+      { keys: [mod, "1"], description: "Folder" },
+      { keys: [mod, "2"], description: "Integrations" },
+      { keys: [mod, "3"], description: "Skills" },
+      { keys: [mod, "4"], description: "Appearance" },
+      { keys: [mod, "5"], description: "Shortcuts" },
+      { keys: [mod, "6"], description: "About" },
     ],
   },
   {

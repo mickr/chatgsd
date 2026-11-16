@@ -22,6 +22,8 @@ const REREADABLE: &[&str] = &[
     "search_notes",
     "list_notes",
     "note_links",
+    "read_skill",
+    "web_fetch",
     "cua_get_window_state",
     "cua_get_browser_state",
     "cua_list_apps",

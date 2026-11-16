@@ -6,6 +6,7 @@ import {
   KeyboardIcon,
   InfoIcon,
   IntegrationsIcon,
+  SkillIcon,
 } from "../icons";
 import { Button, IconButton } from "../ui";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
@@ -13,13 +14,14 @@ import { AppearanceSettingsSection } from "./EditorSettingsSection";
 import { ShortcutsSettingsSection } from "./ShortcutsSettingsSection";
 import { AboutSettingsSection } from "./AboutSettingsSection";
 import { ToolsSettingsSection } from "./ToolsSettingsSection";
+import { SkillsSettingsSection } from "./SkillsSettingsSection";
 import { mod, isMac, isWindows } from "../../lib/platform";
 
 interface SettingsPageProps {
   onBack: () => void;
 }
 
-type SettingsTab = "general" | "tools" | "editor" | "shortcuts" | "about";
+type SettingsTab = "general" | "tools" | "skills" | "editor" | "shortcuts" | "about";
 
 const tabs: {
   id: SettingsTab;
@@ -29,9 +31,10 @@ const tabs: {
 }[] = [
   { id: "general", label: "Folder", icon: FolderIcon, shortcut: "1" },
   { id: "tools", label: "Integrations", icon: IntegrationsIcon, shortcut: "2" },
-  { id: "editor", label: "Appearance", icon: SwatchIcon, shortcut: "3" },
-  { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, shortcut: "4" },
-  { id: "about", label: "About", icon: InfoIcon, shortcut: "5" },
+  { id: "skills", label: "Skills", icon: SkillIcon, shortcut: "3" },
+  { id: "editor", label: "Appearance", icon: SwatchIcon, shortcut: "4" },
+  { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, shortcut: "5" },
+  { id: "about", label: "About", icon: InfoIcon, shortcut: "6" },
 ];
 
 export function SettingsPage({ onBack }: SettingsPageProps) {
@@ -48,23 +51,10 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey) {
-        if (e.key === "1") {
-          e.preventDefault();
-          setActiveTab("general");
-        } else if (e.key === "2") {
-          e.preventDefault();
-          setActiveTab("tools");
-        } else if (e.key === "3") {
-          e.preventDefault();
-          setActiveTab("editor");
-        } else if (e.key === "4") {
-          e.preventDefault();
-          setActiveTab("shortcuts");
-        } else if (e.key === "5") {
-          e.preventDefault();
-          setActiveTab("about");
-        }
+      const tab = (e.metaKey || e.ctrlKey) && tabs.find((item) => item.shortcut === e.key);
+      if (tab) {
+        e.preventDefault();
+        setActiveTab(tab.id);
       }
     };
 
@@ -132,6 +122,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
           <div className={`w-full max-w-3xl mx-auto px-6 pb-6${isWindows ? " pt-2" : ""}`}>
             {activeTab === "general" && <GeneralSettingsSection />}
             {activeTab === "tools" && <ToolsSettingsSection />}
+            {activeTab === "skills" && <SkillsSettingsSection />}
             {activeTab === "editor" && <AppearanceSettingsSection />}
             {activeTab === "shortcuts" && <ShortcutsSettingsSection />}
             {activeTab === "about" && <AboutSettingsSection />}

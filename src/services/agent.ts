@@ -20,6 +20,7 @@ export interface RunContext {
   noteTitle: string;
   selection: string | null;
   computerAccess?: boolean;
+  webAccess?: boolean;
 }
 export interface StartRunRequest {
   model: string | null;
@@ -28,6 +29,12 @@ export interface StartRunRequest {
   sessionId: string | null;
   prompt: string;
   computerAccess: boolean;
+  /** Internet access: the research role and skill offers. */
+  webAccess: boolean;
+  /** Model for the research role; null runs it on `model`. */
+  researchModel: string | null;
+  /** The user's brief for the research role; null uses the built-in one. */
+  researchBrief: string | null;
   context: RunContext;
 }
 export type AgentErrorKind = "auth" | "usage_limit" | "not_eligible" | "other";
@@ -36,6 +43,7 @@ export type AgentEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_call"; callId: string; name: string; input: unknown }
   | { type: "tool_result"; callId: string; ok: boolean; output: string }
+  | ({ type: "skill_offer" } & SkillOffer)
   | { type: "done"; stopReason: "completed" | "cancelled" }
   | { type: "error"; kind: AgentErrorKind; message: string };
 export interface AgentEventPayload {
@@ -47,6 +55,33 @@ export interface ToolRequest {
   runId: string;
   name: string;
   args: unknown;
+}
+/** An installed skill: a SKILL.md the user saved for the agent. */
+export interface Skill {
+  name: string;
+  description: string;
+  /** The address it was saved from, when it came from the web. */
+  source: string | null;
+  /** Unix milliseconds; 0 when unknown. */
+  installedAt: number;
+  enabled: boolean;
+  content: string;
+  /** Paths of the files saved beside SKILL.md. */
+  files: string[];
+  /** `sha256:<hex>` of the download it was saved from; null when added by hand. */
+  digest: string | null;
+}
+/** A skill found on the web, not yet saved. */
+export interface SkillOffer {
+  name: string;
+  description: string;
+  source: string;
+  content: string;
+  /** Paths of the text files an archived skill brings along. */
+  files: string[];
+  /** `sha256:<hex>` of the download the offer was read from. */
+  digest: string;
+  archive: boolean;
 }
 export interface ConversationSummary {
   id: string;
@@ -67,6 +102,28 @@ export const cancelRun = (runId: string) =>
   invoke<void>("agent_cancel_run", { runId });
 export const toolRespond = (requestId: string, ok: boolean, output: string) =>
   invoke<void>("agent_tool_respond", { requestId, ok, output });
+export const researchBriefDefault = () =>
+  invoke<string>("agent_research_brief_default");
+export const listSkills = () => invoke<Skill[]>("agent_list_skills");
+/** Saves an offer as the user saw it; an archive must still match its digest. */
+export const installSkill = (
+  offer: Pick<SkillOffer, "content" | "source" | "digest" | "archive">,
+) =>
+  invoke<Skill>("agent_install_skill", {
+    offer: {
+      content: offer.content,
+      source: offer.source,
+      digest: offer.digest,
+      archive: offer.archive,
+    },
+  });
+export const removeSkill = (name: string) =>
+  invoke<void>("agent_remove_skill", { name });
+export const setSkillEnabled = (name: string, enabled: boolean) =>
+  invoke<Skill>("agent_set_skill_enabled", { name, enabled });
+/** Skills at an address: the SKILL.md it points to, or the ones its site publishes. */
+export const findSkills = (url: string) =>
+  invoke<SkillOffer[]>("agent_find_skills", { url });
 /** The note's saved conversations, most recently updated first. */
 export const listConversations = (noteId: string) =>
   invoke<ConversationSummary[]>("agent_list_conversations", { noteId });

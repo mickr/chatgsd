@@ -134,6 +134,14 @@ pub struct Settings {
     pub agent_panel_width_px: Option<u32>,
     #[serde(rename = "agentComputerAccess")]
     pub agent_computer_access: Option<bool>,
+    #[serde(rename = "agentWebAccess")]
+    pub agent_web_access: Option<bool>,
+    /// Model slug for the research role; `None` picks the default (Luna).
+    #[serde(rename = "agentResearchModel")]
+    pub agent_research_model: Option<String>,
+    /// The user's brief for the research role; `None` uses the built-in one.
+    #[serde(rename = "agentResearchBrief")]
+    pub agent_research_brief: Option<String>,
     #[serde(rename = "foldersEnabled")]
     pub folders_enabled: Option<bool>,
     #[serde(rename = "ignoredPatterns")]
@@ -3356,6 +3364,12 @@ pub fn run() {
             agent::agent_start_run,
             agent::agent_cancel_run,
             agent::agent_tool_respond,
+            agent::agent_research_brief_default,
+            agent::skills::agent_list_skills,
+            agent::skills::agent_install_skill,
+            agent::skills::agent_remove_skill,
+            agent::skills::agent_set_skill_enabled,
+            agent::skills::agent_find_skills,
             agent::conversations::agent_list_conversations,
             agent::conversations::agent_load_conversation,
             agent::conversations::agent_save_conversation,

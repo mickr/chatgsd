@@ -566,3 +566,88 @@ describe("AgentProvider coediting", () => {
     expect(agent.startRun).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("AgentProvider research and skill offers", () => {
+  const offer = {
+    type: "skill_offer" as const,
+    name: "trip-planning",
+    description: "Plan trips day by day.",
+    source: "https://docs.example.com/.well-known/agent-skills/trip-planning/SKILL.md",
+    content: "---\nname: trip-planning\ndescription: Plan trips day by day.\n---\n",
+    files: [],
+    digest: `sha256:${"a".repeat(64)}`,
+    archive: false,
+  };
+  const finish = async () => {
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+  };
+
+  it("runs research on Luna until the user picks a model, and not at all with internet access off", async () => {
+    vi.mocked(agent.listModels).mockResolvedValue([
+      { id: "gpt-x", label: "GPT X" },
+      { id: "gpt-6-luna", label: "GPT-6-Luna" },
+      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna" },
+    ]);
+    act(() => current.toggle());
+    await settle();
+    expect(current.researchModel).toBe("gpt-6-luna");
+    await act(async () => { await current.send("How do rail passes work?"); });
+    expect(vi.mocked(agent.startRun).mock.calls[0][0]).toMatchObject({
+      model: "gpt-x", webAccess: true, researchModel: "gpt-6-luna", researchBrief: null,
+    });
+    await finish();
+
+    act(() => {
+      current.setResearchModel("gpt-x");
+      current.setResearchBrief("  Only official documentation.  ");
+      current.setWebAccess(false);
+    });
+    await settle();
+    expect(notes.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ agentWebAccess: false }));
+    await act(async () => { await current.send("And night trains?"); });
+    expect(vi.mocked(agent.startRun).mock.calls[1][0]).toMatchObject({
+      webAccess: false, researchModel: "gpt-x", researchBrief: "Only official documentation.",
+    });
+  });
+
+  it("shows one card per version of an offered skill and remembers a dismissal", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("Plan the trip"); });
+    act(() => {
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "session", sessionId: "s-1" } });
+      mocks.eventHandler?.({ runId: "run-1", event: offer });
+      mocks.eventHandler?.({ runId: "run-1", event: offer });
+      mocks.eventHandler?.({ runId: "run-1", event: {
+        ...offer, content: `${offer.content}\nStart with dates.\n`, digest: `sha256:${"b".repeat(64)}`,
+      } });
+      // An archive whose bundled files changed: same address and instructions, new download.
+      mocks.eventHandler?.({ runId: "run-1", event: { ...offer, digest: `sha256:${"c".repeat(64)}` } });
+    });
+    await settle();
+    const cards = current.conversation.items.filter((item) => item.type === "skill_offer");
+    expect(cards).toHaveLength(3);
+    expect(cards[0]).toMatchObject({ name: "trip-planning", source: offer.source, content: offer.content });
+
+    act(() => current.dismissSkillOffer(cards[0].id));
+    await settle();
+    const saves = vi.mocked(agent.saveConversation).mock.calls;
+    const saved = saves[saves.length - 1][1] as Array<Record<string, unknown>>;
+    expect(saved.filter((item) => item.type === "skill_offer").map((item) => item.dismissed)).toEqual([true, undefined, undefined]);
+  });
+
+  it("drops a saved offer card it couldn't show instead of failing on it", async () => {
+    const { type: _type, ...fields } = offer;
+    vi.mocked(agent.listConversations).mockResolvedValue([
+      { id: "s-old", documentId: "d1", title: "Trip", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(agent.loadConversation).mockResolvedValue([
+      { id: "o1", type: "skill_offer", name: "half-saved", source: offer.source },
+      { id: "o2", type: "skill_offer", ...fields },
+    ]);
+    act(() => current.toggle());
+    await settle();
+    expect(current.conversation.items.map((item) => item.id)).toEqual(["o2"]);
+  });
+});

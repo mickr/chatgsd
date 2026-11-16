@@ -1,4 +1,4 @@
-use super::AgentErrorKind;
+use super::{skills::SkillOffer, AgentErrorKind};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::Emitter;
@@ -26,6 +26,8 @@ pub enum AgentEvent {
         ok: bool,
         output: String,
     },
+    /// A skill found on the web, for the user to review and save from a card.
+    SkillOffer(SkillOffer),
     Done {
         stop_reason: String,
     },

@@ -1,12 +1,8 @@
 use futures_util::StreamExt;
 use serde_json::Value;
-use tauri::AppHandle;
 
 use super::{
-    super::{
-        events::{self, AgentEvent},
-        AgentError,
-    },
+    super::AgentError,
     errors::{api_error, other},
 };
 
@@ -61,10 +57,11 @@ impl SseParser {
     }
 }
 
+/// Reads one response to its end. `on_text` receives the reply as it streams;
+/// the returned items are the ones to send back as input next round.
 pub(super) async fn consume(
-    app: &AppHandle,
-    run_id: &str,
     response: reqwest::Response,
+    mut on_text: impl FnMut(&str),
 ) -> Result<Vec<Value>, AgentError> {
     let request_id = response
         .headers()
@@ -101,20 +98,15 @@ pub(super) async fn consume(
             {
                 "response.output_text.delta" => {
                     if let Some(text) = event.get("delta").and_then(Value::as_str) {
-                        events::emit(
-                            app,
-                            run_id,
-                            AgentEvent::TextDelta {
-                                text: text.to_owned(),
-                            },
-                        );
+                        on_text(text);
                     }
                 }
                 "response.output_item.done" => {
                     if let Some(item) = event.get("item") {
                         if matches!(
                             item.get("type").and_then(Value::as_str),
-                            Some("reasoning" | "message" | "function_call")
+                            // A hosted search call stays in order beside its reasoning.
+                            Some("reasoning" | "message" | "function_call" | "web_search_call")
                         ) {
                             items.push(item.clone());
                         }

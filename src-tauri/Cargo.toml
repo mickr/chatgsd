@@ -41,6 +41,11 @@ sha2 = "0.10"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 futures-util = "0.3"
 which = "6"
+htmd = "0.5"
+yaml-rust2 = "0.13"
+tar = "0.4"
+flate2 = "1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString"] }

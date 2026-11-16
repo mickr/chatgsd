@@ -15,6 +15,7 @@ import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { SettingsPage } from "./components/settings";
 import { SpinnerIcon } from "./components/icons";
 import { AgentProvider, useAgent } from "./context/AgentContext";
+import { SkillsProvider } from "./context/SkillsContext";
 import { AgentPanel } from "./components/agent/AgentPanel";
 import { useAgentPanelShortcut } from "./components/agent/useAgentPanelShortcut";
 import { InlineAgentPrompt } from "./components/agent/InlineAgentPrompt";
@@ -51,9 +52,11 @@ function AppContent() {
     setEditor(ready);
   }, []);
   return (
-    <AgentProvider editorRef={editorRef} editor={editor}>
-      <AppWorkspace editorRef={editorRef} onEditorReady={handleEditorReady} />
-    </AgentProvider>
+    <SkillsProvider>
+      <AgentProvider editorRef={editorRef} editor={editor}>
+        <AppWorkspace editorRef={editorRef} onEditorReady={handleEditorReady} />
+      </AgentProvider>
+    </SkillsProvider>
   );
 }
 
