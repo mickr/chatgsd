@@ -1,0 +1,31 @@
+{
+  "name": "chatgsd",
+  "version": "0.0.0",
+  "description": "Install and open ChatGSD, the markdown notes app you co-edit with ChatGPT",
+  "type": "module",
+  "bin": {
+    "chatgsd": "bin/chatgsd.js"
+  },
+  "files": [
+    "bin",
+    "lib/install.js",
+    "release.json",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/mickr/chatgsd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mickr/chatgsd.git",
+    "directory": "npm/chatgsd"
+  }
+}

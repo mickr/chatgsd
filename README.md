@@ -39,6 +39,12 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 
 ### macOS (Apple Silicon)
 
+```bash
+npx chatgsd
+```
+
+That installs or updates ChatGSD and opens it. Or download it yourself:
+
 1. Download the latest `.dmg` from [Releases](https://github.com/mickr/chatgsd/releases)
 2. Open the DMG and drag ChatGSD to Applications
 3. Open ChatGSD from Applications. It updates itself from then on
