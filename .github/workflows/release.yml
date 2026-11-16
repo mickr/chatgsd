@@ -1,37 +1,112 @@
 name: Release
 
-# Signed, notarized macOS builds on Mars, the self-hosted Mac that holds the
-# runner. Only tags (and manual runs from a tag) can reach the release
-# environment's secrets; outside pull requests need approval to run anything.
+# Every push to main that passes CI becomes a signed, notarized macOS release
+# built on Mars, the self-hosted Mac that holds the runner. Versions live in
+# tags, not commits: each release bumps the patch number of the latest tag,
+# writes it into the build, and tags the exact commit it built. Run it by hand
+# to release the current main as a new minor or major version.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Version part to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 
-permissions:
-  contents: write
+# One release at a time, so two runs never pick the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  plan:
+    name: Choose the version
+    # Only pushes to this repo's main; pull requests (including from forks
+    # with a branch named main) never reach the signing job.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      commit: ${{ steps.version.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.version.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: version
+        env:
+          COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+          BUMP: ${{ inputs.bump || 'patch' }}
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          skip() { echo "$1"; echo "release=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          main=$(git ls-remote origin refs/heads/main | cut -f1)
+          [ "$main" = "$COMMIT" ] || skip "main has moved on to ${main:0:7}; that commit's run releases it."
+          released=$(git tag --points-at "$COMMIT" --list 'v[0-9]*')
+          [ "$MANUAL" = true ] || [ -z "$released" ] || skip "${COMMIT:0:7} is already released as $released."
+
+          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "$COMMIT")
+          IFS=. read -r major minor patch <<< "${previous#v}"
+          case "$BUMP" in
+            major) version="$((major + 1)).0.0" ;;
+            minor) version="$major.$((minor + 1)).0" ;;
+            *) version="$major.$minor.$((patch + 1))" ;;
+          esac
+          echo "Releasing ${COMMIT:0:7} as v$version (previous $previous)"
+
+          delimiter="notes_$(openssl rand -hex 8)"
+          {
+            echo "release=true"
+            echo "commit=$COMMIT"
+            echo "version=$version"
+            echo "notes<<$delimiter"
+            git log --no-merges --format='- %s' "$previous..$COMMIT"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
   macos:
     name: Signed, notarized macOS release
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     runs-on: [self-hosted, macOS, ARM64, mars, apple-signing]
+    # Reachable only from main; holds the signing and notarization secrets.
     environment: release
     timeout-minutes: 60
-    concurrency:
-      group: release
-      cancel-in-progress: false
+    permissions:
+      contents: write
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # Public in every signed build. The identity is set with the certificate
       # secret by scripts/configure-release-secrets.py, so a mismatch fails early.
       APPLE_SIGNING_IDENTITY: ${{ vars.SCRATCH_SIGN_IDENTITY }}
       APPLE_TEAM_ID: M9G92WURV3
+      VERSION: ${{ needs.plan.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.plan.outputs.commit }}
           persist-credentials: false
+
+      - name: Set the version
+        run: node scripts/set-version.mjs "$VERSION"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -43,9 +118,9 @@ jobs:
         run: scripts/ci-signing.sh install
 
       # Builds, signs, notarizes and staples the app, signs the updater bundle,
-      # and uploads everything to a draft release with latest.json.
+      # and uploads everything to a draft release with latest.json. The tag is
+      # created on the built commit when the release is published.
       - name: Build and upload
-        id: build
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -57,7 +132,11 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Scratch v__VERSION__"
-          releaseBody: "Download the DMG below. Installed copies update themselves."
+          releaseCommitish: ${{ needs.plan.outputs.commit }}
+          releaseBody: |
+            ${{ needs.plan.outputs.notes }}
+
+            Download the DMG below. Installed copies update themselves.
           releaseDraft: true
           prerelease: false
           args: --bundles app,dmg
@@ -68,12 +147,12 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
 
       # Only a verified build becomes the latest release the updater sees.
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.build.outputs.appVersion }}
         run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
       - name: Remove signing identity

@@ -49,8 +49,10 @@ Runs on every push to `main` and on PRs. Validates frontend build (`tsc` + Vite)
 
 Releases are macOS only, built, signed with Developer ID, and notarized by `.github/workflows/release.yml` on the self-hosted `mars-scratch` runner (this Mac; installed in `~/.local/share/github-actions/mars-scratch`, LaunchAgent `actions.runner.mickr-scratch.mars-scratch`).
 
-1. Bump the version in `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`
-2. Commit to `main`, then tag and push: `git tag v1.2.0 && git push origin main v1.2.0`
-3. The workflow uploads a draft release, verifies the signature, notarization ticket and Gatekeeper assessment, then publishes it. Installed copies update from that release's `latest.json`
+Every push to `main` that passes CI is released automatically:
 
-Secrets live in the repo's `release` environment, reachable only from `v*` tags: the Developer ID Application identity as a `.p12` (the same one sshkm signs with, team M9G92WURV3; only the Account Holder can create a new one) and an app-specific password for notarizing as the team's Apple ID. After renewing either, run `python3 scripts/configure-release-secrets.py <developer-id.p12>`; it checks both with Apple's tools before uploading. Updater signing key: `~/.tauri/scratch-fork-updater.key`, password in the login keychain item "Scratch fork updater key"; losing it means installed copies can no longer verify updates.
+1. The workflow takes the latest `v*` tag, bumps its patch number, and writes that version into the build with `scripts/set-version.mjs`. Versions live in tags, not commits, so the files on `main` keep the last hand-set version and pushes never race a bot commit
+2. It builds, signs, notarizes, and verifies the signature, notarization ticket, Gatekeeper assessment and version, then publishes the release with the commit subjects since the last one. Publishing creates the tag on the built commit. Installed copies update from that release's `latest.json`
+3. A run skips if `main` has moved on by the time CI finishes (the newer commit's run releases it) or the commit is already released. For a minor or major version, run the Release workflow by hand: `gh workflow run release.yml -f bump=minor`
+
+Secrets live in the repo's `release` environment, reachable only from `main`: the Developer ID Application identity as a `.p12` (the same one sshkm signs with, team M9G92WURV3; only the Account Holder can create a new one) and an app-specific password for notarizing as the team's Apple ID. After renewing either, run `python3 scripts/configure-release-secrets.py <developer-id.p12>`; it checks both with Apple's tools before uploading. Updater signing key: `~/.tauri/scratch-fork-updater.key`, password in the login keychain item "Scratch fork updater key"; losing it means installed copies can no longer verify updates.
