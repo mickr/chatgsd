@@ -40,6 +40,10 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "copyright": "Copyright © 2026 Eric Li and Mick Ryan. MIT License.",
+    "resources": {
+      "../LICENSE": "LICENSE"
+    },
     "fileAssociations": [
       {
         "ext": ["md", "markdown"],
