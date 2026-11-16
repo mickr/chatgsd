@@ -80,7 +80,7 @@ describe("attached selection", () => {
   const highlight = (editor: Editor) =>
     editor.view.dom.querySelector(".agent-selection")?.textContent ?? null;
 
-  it("stays attached and highlighted after focus moves or the user clicks elsewhere", () => {
+  it("stays attached when focus moves to the sidebar and maps through edits", () => {
     const editor = openNote(NOTE);
     const { from, to } = find(editor, "rain jacket");
     editor.view.dom.dispatchEvent(new FocusEvent("focus"));
@@ -91,16 +91,65 @@ describe("attached selection", () => {
     editor.view.dom.dispatchEvent(new FocusEvent("blur"));
     expect(highlight(editor)).toBe("rain jacket");
 
+    editor.view.dispatch(editor.state.tr.insertText("My ", 1));
+    expect(attachedRange(editor)).toEqual({ from: from + 3, to: to + 3 });
+    expect(highlight(editor)).toBe("rain jacket");
+  });
+
+  it("clears the attachment when the user places the cursor elsewhere", () => {
+    const editor = openNote(NOTE);
+    Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip", session: 1 });
+    editor.commands.setTextSelection(find(editor, "rain jacket"));
+    editor.view.dom.dispatchEvent(new FocusEvent("blur"));
     editor.view.dom.dispatchEvent(new FocusEvent("focus"));
     editor.commands.setTextSelection(find(editor, "Charger").to);
-    expect(attachedRange(editor)).toEqual({ from, to });
-    expect(highlight(editor)).toBe("rain jacket");
+    expect(attachedRange(editor)).toBeNull();
+    expect(highlight(editor)).toBeNull();
+    expect(captureRunBinding(editor, "run")!.selectionMarkdown).toBeNull();
+  });
 
-    // Typing elsewhere moves it along with its text.
-    editor.commands.insertContentAt(1, "My ");
-    expect(highlight(editor)).toBe("rain jacket");
+  it("dismisses a selection with Escape without reattaching on later transactions", () => {
+    const editor = openNote(NOTE);
+    editor.commands.setTextSelection(find(editor, "rain jacket"));
+    editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(editor.state.selection.empty).toBe(true);
+    expect(attachedRange(editor)).toBeNull();
+    editor.view.dom.dispatchEvent(new FocusEvent("blur"));
+    editor.view.dispatch(editor.state.tr.insertText("My ", 1));
+    expect(attachedRange(editor)).toBeNull();
+    expect(highlight(editor)).toBeNull();
+  });
 
+  it("keeps editor focus when Escape dismisses an attachment before reaching app shortcuts", () => {
+    const editor = openNote(NOTE);
+    const container = editor.view.dom.parentElement!;
+    document.body.append(container);
+    const leaveEditor = (event: KeyboardEvent) => {
+      if (event.key === "Escape") editor.view.dom.blur();
+    };
+    window.addEventListener("keydown", leaveEditor);
+    try {
+      editor.view.focus();
+      editor.commands.setTextSelection(find(editor, "rain jacket"));
+      editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(attachedRange(editor)).toBeNull();
+      expect(document.activeElement).toBe(editor.view.dom);
+
+      // With nothing attached, Escape still reaches the app's navigation shortcut.
+      editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(document.activeElement).not.toBe(editor.view.dom);
+    } finally {
+      window.removeEventListener("keydown", leaveEditor);
+      container.remove();
+    }
+  });
+
+  it("clears both the live selection and highlight when the card is dismissed", () => {
+    const editor = openNote(NOTE);
+    editor.commands.setTextSelection(find(editor, "rain jacket"));
     detachSelection(editor);
+    expect(editor.state.selection.empty).toBe(true);
+    editor.view.dom.dispatchEvent(new FocusEvent("blur"));
     expect(attachedRange(editor)).toBeNull();
     expect(highlight(editor)).toBeNull();
   });
@@ -109,16 +158,15 @@ describe("attached selection", () => {
     const editor = openNote(NOTE);
     const range = find(editor, "rain jacket");
     editor.commands.setTextSelection(range);
-    editor.commands.setTextSelection(range.from);
     editor.commands.deleteRange(range);
     expect(attachedRange(editor)).toBeNull();
   });
 
-  it("is what a message is sent with, even after clicking elsewhere", () => {
+  it("sends the attachment after focus moves to the composer", () => {
     const editor = openNote(NOTE);
     Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip", session: 1 });
     editor.commands.setTextSelection(find(editor, "rain jacket"));
-    editor.commands.setTextSelection(find(editor, "Charger").to);
+    editor.view.dom.dispatchEvent(new FocusEvent("blur"));
     const binding = captureRunBinding(editor, "run")!;
     expect(binding.selectionMarkdown?.trim()).toBe("rain jacket");
     expect(attachedRange(editor)).toBeNull();

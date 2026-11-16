@@ -712,16 +712,19 @@ export function AgentProvider({
     },
     [persist],
   );
-  const toggle = useCallback(() => {
-    if (open) void stop();
-    setOpen(!open);
-    setFocusComposer((value) => value + 1);
-  }, [open, stop]);
   const close = useCallback(() => {
     void stop();
     setOpen(false);
-    editorRef.current?.commands.focus();
+    editorRef.current?.commands.focus(undefined, { scrollIntoView: false });
   }, [editorRef, stop]);
+  const toggle = useCallback(() => {
+    if (open) {
+      close();
+      return;
+    }
+    setOpen(true);
+    setFocusComposer((value) => value + 1);
+  }, [open, close]);
   const newConversation = useCallback(() => {
     if (!currentNote || conversationsRef.current[currentNote.id]?.runId) return;
     setCoeditingSession(null);

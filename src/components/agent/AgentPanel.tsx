@@ -246,6 +246,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const [reviewIndex, setReviewIndex] = useState(-1);
   const [sending, setSending] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerFocusRequested = useRef(false);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const status = agent.status;
@@ -334,8 +335,17 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     if (agent.editor) detachSelection(agent.editor);
   }, [agent.editor]);
   useEffect(() => {
-    if (visible && !reason) composer.current?.focus();
-  }, [visible, agent.focusComposer, reason]);
+    composerFocusRequested.current = visible;
+  }, [visible, agent.focusComposer]);
+  useEffect(() => {
+    if (!composerFocusRequested.current || !visible || reason || sending) return;
+    // Consume only the open request, not later send/status updates.
+    const frame = requestAnimationFrame(() => {
+      composer.current?.focus({ preventScroll: true });
+      composerFocusRequested.current = false;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [visible, agent.focusComposer, reason, sending]);
   useLayoutEffect(() => {
     if (follow.current && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
@@ -719,6 +729,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                 if (event.key === "Escape") {
                   event.preventDefault();
                   event.stopPropagation();
+                  clearSelection();
                   agent.editor?.commands.focus();
                 } else if (
                   event.key === "Enter" &&

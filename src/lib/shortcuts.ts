@@ -1,4 +1,4 @@
-import { mod, shift } from "./platform";
+import { mod, alt, shift } from "./platform";
 
 export interface Shortcut {
   keys: string[];
@@ -17,6 +17,7 @@ export const shortcutCategories: ShortcutCategory[] = [
       { keys: [mod, "P"], description: "Command palette" },
       { keys: [mod, shift, "F"], description: "Search notes" },
       { keys: [mod, "J"], description: "Toggle agent panel" },
+      { keys: [mod, alt, "B"], description: "Toggle agent panel" },
       { keys: [mod, "\\"], description: "Toggle sidebar" },
       { keys: [mod, ","], description: "Settings" },
       { keys: [mod, "/"], description: "Keyboard shortcuts" },

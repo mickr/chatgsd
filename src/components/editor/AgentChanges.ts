@@ -337,10 +337,9 @@ export function activeFocusRange(editor: Editor): FocusRange | null {
 }
 
 /**
- * The selection attached to the agent panel. Selecting text attaches it; it
- * then stays attached, mapped through edits, when the user clicks elsewhere to
- * read or scroll, until they select something else, clear it, delete the text,
- * or send it with a message.
+ * The selection attached to the agent panel. Moving focus to the composer keeps
+ * it attached and mapped through edits. Collapsing the editor selection or
+ * pressing Escape dismisses it.
  */
 interface AttachedSelection {
   range: { from: number; to: number } | null;
@@ -358,8 +357,10 @@ const attachedSelection = new Plugin<AttachedSelection>({
       const focused = meta && "focused" in meta ? meta.focused : previous.focused;
       if (meta && "clear" in meta) return { range: null, focused };
       const { from, to, empty } = state.selection;
-      let range = empty ? previous.range : { from, to };
-      if (range && empty && tr.docChanged) {
+      let range = tr.selectionSet
+        ? empty ? null : { from, to }
+        : previous.range;
+      if (range && !tr.selectionSet && tr.docChanged) {
         range = {
           from: tr.mapping.map(range.from, 1),
           to: tr.mapping.map(range.to, -1),
@@ -393,6 +394,17 @@ const attachedSelection = new Plugin<AttachedSelection>({
       return DecorationSet.create(state.doc, [
         Decoration.inline(range.from, range.to, { class: "agent-selection" }),
       ]);
+    },
+    handleKeyDown: (view, event) => {
+      if (event.key !== "Escape" || !attachedSelectionKey.getState(view.state)?.range)
+        return false;
+      event.stopPropagation();
+      const { tr } = view.state;
+      tr.setSelection(TextSelection.create(tr.doc, tr.selection.to));
+      view.dispatch(
+        tr.setMeta(attachedSelectionKey, { clear: true }).setMeta("addToHistory", false),
+      );
+      return true;
     },
     handleDOMEvents: {
       focus: (view) => {

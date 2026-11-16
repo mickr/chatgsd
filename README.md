@@ -74,6 +74,14 @@ the animation. Normal editor Undo works within the current note and cannot
 restore a different note. Conflicting external disk changes still use the
 existing merge review controls.
 
+Selecting text attaches it to the agent sidebar. Moving into the composer keeps
+that selection ready to send. Clicking elsewhere in the note, collapsing the
+selection with the keyboard, or pressing Escape clears the attachment. You can
+also dismiss it with the selection card's close button.
+Opening the agent panel with `Cmd+Option+B`, `Cmd+J`, or its toolbar button focuses
+the chat input when it is ready. Closing it returns focus to the note without
+moving your cursor.
+
 Small gutter markers identify passages changed in the latest editing turn.
 Hover, click, or focus a marker to inspect a read-only, word-level before/after
 diff rendered by [Pierre Diffs](https://diffs.com/). The viewer loads only when
@@ -139,6 +147,7 @@ ChatGSD is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Shift+Enter` | Toggle Focus mode      |
 | `Cmd+Shift+F`     | Search notes           |
 | `Cmd+J`           | Toggle agent panel     |
+| `Cmd+Option+B`    | Toggle agent panel     |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |
 | `Cmd+\`           | Toggle sidebar         |

@@ -136,6 +136,30 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+it.each(["toggle", "close"] as const)("returns focus to the note through %s without moving its cursor", async (action) => {
+  const note = editor.view.dom.parentElement!;
+  const composer = document.createElement("textarea");
+  document.body.append(note, composer);
+  try {
+    act(() => current.toggle());
+    await settle();
+    editor.commands.setTextSelection(5);
+    composer.focus();
+    expect(document.activeElement).toBe(composer);
+    vi.useFakeTimers();
+    act(() => current[action]());
+    await settle();
+    act(() => vi.advanceTimersByTime(20));
+    expect(current.open).toBe(false);
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.state.selection.from).toBe(5);
+    expect(editor.state.selection.to).toBe(5);
+  } finally {
+    note.remove();
+    composer.remove();
+  }
+});
+
 describe("AgentProvider model list", () => {
   it("retries a failed model request while the account stays ready", async () => {
     vi.mocked(agent.listModels)

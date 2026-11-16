@@ -16,6 +16,7 @@ import { SettingsPage } from "./components/settings";
 import { SpinnerIcon } from "./components/icons";
 import { AgentProvider, useAgent } from "./context/AgentContext";
 import { AgentPanel } from "./components/agent/AgentPanel";
+import { useAgentPanelShortcut } from "./components/agent/useAgentPanelShortcut";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
 import {
@@ -88,6 +89,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
     setFocusMode(false);
     if (!focusMode || !agent.open) agent.toggle();
   }, [focusMode, agent.open, agent.toggle]);
+  useAgentPanelShortcut(view !== "settings", toggleAgentPanel);
 
   // Listen for set-notes-folder event from CLI (scratch .)
   // Placed here in AppContent where both NotesContext and ThemeContext are available
@@ -185,11 +187,6 @@ function AppWorkspace({ editorRef, onEditorReady }: {
         return;
       }
 
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
-        e.preventDefault();
-        toggleAgentPanel();
-        return;
-      }
 
       // Cmd+Shift+Enter - Toggle focus mode
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "Enter") {

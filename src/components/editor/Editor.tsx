@@ -2336,7 +2336,7 @@ export function Editor({
           {onToggleAgentPanel && (
             <IconButton
               onClick={onToggleAgentPanel}
-              title={`Agent (${mod}${isMac ? "" : "+"}J)`}
+              title={`Agent (${mod}${isMac ? "" : "+"}${alt}${isMac ? "" : "+"}B)`}
               variant={agentPanelOpen ? "secondary" : "ghost"}
               aria-label="Toggle agent panel"
               aria-pressed={agentPanelOpen}
