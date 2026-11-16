@@ -18,6 +18,7 @@ use tokio::io::AsyncWriteExt;
 
 mod git;
 mod agent;
+mod legacy_data;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3042,7 +3043,7 @@ fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String>
     let url = format!("index.html?mode=preview&file={}", encoded_path);
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title(format!("{} — Scratch", filename))
+        .title(format!("{} — ChatGSD", filename))
         .inner_size(800.0, 600.0)
         .min_inner_size(400.0, 300.0)
         .resizable(true)
@@ -3181,6 +3182,14 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Before anything reads app data: bring over what the app saved as
+            // Scratch, under its old bundle ID.
+            match app.path().app_data_dir().map(|dir| legacy_data::migrate(&dir)) {
+                Ok(Ok(true)) => eprintln!("Copied app data from Scratch"),
+                Ok(Err(error)) => eprintln!("Could not copy app data from Scratch: {error}"),
+                _ => {}
+            }
+
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
 

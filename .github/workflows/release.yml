@@ -154,7 +154,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: "Scratch v__VERSION__"
+          releaseName: "ChatGSD v__VERSION__"
           releaseCommitish: main
           releaseBody: |
             ${{ needs.plan.outputs.notes }}
@@ -166,14 +166,14 @@ jobs:
 
       - name: Verify the signed, notarized app
         run: |
-          app=src-tauri/target/release/bundle/macos/Scratch.app
+          app=src-tauri/target/release/bundle/macos/ChatGSD.app
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
           # Installed copies must only ever update from this fork: the built app
           # has to carry exactly this repo's update feed and the fork's key.
-          bin="$app/Contents/MacOS/Scratch"
+          bin="$app/Contents/MacOS/ChatGSD"
           feeds=$(grep -aoE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/latest/download/latest\.json' "$bin" | sort -u)
           test "$feeds" = "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
           grep -aqF "$UPDATER_PUBKEY" "$bin"

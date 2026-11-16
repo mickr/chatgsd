@@ -412,7 +412,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
       <div className="h-full min-h-0 flex items-center justify-center bg-bg-secondary">
         <div className="text-text-muted/70 text-sm flex items-center gap-1.5 font-medium">
           <SpinnerIcon className="w-4.5 h-4.5 stroke-[1.5] animate-spin" />
-          Initializing Scratch...
+          Initializing ChatGSD...
         </div>
       </div>
     );
@@ -523,7 +523,7 @@ function UpdateToast({
     try {
       await update.downloadAndInstall();
       toast.dismiss(toastId);
-      toast.success("Update installed! Restart Scratch to apply.", {
+      toast.success("Update installed! Restart ChatGSD to apply.", {
         duration: Infinity,
         closeButton: true,
       });

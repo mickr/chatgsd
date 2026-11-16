@@ -65,7 +65,7 @@ impl ToolBridge {
                     .lock()
                     .expect("agent tools mutex")
                     .remove(&request_id);
-                return ToolOutput::error("Scratch could not reach the editor");
+                return ToolOutput::error("ChatGSD could not reach the editor");
             }
         }
         let response = match timeout {
@@ -80,7 +80,7 @@ impl ToolBridge {
             Some(Ok(output)) => output,
             Some(Err(_)) => ToolOutput::error("This agent run has ended"),
             None => {
-                ToolOutput::error("Scratch did not respond. Re-read the document and try again.")
+                ToolOutput::error("ChatGSD did not respond. Re-read the document and try again.")
             }
         }
     }

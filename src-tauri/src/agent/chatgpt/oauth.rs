@@ -144,7 +144,7 @@ async fn authorize(
                 }
             }
         } else {
-            query.append_pair("agent_name_hint", "Scratch");
+            query.append_pair("agent_name_hint", "ChatGSD");
         }
     }
     // Browser failures must never echo the authorization URL or its ID-token hint.
@@ -280,11 +280,11 @@ fn receive_callback(
         }
         let result = parse_callback(&query, client_id);
         let message = if result.is_ok() {
-            "You can return to Scratch to finish signing in."
+            "You can return to ChatGSD to finish signing in."
         } else {
-            "Sign-in did not finish. Return to Scratch for details."
+            "Sign-in did not finish. Return to ChatGSD for details."
         };
-        let mut response = tiny_http::Response::from_string(format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Scratch</title><body><h1>Scratch</h1><p>{message}</p></body></html>"));
+        let mut response = tiny_http::Response::from_string(format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>ChatGSD</title><body><h1>ChatGSD</h1><p>{message}</p></body></html>"));
         if let Ok(header) =
             tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8")
         {
@@ -307,7 +307,7 @@ fn parse_callback(
         return Err(auth(if error == "access_denied" {
             "ChatGPT sign-in was declined. Continue with ChatGPT to try again."
         } else {
-            "ChatGPT could not authorize Scratch. Please try signing in again."
+            "ChatGPT could not authorize ChatGSD. Please try signing in again."
         }));
     }
     let issued = match (client_id, query.get("client_id")) {
@@ -509,7 +509,7 @@ pub(super) async fn sign_out(app: &tauri::AppHandle) -> Result<(), String> {
         Ok(())
     };
     storage.clear_credentials().await?;
-    result.map_err(|error| format!("Signed out locally, but remote revocation was not confirmed. You can disconnect Scratch in ChatGPT Settings. {}", error.message))
+    result.map_err(|error| format!("Signed out locally, but remote revocation was not confirmed. You can disconnect ChatGSD in ChatGPT Settings. {}", error.message))
 }
 
 async fn revoke(credentials: &Credentials) -> Result<(), AgentError> {

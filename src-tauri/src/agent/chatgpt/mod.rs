@@ -294,7 +294,7 @@ async fn run_session(
         })
         .collect();
     let tools = [
-        json!({"type":"namespace", "name":"scratch", "description":"Read and precisely edit the live Scratch note, or read workspace notes.", "tools":functions}),
+        json!({"type":"namespace", "name":"scratch", "description":"Read and precisely edit the live note open in ChatGSD, or read workspace notes.", "tools":functions}),
     ];
     for _ in 0..MAX_ITERATIONS {
         context::fit(&mut input, context::MAX_INPUT_BYTES);

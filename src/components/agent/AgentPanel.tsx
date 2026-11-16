@@ -659,8 +659,8 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             <div className="mb-3 space-y-2">
               <p className="text-xs text-text-muted leading-relaxed">
                 {status?.status === "plan_usage_disabled"
-                  ? "You're signed in, but Scratch can't use your ChatGPT plan yet. Continue with ChatGPT to allow it."
-                  : "Use your ChatGPT plan in Scratch. Eligible requests use your plan or credits balance."}
+                  ? "You're signed in, but ChatGSD can't use your ChatGPT plan yet. Continue with ChatGPT to allow it."
+                  : "Use your ChatGPT plan in ChatGSD. Eligible requests use your plan or credits balance."}
               </p>
               <ContinueWithChatGPT />
             </div>

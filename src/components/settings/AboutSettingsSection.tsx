@@ -42,7 +42,7 @@ export function AboutSettingsSection() {
       <section className="pb-2">
         <h2 className="text-xl font-medium mb-0.5">Version</h2>
         <p className="text-sm text-text-muted mb-4">
-          You are currently using Scratch v{appVersion || "..."}
+          You are currently using ChatGSD v{appVersion || "..."}
         </p>
         <Button
           onClick={handleCheckForUpdates}
@@ -70,34 +70,32 @@ export function AboutSettingsSection() {
 
       {/* About Section */}
       <section className="pb-2">
-        <h2 className="text-xl font-medium mb-1">About Scratch</h2>
+        <h2 className="text-xl font-medium mb-1">About ChatGSD</h2>
         <p className="text-sm text-text-muted mb-4">
-          Scratch is a minimalist markdown scratchpad for capturing quick
-          thoughts, todos, and ideas. We're offline-first, keyboard-optimized,
-          AI-compatible, and open source with no cloud, no accounts, and no
-          subscriptions. Learn more on{" "}
-          <button
-            onClick={() => handleOpenUrl("https://www.ericli.io/scratch")}
-            className="text-text-muted border-b border-text-muted/50 hover:text-text hover:border-text cursor-pointer transition-colors"
-          >
-            our website
-          </button>
-          .
+          ChatGSD is a markdown notes app you co-edit with ChatGPT. It's
+          offline-first and keyboard-optimized, and your notes stay plain
+          markdown files on your computer.
         </p>
         <p className="text-sm text-text-muted mb-4">
-          Created and maintained by{" "}
+          Built by Mick Ryan on{" "}
+          <button
+            onClick={() => handleOpenUrl("https://github.com/erictli/scratch")}
+            className="text-text-muted border-b border-text-muted/50 hover:text-text hover:border-text cursor-pointer transition-colors"
+          >
+            Scratch
+          </button>
+          , created by{" "}
           <button
             onClick={() => handleOpenUrl("https://ericli.io")}
             className="text-text-muted border-b border-text-muted/50 hover:text-text hover:border-text cursor-pointer transition-colors"
           >
             Eric Li
-          </button>{" "}
-          with moral support from his cat, Mochi, and actual support from many
-          contributors on GitHub.
+          </button>
+          .
         </p>
         <div className="flex items-center gap-1">
           <Button
-            onClick={() => handleOpenUrl("https://github.com/erictli/scratch")}
+            onClick={() => handleOpenUrl("https://github.com/mickr/scratch")}
             variant="outline"
             size="md"
             className="gap-1.25"
@@ -107,7 +105,7 @@ export function AboutSettingsSection() {
           </Button>
           <Button
             onClick={() =>
-              handleOpenUrl("https://github.com/erictli/scratch/issues")
+              handleOpenUrl("https://github.com/mickr/scratch/issues")
             }
             variant="ghost"
             size="md"

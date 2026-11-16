@@ -1,8 +1,8 @@
-# Scratch - Development Guide
+# ChatGSD - Development Guide
 
 ## Project Overview
 
-Scratch is a cross-platform markdown note-taking app for macOS, Windows, and Linux, built with Tauri v2 (Rust backend) + React/TypeScript/Tailwind (frontend) + TipTap (WYSIWYG editor) + Tantivy (full-text search).
+ChatGSD is a markdown notes app you co-edit with ChatGPT, forked from [Scratch](https://github.com/erictli/scratch) by Eric Li. It's built with Tauri v2 (Rust backend) + React/TypeScript/Tailwind (frontend) + TipTap (WYSIWYG editor) + Tantivy (full-text search), and released for macOS. The bundle ID is `ai.chatgsd.desktop`; on first launch `src-tauri/src/legacy_data.rs` copies app data saved under Scratch's `com.scratch.app`. Internal names keep `scratch`: the `.scratch/` per-folder settings directory, the agent tool namespace, and the `scratch` CLI.
 
 ## Commands
 

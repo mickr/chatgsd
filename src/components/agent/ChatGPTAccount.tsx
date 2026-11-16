@@ -65,7 +65,7 @@ export function PlanNotice() {
       <div>
         <h3 className="text-sm font-medium">You're using your ChatGPT plan</h3>
         <p className="mt-1 text-xs leading-relaxed text-text-muted">
-          Eligible requests in Scratch use your ChatGPT plan or credits balance.
+          Eligible requests in ChatGSD use your ChatGPT plan or credits balance.
           You can review and manage usage in ChatGPT settings.
         </p>
       </div>
