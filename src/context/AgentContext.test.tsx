@@ -160,6 +160,33 @@ it.each(["toggle", "close"] as const)("returns focus to the note through %s with
   }
 });
 
+it.each(["toggle", "close"] as const)("returns focus to Markdown source through %s and preserves its selection", async (action) => {
+  const source = document.createElement("textarea");
+  source.dataset.noteSource = "";
+  source.value = "# Trip plan\n\nPack a rain jacket.";
+  const composer = document.createElement("textarea");
+  document.body.append(source, composer);
+  try {
+    source.focus();
+    source.setSelectionRange(13, 17);
+    act(() => current.toggle());
+    await settle();
+    composer.focus();
+    vi.useFakeTimers();
+    act(() => current[action]());
+    await settle();
+    act(() => vi.advanceTimersByTime(20));
+    expect(current.open).toBe(false);
+    expect(document.activeElement).toBe(source);
+    expect(source.selectionStart).toBe(13);
+    expect(source.selectionEnd).toBe(17);
+    expect(source.value).toBe("# Trip plan\n\nPack a rain jacket.");
+  } finally {
+    source.remove();
+    composer.remove();
+  }
+});
+
 describe("AgentProvider model list", () => {
   it("retries a failed model request while the account stays ready", async () => {
     vi.mocked(agent.listModels)

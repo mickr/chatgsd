@@ -2527,6 +2527,7 @@ export function Editor({
             /* Markdown source textarea */
             <div className="h-full">
               <textarea
+                data-note-source
                 value={sourceContent}
                 onChange={(e) => handleSourceChange(e.target.value)}
                 wrap="off"

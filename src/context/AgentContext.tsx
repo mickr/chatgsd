@@ -715,7 +715,9 @@ export function AgentProvider({
   const close = useCallback(() => {
     void stop();
     setOpen(false);
-    editorRef.current?.commands.focus(undefined, { scrollIntoView: false });
+    const source = document.querySelector<HTMLTextAreaElement>("[data-note-source]");
+    if (source) source.focus({ preventScroll: true });
+    else editorRef.current?.commands.focus(undefined, { scrollIntoView: false });
   }, [editorRef, stop]);
   const toggle = useCallback(() => {
     if (open) {

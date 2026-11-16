@@ -80,7 +80,7 @@ selection with the keyboard, or pressing Escape clears the attachment. You can
 also dismiss it with the selection card's close button.
 Opening the agent panel with `Cmd+Option+B`, `Cmd+J`, or its toolbar button focuses
 the chat input when it is ready. Closing it returns focus to the note without
-moving your cursor.
+moving your cursor, in both formatted and Markdown source mode.
 
 Small gutter markers identify passages changed in the latest editing turn.
 Hover, click, or focus a marker to inspect a read-only, word-level before/after
