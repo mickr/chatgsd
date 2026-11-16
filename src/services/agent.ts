@@ -19,7 +19,6 @@ export interface RunContext {
   noteId: string;
   noteTitle: string;
   selection: string | null;
-  computerAccess?: boolean;
 }
 export interface StartRunRequest {
   model: string | null;
@@ -27,7 +26,6 @@ export interface StartRunRequest {
   uiGuide: string;
   sessionId: string | null;
   prompt: string;
-  computerAccess: boolean;
   context: RunContext;
 }
 export type AgentErrorKind = "auth" | "usage_limit" | "not_eligible" | "other";
@@ -58,8 +56,6 @@ export interface ConversationSummary {
 }
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
-export const setupComputerPermissions = () =>
-  invoke<string>("agent_computer_permissions");
 export const listModels = () => invoke<ModelInfo[]>("agent_list_models");
 export const startRun = (request: StartRunRequest) =>
   invoke<{ runId: string }>("agent_start_run", { request });

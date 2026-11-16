@@ -1,6 +1,5 @@
 mod bridge;
 pub mod chatgpt;
-pub mod computer;
 pub mod conversations;
 pub mod events;
 pub mod note_edits;
@@ -21,7 +20,6 @@ pub struct RunContext {
     pub note_id: String,
     pub note_title: String,
     pub selection: Option<String>,
-    pub computer_access: bool,
     pub notes_folder: PathBuf,
     /// Scratch UI block guide from the frontend, generated from its component catalog.
     pub ui_guide: String,
@@ -77,8 +75,6 @@ pub struct StartRunRequest {
     ui_guide: String,
     session_id: Option<String>,
     prompt: String,
-    #[serde(default)]
-    computer_access: bool,
     context: RequestContext,
 }
 #[derive(Serialize)]
@@ -145,7 +141,6 @@ pub async fn agent_start_run(
         note_id: request.context.note_id,
         note_title: request.context.note_title,
         selection: request.context.selection,
-        computer_access: request.computer_access,
         ui_guide: request.ui_guide,
         notes_folder,
     };
@@ -221,50 +216,4 @@ pub fn agent_tool_respond(
     state
         .bridge
         .respond(&request_id, tools::ToolOutput { ok, text: output });
-}
-
-// Computer use Tauri commands
-
-#[tauri::command]
-pub async fn agent_computer_check_permissions() -> Result<computer::PermissionStatus, String> {
-    computer::check_permissions().await
-}
-
-#[tauri::command]
-pub async fn agent_computer_start(app: tauri::AppHandle) -> Result<(), String> {
-    // Get host bundle ID from app
-    let bundle_id = app.package_info().bundle_identifier.clone();
-    if bundle_id.is_empty() {
-        return Err("Failed to get bundle identifier".to_string());
-    }
-    
-    // Start the session (no explicit UI opt-in here; caller checks computer_access)
-    let _ = computer::ComputerSession::start(&bundle_id).await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn agent_computer_tools() -> Result<Vec<serde_json::Value>, String> {
-    // Create a temporary session just to get tool schemas
-    // The session will be dropped at end of function
-    let bundle_id = "com. Scratch";
-    let session = computer::ComputerSession::start(bundle_id).await?;
-    Ok(session.tools())
-}
-
-#[tauri::command]
-pub async fn agent_computer_call(
-    name: String,
-    args: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    // Create a temporary session
-    let bundle_id = "com. Scratch";
-    let mut session = computer::ComputerSession::start(bundle_id).await?;
-    session.call(&name, args).await
-}
-
-#[tauri::command]
-pub async fn agent_computer_shutdown() -> Result<(), String> {
-    // The session is handled in-memory; cleanup happens via Drop
-    Ok(())
 }

@@ -212,7 +212,7 @@ export interface AgentContextValue {
   pendingEdit: NoteEditItem | null;
   reviewNoteEdit: (decision: NoteEditDecision) => Promise<void>;
   conversation: Conversation;
-  send: (prompt: string, computerAccess?: boolean) => Promise<boolean>;
+  send: (prompt: string) => Promise<boolean>;
   stop: () => Promise<void>;
   newConversation: () => void;
   /** The current note's saved conversations, most recent first. */
@@ -619,7 +619,7 @@ export function AgentProvider({
     };
   }, [editorRef, processEvent, processTool]);
   const send = useCallback(
-    async (prompt: string, computerAccess = false) => {
+    async (prompt: string) => {
       const editor = editorRef.current;
       if (!editor || !currentNote || !prompt.trim() || !ready) return false;
       if (conversationsRef.current[currentNote.id]?.runId) return false;
@@ -642,7 +642,6 @@ export function AgentProvider({
         noteId: binding.noteId,
         noteTitle: binding.noteTitle,
         selection: binding.selectionMarkdown,
-        computerAccess,
       };
       updateConversation(binding.noteId, (conversation) => ({
         ...conversation,
@@ -671,7 +670,6 @@ export function AgentProvider({
           uiGuide,
           sessionId,
           prompt: prompt.trim(),
-          computerAccess,
           context,
         });
         if (runs.current.get(temporaryId) !== run) {
