@@ -210,7 +210,6 @@ function editBlocks(
   markdown: string,
   edit: LocatedEdit,
 ) {
-  if (REFERENCE_DEFINITION.test(edit.text)) return null;
   const delta = edit.text.length - (edit.end - edit.start);
   let low = segments.findIndex((segment) => segment.end > edit.start);
   if (low < 0) low = segments.length - 1;
@@ -223,6 +222,9 @@ function editBlocks(
   const to = Math.max(segments[high].end, edit.end) + delta;
   const next =
     markdown.slice(0, edit.start) + edit.text + markdown.slice(edit.end);
+  // The block index is only built for notes without definitions, so any line
+  // that reads as one now was made by this edit, perhaps only partly by its text.
+  if (REFERENCE_DEFINITION.test(next)) return null;
   const source = next.slice(from, to);
   // Anything still open at the window's end swallows a following paragraph;
   // a closed window leaves it as its own last block.

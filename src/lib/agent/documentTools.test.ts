@@ -282,4 +282,10 @@ describe("editedDocuments", () => {
   it("adds a link reference that later blocks use", () => {
     sequential("See [docs].\n\nMiddle\n\nMore\n\nEnd\n", [["End", "End\n\n[docs]: https://example.com"]]);
   });
+
+  it("notices a link reference completed by a partial replacement", () => {
+    sequential("See [docs].\n\nMiddle\n\nMore\n\n[docs] PENDING\n", [
+      ["] PENDING", "]: https://example.com"],
+    ]);
+  });
 });
