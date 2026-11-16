@@ -119,8 +119,9 @@ to read again rather than pretending you answered. These check-ins use your
 ChatGPT plan. **Pause**, closing the panel, switching notes, and errors stop
 automatic check-ins. Opening Scratch alone does not start model requests.
 
-For tasks that need another app, install [Cua Driver](https://cua.ai/docs/cua-driver/quickstart)
-(0.38 or later). **Computer access** is on by default under **Settings →
+macOS installs and automatic updates include [Cua Driver](https://cua.ai/docs/cua-driver/quickstart)
+0.38.0, so computer use needs no separate driver installation. Computer use requires
+macOS 13 or later. **Computer access** is on by default under **Settings →
 Integrations → Agent**. The choice is saved with the notes folder; turning it
 off pauses the active session. For example: “Find the project brief in Box and use
 it to update this section.” The run can access other apps and your signed-in
@@ -128,12 +129,13 @@ browser; captured text and screenshots are sent to ChatGPT. Screenshot pixels
 are not saved in Scratch's conversation history, but tool text and extracted
 information can be.
 
-On macOS, choose **Set up Cua permissions** in Settings → Integrations, grant Scratch Accessibility and
-Screen Recording in System Settings, then fully quit and reopen Scratch.
-Scratch starts its own embedded Cua process, so those grants belong to Scratch,
-not a separately launched driver. The driver executable must be installed
-locally; it is not included in Scratch's DMG. `CUA_DRIVER_PATH` can select an
-explicit executable when launching Scratch from a development environment.
+On macOS, choose **Set up Cua permissions** in Settings → Integrations, grant ChatGSD Accessibility and
+Screen Recording in System Settings, then fully quit and reopen ChatGSD.
+ChatGSD starts its bundled driver as an embedded child process, so those grants
+belong to ChatGSD. Installing or updating the app does not grant OS permissions.
+Apple Silicon source builds prepare the pinned, checksum-verified driver automatically
+before `tauri dev` or `tauri build`. `CUA_DRIVER_PATH` can select an explicit
+executable for development; otherwise the bundled copy takes priority over PATH.
 
 Computer use is background-only; desktop input and foreground delivery are
 rejected. Unsupported interactions fail rather than take over your keyboard or

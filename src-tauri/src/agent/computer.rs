@@ -235,9 +235,21 @@ async fn socket_ready(socket: &std::path::Path) -> bool {
 }
 
 fn resolve_binary() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("CUA_DRIVER_PATH") {
-        let path = PathBuf::from(path);
+    resolve_binary_at(
+        std::env::var_os("CUA_DRIVER_PATH").map(PathBuf::from),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn resolve_binary_at(override_path: Option<PathBuf>, executable: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(path) = override_path {
         return path.is_file().then_some(path).ok_or_else(|| "CUA_DRIVER_PATH does not name a driver executable.".into());
+    }
+    // Tauri places sidecars beside the host executable, including inside the
+    // signed .app. This works without a shell PATH or a separate installation.
+    if let Some(directory) = executable.as_deref().and_then(std::path::Path::parent) {
+        let bundled = directory.join(if cfg!(windows) { "cua-driver.exe" } else { "cua-driver" });
+        if bundled.is_file() { return Ok(bundled); }
     }
     let mut paths = vec![PathBuf::from("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")];
     if let Some(home) = std::env::var_os("HOME") { paths.push(PathBuf::from(home).join(".local/bin/cua-driver")); }
@@ -245,7 +257,7 @@ fn resolve_binary() -> Result<PathBuf, String> {
         paths.extend(std::env::split_paths(&path).map(|path| path.join(if cfg!(windows) { "cua-driver.exe" } else { "cua-driver" })));
     }
     paths.extend(["/opt/homebrew/bin/cua-driver", "/usr/local/bin/cua-driver"].map(PathBuf::from));
-    paths.into_iter().find(|path| path.is_file()).ok_or_else(|| "Install Cua Driver 0.38 or later before enabling computer use.".into())
+    paths.into_iter().find(|path| path.is_file()).ok_or_else(|| "Cua Driver is missing from this ChatGSD installation. Reinstall or update ChatGSD. For source builds, prepare the bundled driver or set CUA_DRIVER_PATH.".into())
 }
 
 #[cfg(target_os = "macos")]
@@ -324,6 +336,24 @@ fn validate_arguments(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_bundled_driver_and_honors_explicit_override() {
+        let root = std::env::temp_dir().join(format!("chatgsd-driver-test-{}", uuid::Uuid::new_v4()));
+        let app = root.join("ChatGSD.app/Contents/MacOS");
+        std::fs::create_dir_all(&app).unwrap();
+        let host = app.join("ChatGSD");
+        let bundled = app.join(if cfg!(windows) { "cua-driver.exe" } else { "cua-driver" });
+        let custom = root.join("custom-driver");
+        std::fs::write(&bundled, b"bundled").unwrap();
+        std::fs::write(&custom, b"custom").unwrap();
+
+        assert_eq!(resolve_binary_at(None, Some(host.clone())).unwrap(), bundled);
+        assert_eq!(resolve_binary_at(Some(custom.clone()), Some(host.clone())).unwrap(), custom);
+        // A bad explicit override must not silently run a different executable.
+        assert!(resolve_binary_at(Some(root.join("missing")), Some(host)).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejects_nested_scope_and_host_overrides() {

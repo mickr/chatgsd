@@ -166,6 +166,7 @@ jobs:
 
       - name: Verify the signed, notarized app
         run: |
+          set -euo pipefail
           app=src-tauri/target/release/bundle/macos/ChatGSD.app
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
@@ -179,6 +180,31 @@ jobs:
           grep -aqF "$UPDATER_PUBKEY" "$bin"
           # The MIT license must ship with every copy.
           cmp LICENSE "$app/Contents/Resources/LICENSE"
+          # Tauri signs externalBin executables with the release identity before
+          # signing and notarizing the enclosing app. Don't ship upstream's signature.
+          driver="$app/Contents/MacOS/cua-driver"
+          test -x "$driver"
+          test "$("$driver" --version)" = "cua-driver 0.38.0"
+          requirement="anchor apple generic and certificate leaf = H\"$APPLE_SIGNING_IDENTITY\" and certificate leaf[subject.OU] = \"$APPLE_TEAM_ID\""
+          codesign --verify --strict --verbose=2 --test-requirement "$requirement" "$driver"
+          signature=$(codesign --display --verbose=4 "$driver" 2>&1)
+          grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+
+          # Automatic updates must carry the same executable, permissions and
+          # license notices as a fresh install, not just the main app binary.
+          updater_dir=$(mktemp -d "$RUNNER_TEMP/chatgsd-updater.XXXXXX")
+          trap 'rm -rf "$updater_dir"' EXIT
+          tar -xzf "$app.tar.gz" -C "$updater_dir" \
+            ChatGSD.app/Contents/MacOS/cua-driver \
+            ChatGSD.app/Contents/Resources/licenses/cua-driver/LICENSE \
+            ChatGSD.app/Contents/Resources/licenses/cua-driver/THIRD_PARTY_NOTICES.md
+          updated_app="$updater_dir/ChatGSD.app"
+          test -x "$updated_app/Contents/MacOS/cua-driver"
+          cmp "$driver" "$updated_app/Contents/MacOS/cua-driver"
+          for license in LICENSE THIRD_PARTY_NOTICES.md; do
+            cmp "src-tauri/resources/cua-driver/$license" "$app/Contents/Resources/licenses/cua-driver/$license"
+            cmp "$app/Contents/Resources/licenses/cua-driver/$license" "$updated_app/Contents/Resources/licenses/cua-driver/$license"
+          done
 
       # Only a verified build becomes the latest release the updater sees.
       - name: Publish

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "node scripts/prepare-cua-driver.mjs && npm run dev",
+    "beforeBuildCommand": "node scripts/prepare-cua-driver.mjs && npm run build"
+  },
+  "bundle": {
+    "externalBin": ["binaries/cua-driver"],
+    "resources": {
+      "resources/cua-driver/LICENSE": "licenses/cua-driver/LICENSE",
+      "resources/cua-driver/THIRD_PARTY_NOTICES.md": "licenses/cua-driver/THIRD_PARTY_NOTICES.md"
+    }
+  }
+}

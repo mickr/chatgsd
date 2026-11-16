@@ -27,6 +27,11 @@ dist-ssr
 src-tauri/target/
 src-tauri/gen/
 
+# Downloaded, checksum-verified Cua Driver sidecar and bundled licenses
+src-tauri/binaries/cua-driver-aarch64-apple-darwin
+src-tauri/binaries/.cua-driver-*/
+src-tauri/resources/cua-driver/
+
 # Secrets: keys, certificates and env files never belong in the repo. CI's
 # gitleaks job scans every commit for any that slip through.
 .env
