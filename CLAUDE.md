@@ -47,8 +47,10 @@ Runs on every push to `main` and on PRs. Validates frontend build (`tsc` + Vite)
 
 ## Releasing
 
-1. Bump version in `package.json` and `src-tauri/tauri.conf.json`
-2. Commit to `main`, then tag and push: `git tag v0.5.0 && git push origin v0.5.0`
-3. The release workflow builds all platforms and creates a draft GitHub release
-4. Update the description in `latest.json` from GitHub after the action finishes
-5. Review, edit notes, and publish
+Releases are macOS only, built, signed with Developer ID, and notarized by `.github/workflows/release.yml` on the self-hosted `mars-scratch` runner (this Mac; installed in `~/.local/share/github-actions/mars-scratch`, LaunchAgent `actions.runner.mickr-scratch.mars-scratch`).
+
+1. Bump the version in `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`
+2. Commit to `main`, then tag and push: `git tag v1.2.0 && git push origin main v1.2.0`
+3. The workflow uploads a draft release, verifies the signature, notarization ticket and Gatekeeper assessment, then publishes it. Installed copies update from that release's `latest.json`
+
+Secrets live in the repo's `release` environment, reachable only from `v*` tags. Signing and notarization: run `python3 scripts/configure-release-secrets.py <developer-id.p12>` (needed again when the certificate expires). Updater signing key: `~/.tauri/scratch-fork-updater.key`, password in the login keychain item "Scratch fork updater key"; losing it means installed copies can no longer verify updates.
