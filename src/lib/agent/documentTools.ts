@@ -4,15 +4,30 @@ import {
   Slice,
   type Node as ProseMirrorNode,
 } from "@tiptap/pm/model";
-import { closeHistory } from "@tiptap/pm/history";
+import { closeHistory, history } from "@tiptap/pm/history";
 import type { Transaction } from "@tiptap/pm/state";
 import {
   agentChangesKey,
   attachedRange,
   detachSelection,
+  clearAgentPresence,
   setChangeMeta,
   type AgentChange,
 } from "../../components/editor/AgentChanges";
+import { documentChange, type NoteChange } from "./turnChanges";
+import type { AgentLineChange } from "../../components/editor/AgentChangeMarker";
+
+const undoHistoryKey = history().spec.key;
+
+/** Loading another note must not make the previous document undoable here. */
+export function clearDocumentHistory(editor: Editor): void {
+  const plugins = editor.state.plugins;
+  const withoutHistory = plugins.filter((plugin) => plugin.spec.key !== undoHistoryKey);
+  if (withoutHistory.length === plugins.length) return;
+  editor.view.updateState(
+    editor.state.reconfigure({ plugins: withoutHistory }).reconfigure({ plugins }),
+  );
+}
 
 export interface RunBinding {
   runId: string;
@@ -26,6 +41,20 @@ export interface DocumentEdit {
   old_text: string;
   new_text: string;
 }
+
+/**
+ * Set the agent's independent caret without moving user selection or focus.
+ */
+function setAgentPresence(
+  editor: Editor,
+  range: { from: number; to: number },
+): void {
+  editor.view.dispatch(
+    setChangeMeta(editor.state.tr, {
+      presence: { agent: range },
+    }).setMeta("addToHistory", false));
+}
+
 
 /**
  * TipTap writes `&nbsp;` into empty table cells. A space reads the same and keeps
@@ -399,6 +428,16 @@ function trackedStep(
   };
 }
 
+/** Include the surrounding block so the marker's diff has readable context. */
+function changeExcerpt(editor: Editor, doc: ProseMirrorNode, from: number, to: number): string {
+  const start = doc.resolve(from);
+  const end = doc.resolve(to);
+  return editor.storage.markdown.manager.serialize({
+    type: "doc",
+    content: doc.slice(start.depth ? start.before(1) : from, end.depth ? end.after(1) : to).content.toJSON(),
+  });
+}
+
 /**
  * Apply every target document in order as one transaction with one hunk per
  * step. Building the whole transaction before dispatching keeps a batch atomic:
@@ -411,6 +450,46 @@ export function applyTrackedDocuments(
   runId: string | null,
 ): number {
   const tr = closeHistory(editor.state.tr);
+  if (origin === "agent") {
+    let count = 0;
+    let range: { from: number; to: number } | null = null;
+    const arrival: Array<{ from: number; to: number }> = [];
+    const lineChanges: AgentLineChange[] = [];
+    for (const target of targets) {
+      const diff = minimalDocumentDiff(tr.doc, target);
+      if (!diff) continue;
+      const firstStep = tr.steps.length;
+      const before = changeExcerpt(editor, tr.doc, diff.from, diff.to);
+      tr.replace(diff.from, diff.to, diff.slice);
+      const mapping = tr.mapping.slice(firstStep);
+      for (const previous of arrival) {
+        previous.from = mapping.map(previous.from, -1);
+        previous.to = mapping.map(previous.to, 1);
+      }
+      for (const change of lineChanges) {
+        change.from = mapping.map(change.from, -1);
+        change.to = mapping.map(change.to, 1);
+      }
+      range = { from: diff.from, to: diff.from + diff.slice.size };
+      if (range.from < range.to) arrival.push(range);
+      const start = tr.doc.resolve(range.from);
+      const end = tr.doc.resolve(range.to);
+      const markerRange = start.sameParent(end) && start.parent.isTextblock
+        ? { from: start.start(), to: start.end() } : range;
+      const earlier = lineChanges.find((change) => change.from === markerRange.from && change.to === markerRange.to);
+      const after = changeExcerpt(editor, tr.doc, range.from, range.to);
+      if (earlier) earlier.after = after;
+      else lineChanges.push({
+        id: crypto.randomUUID(), runId, ...markerRange, before, after,
+      });
+      count++;
+    }
+    if (!range) return 0;
+    editor.view.dispatch(setChangeMeta(tr, { source: "agent", presence: { agent: range }, arrival, lineChanges }));
+    // Keep subsequent typing in its own undo event, even at the same position.
+    editor.view.dispatch(closeHistory(editor.state.tr).setMeta("addToHistory", false));
+    return count;
+  }
   const added: AgentChange[] = [];
   for (const target of targets) {
     const firstStep = tr.steps.length;
@@ -425,7 +504,7 @@ export function applyTrackedDocuments(
   }
   if (!added.length) return 0;
   setChangeMeta(tr, {
-    source: origin === "agent" ? "agent" : "merge",
+    source: "merge",
     add: added,
   });
   editor.view.dispatch(tr);
@@ -450,34 +529,50 @@ export function applyTrackedReplacement(
 }
 
 /**
- * Captures what a run works on: the note, and the selection attached to the
+ * Captures what a run works on: the note, and optionally the selection attached to the
  * panel (which may have been made before the user clicked elsewhere). The
  * selection becomes the run's focus range and is detached from the panel.
+ * 
+ * @param captureSelection - If true (default), capture the current attached selection.
+ *   Set to false for auto observation turns to avoid consuming user selection.
  */
 export function captureRunBinding(
   editor: Editor,
   runId: string,
+  captureSelection = true,
 ): RunBinding | null {
   const document = editor.storage.scratchDocument;
   if (!document?.noteId) return null;
-  const range = attachedRange(editor);
+  
+  let range: { from: number; to: number } | null = null;
   let selectionMarkdown: string | null = null;
   let focusRangeId: string | null = null;
-  if (range) {
-    const manager = editor.storage.markdown?.manager;
-    if (!manager) return null;
-    selectionMarkdown = manager.serialize({
-      type: "doc",
-      content: editor.state.doc.slice(range.from, range.to).content.toJSON(),
-    });
-    focusRangeId = crypto.randomUUID();
-    detachSelection(editor);
-    editor.view.dispatch(
-      setChangeMeta(editor.state.tr, {
-        focus: { id: focusRangeId, from: range.from, to: range.to },
-      }).setMeta("addToHistory", false),
-    );
+  
+  if (captureSelection) {
+    const attached = attachedRange(editor);
+    if (attached) {
+      const manager = editor.storage.markdown?.manager;
+      if (!manager) return null;
+      range = { from: attached.from, to: attached.to };
+      selectionMarkdown = manager.serialize({
+        type: "doc",
+        content: editor.state.doc.slice(range.from, range.to).content.toJSON(),
+      });
+      focusRangeId = crypto.randomUUID();
+      detachSelection(editor);
+      editor.view.dispatch(
+        setChangeMeta(editor.state.tr, {
+          focus: { id: focusRangeId, from: range.from, to: range.to },
+        }).setMeta("addToHistory", false),
+      );
+    }
   }
+  
+  if (captureSelection) {
+    const position = range?.to ?? editor.state.selection.from;
+    setAgentPresence(editor, { from: position, to: position });
+  }
+  
   return {
     runId,
     documentSession: document.session,
@@ -491,14 +586,20 @@ export function captureRunBinding(
 export function releaseRunBinding(
   editor: Editor | null,
   binding: RunBinding,
+  keepPresence = false,
 ): void {
-  if (!editor || editor.isDestroyed || !binding.focusRangeId) return;
+  if (!editor || editor.isDestroyed || binding.documentSession !== editor.storage.scratchDocument.session) return;
+  if (!keepPresence) {
+    clearAgentPresence(editor);
+  }
+  if (!binding.focusRangeId) return;
   editor.view.dispatch(
     setChangeMeta(editor.state.tr, {
       releaseFocus: binding.focusRangeId,
     }).setMeta("addToHistory", false),
   );
 }
+
 
 function objectArgs(args: unknown): Record<string, unknown> {
   if (!args || typeof args !== "object" || Array.isArray(args))
@@ -511,7 +612,7 @@ export async function executeDocumentTool(
   binding: RunBinding,
   name: string,
   args: unknown,
-): Promise<{ ok: boolean; output: string }> {
+): Promise<{ ok: boolean; output: string; change?: NoteChange }> {
   try {
     if (
       !editor ||
@@ -525,10 +626,8 @@ export async function executeDocumentTool(
     }
     const input = objectArgs(args);
     if (name === "read_document") {
-      const range = agentChangesKey
-        .getState(editor.state)
-        ?.focusRanges.find((item) => item.id === binding.focusRangeId);
       let selection = "none";
+      const range = attachedRange(editor);
       if (range && range.from < range.to) {
         const markdown = editor.storage.markdown.manager.serialize({
           type: "doc",
@@ -541,6 +640,8 @@ export async function executeDocumentTool(
             ? `(first ${SELECTION_PREVIEW_CHARS} of ${markdown.length} characters) ${JSON.stringify(markdown.slice(0, SELECTION_PREVIEW_CHARS))}`
             : JSON.stringify(markdown);
       }
+      const position = editor.state.doc.firstChild?.isTextblock ? 1 : 0;
+      setAgentPresence(editor, range ?? { from: position, to: position });
       return {
         ok: true,
         output: `Note: ${editor.storage.scratchDocument.title}\nSelection: ${selection}\n---\n${serializeDocument(editor)}`,
@@ -549,13 +650,14 @@ export async function executeDocumentTool(
     if (name === "edit_document") {
       if (!Array.isArray(input.edits))
         throw new Error("edits must be an array of replacements.");
-      const documents = editedDocuments(
-        editor,
-        serializeDocument(editor),
-        input.edits as DocumentEdit[],
-      );
+      const before = serializeDocument(editor);
+      const documents = editedDocuments(editor, before, input.edits as DocumentEdit[]);
       applyTrackedDocuments(editor, documents, "agent", binding.runId);
-      return { ok: true, output: `Applied ${documents.length} edit(s).` };
+      return {
+        ok: true,
+        output: `Applied ${documents.length} edit(s).`,
+        change: documentChange(binding.noteTitle, before, serializeDocument(editor)),
+      };
     }
     if (name === "replace_selection") {
       if (typeof input.new_text !== "string")
@@ -578,6 +680,7 @@ export async function executeDocumentTool(
         parsed.firstChild?.type.name === "paragraph";
       const content = inline ? parsed.firstChild!.content : parsed.content;
       const slice = new Slice(input.new_text ? content : Fragment.empty, 0, 0);
+      const before = serializeDocument(editor);
       applyTrackedReplacement(
         editor,
         range.from,
@@ -587,7 +690,11 @@ export async function executeDocumentTool(
         binding.runId,
         !inline,
       );
-      return { ok: true, output: "Replaced selection." };
+      return {
+        ok: true,
+        output: "Replaced selection.",
+        change: documentChange(binding.noteTitle, before, serializeDocument(editor)),
+      };
     }
     throw new Error(`Unknown document tool: ${name}`);
   } catch (error) {

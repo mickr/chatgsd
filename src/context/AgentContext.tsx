@@ -19,6 +19,9 @@ import type { Spec } from "@json-render/core";
 import { uiGuide } from "../lib/agent/ui/catalog";
 import { renderableSpec } from "../lib/agent/ui/content";
 import { clipPreview } from "../lib/agent/selection";
+import { useCoeditingObserver } from "../lib/agent/useCoeditingObserver";
+import { clearAgentPresence } from "../components/editor/AgentChanges";
+import { noteEditChange, type NoteChange } from "../lib/agent/turnChanges";
 import {
   captureRunBinding,
   releaseRunBinding,
@@ -53,38 +56,9 @@ export type TranscriptItem =
       form: Spec | null;
       answer: string | null;
     }
-  | {
-      id: string;
-      type: "note_edit";
-      runId: string;
-      requestId: string;
-      /** The backend's record of what to write, and in which notes folder. */
-      proposalId: string;
-      noteId: string;
-      title: string;
-      summary: string;
-      edits: NoteEdit[];
-      preview: NoteEditPreview[];
-      status: "pending" | "applying" | "applied" | "declined" | "failed";
-      /** The decline feedback or the save error. */
-      message: string | null;
-    };
+  | { id: string; type: "activity"; text: string }
+  | { id: string; type: "changes"; change: NoteChange };
 export type QuestionItem = Extract<TranscriptItem, { type: "question" }>;
-export type NoteEditItem = Extract<TranscriptItem, { type: "note_edit" }>;
-export interface NoteEdit {
-  old_text: string;
-  new_text: string;
-}
-/** One edit as reviewed: the replaced text with the rest of its line. */
-export interface NoteEditPreview {
-  before: string;
-  removed: string;
-  added: string;
-  after: string;
-}
-export type NoteEditDecision =
-  | { approve: true }
-  | { approve: false; feedback?: string };
 /** A form submission (the bound answers object) or a typed/picked answer. */
 export type QuestionAnswer = string | Record<string, unknown>;
 
@@ -106,42 +80,6 @@ function parseQuestion(args: unknown) {
   return { question, options, form: renderableSpec(input.form) };
 }
 
-const isString = (value: unknown): value is string => typeof value === "string";
-const hasStrings = (value: unknown, keys: string[]) =>
-  !!value &&
-  typeof value === "object" &&
-  keys.every((key) => isString((value as Record<string, unknown>)[key]));
-
-/** An edit_note request from the backend, or null if it's malformed. */
-function parseNoteEdit(args: unknown) {
-  const input =
-    args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-  const { proposalId, id, title, summary, edits, preview } = input;
-  if (
-    !isString(proposalId) ||
-    !isString(id) ||
-    !isString(title) ||
-    !isString(summary) ||
-    !Array.isArray(edits) ||
-    !Array.isArray(preview) ||
-    !edits.every((edit) => hasStrings(edit, ["old_text", "new_text"])) ||
-    !preview.every((hunk) =>
-      hasStrings(hunk, ["before", "removed", "added", "after"]),
-    )
-  )
-    return null;
-  return {
-    proposalId,
-    noteId: id,
-    title,
-    summary,
-    edits: edits as NoteEdit[],
-    preview: preview as NoteEditPreview[],
-  };
-}
-
-/** Tools that show as their own card instead of a tool row. */
-const CARD_TOOLS = new Set(["ask_user", "edit_note"]);
 
 function describeAnswer(answer: QuestionAnswer) {
   if (typeof answer === "string")
@@ -171,7 +109,9 @@ const emptyConversation = (): Conversation => ({
   error: null,
   cancelled: false,
 });
-const TRANSCRIPT_TYPES = new Set(["user", "text", "tool", "question", "note_edit"]);
+const TRANSCRIPT_TYPES: Record<string, true> = {
+  user: true, text: true, tool: true, question: true, activity: true, changes: true,
+};
 /** A saved transcript, keeping only items this version knows how to show. */
 function parseTranscript(value: unknown): TranscriptItem[] {
   if (!Array.isArray(value)) return [];
@@ -180,7 +120,7 @@ function parseTranscript(value: unknown): TranscriptItem[] {
       !!item &&
       typeof item === "object" &&
       typeof item.id === "string" &&
-      TRANSCRIPT_TYPES.has(item.type),
+      typeof item.type === "string" && TRANSCRIPT_TYPES[item.type] === true,
   );
 }
 interface ActiveRun {
@@ -208,12 +148,13 @@ export interface AgentContextValue {
   /** The current note's unanswered ask_user question while its run is active. */
   pendingQuestion: QuestionItem | null;
   answerQuestion: (answer: QuestionAnswer) => Promise<void>;
-  /** The current note's proposed edit to another note, while its run waits. */
-  pendingEdit: NoteEditItem | null;
-  reviewNoteEdit: (decision: NoteEditDecision) => Promise<void>;
   conversation: Conversation;
-  send: (prompt: string) => Promise<boolean>;
+  send: (prompt: string, computerAccess?: boolean) => Promise<boolean>;
   stop: () => Promise<void>;
+  coediting: boolean;
+  resumeCoediting: () => void;
+  computerAccess: boolean;
+  setComputerAccess: (enabled: boolean) => void;
   newConversation: () => void;
   /** The current note's saved conversations, most recent first. */
   history: agent.ConversationSummary[];
@@ -253,6 +194,8 @@ export function AgentProvider({
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
+  const [computerAccess, updateComputerAccess] = useState(true);
+  const [coeditingSession, setCoeditingSession] = useState<number | null>(null);
   const [conversations, setConversations] = useState<
     Record<string, Conversation>
   >({});
@@ -263,6 +206,7 @@ export function AgentProvider({
   );
   const listenersReady = useRef<Promise<unknown>>(Promise.resolve());
   const persistQueue = useRef(Promise.resolve());
+  const transcriptQueue = useRef(Promise.resolve());
   const folderRef = useRef(notesFolder);
   folderRef.current = notesFolder;
   const updateConversation = useCallback(
@@ -288,14 +232,14 @@ export function AgentProvider({
     (noteId: string) => {
       const conversation = conversationsRef.current[noteId];
       if (!conversation?.sessionId || !conversation.items.length) return;
-      agent
-        .saveConversation(noteId, conversation.sessionId, conversation.items)
-        .then(() => refreshHistory(noteId))
-        .catch((error) =>
-          toast.error(
-            `Couldn't save this conversation: ${agent.errorMessage(error)}`,
-          ),
-        );
+      transcriptQueue.current = transcriptQueue.current
+        .then(async () => {
+          await agent.saveConversation(noteId, conversation.sessionId!, conversation.items);
+          await refreshHistory(noteId);
+        })
+        .catch((error) => {
+          toast.error(`Couldn't save this conversation: ${agent.errorMessage(error)}`);
+        });
     },
     [refreshHistory],
   );
@@ -332,6 +276,7 @@ export function AgentProvider({
   useEffect(() => {
     let active = true;
     setSavedModel(null);
+    setCoeditingSession(null);
     updateWidth(PANEL_DEFAULT);
     conversationsRef.current = {};
     setHistory([]);
@@ -348,6 +293,7 @@ export function AgentProvider({
       .then((settings) => {
         if (!active) return;
         setSavedModel(settings.agentModel ?? null);
+        updateComputerAccess(settings.agentComputerAccess ?? true);
         updateWidth(
           clampPanelWidth(settings.agentPanelWidthPx ?? PANEL_DEFAULT),
         );
@@ -363,6 +309,16 @@ export function AgentProvider({
     };
   }, [notesFolder, editorRef]);
   const ready = status?.status === "ready";
+  useEffect(() => {
+    if (!editor) return;
+    for (const [runId, run] of runs.current) {
+      if (run.binding.documentSession === editor.storage.scratchDocument.session) continue;
+      run.cancelRequested = true;
+      if (!runId.startsWith("pending:"))
+        void agent.cancelRun(runId).catch((error) =>
+          toast.error(`Couldn't stop the previous note's agent: ${agent.errorMessage(error)}`));
+    }
+  }, [currentNote?.id, editor]);
   // Bumped to retry the model list: readiness alone doesn't change when only
   // the /models request failed, so a status refresh wouldn't refetch.
   const [modelsRequest, setModelsRequest] = useState(0);
@@ -456,8 +412,8 @@ export function AgentProvider({
             });
           return { ...conversation, items };
         }
-        // Questions and note edit proposals show as cards, not tool rows.
-        if (event.type === "tool_call" && !CARD_TOOLS.has(event.name))
+        // Questions show as cards; edits appear in the activity log.
+        if (event.type === "tool_call" && event.name !== "ask_user")
           return {
             ...conversation,
             items: [
@@ -471,16 +427,20 @@ export function AgentProvider({
             ],
           };
         if (event.type === "tool_call") return conversation;
-        if (event.type === "tool_result")
-          return {
-            ...conversation,
-            items: conversation.items.map((item) =>
-              item.id === `${payload.runId}:${event.callId}` &&
-              item.type === "tool"
-                ? { ...item, ok: event.ok, output: event.output }
-                : item,
-            ),
-          };
+        if (event.type === "tool_result") {
+          const toolId = `${payload.runId}:${event.callId}`;
+          const items = conversation.items.map((item) =>
+            item.id === toolId && item.type === "tool"
+              ? { ...item, ok: event.ok, output: event.output }
+              : item,
+          );
+          const tool = items.find((item) => item.id === toolId);
+          const change = event.ok && tool?.type === "tool" && tool.name === "edit_note"
+            ? noteEditChange(tool.input) : null;
+          if (change && !items.some((item) => item.id === `${toolId}:changes`))
+            items.push({ id: `${toolId}:changes`, type: "changes", change });
+          return { ...conversation, items };
+        }
         if (event.type === "error")
           return {
             ...conversation,
@@ -493,8 +453,16 @@ export function AgentProvider({
           cancelled: event.stopReason === "cancelled",
         };
       });
+      if (event.type === "tool_result" &&
+          conversationsRef.current[run.noteId]?.items.some((item) =>
+            item.type === "tool" && item.id === `${payload.runId}:${event.callId}` &&
+            ["edit_document", "replace_selection", "edit_note"].includes(item.name)))
+        saveConversation(run.noteId);
       if (event.type === "done" || event.type === "error") {
-        releaseRunBinding(editorRef.current, run.binding);
+        releaseRunBinding(editorRef.current, run.binding,
+          event.type === "done" && event.stopReason === "completed" && !run.cancelRequested);
+        if (event.type === "error" || event.stopReason === "cancelled")
+          setCoeditingSession((session) => session === run.binding.documentSession ? null : session);
         runs.current.delete(payload.runId);
         saveConversation(run.noteId);
         if (event.type === "error" && event.kind === "auth")
@@ -509,32 +477,6 @@ export function AgentProvider({
       if (!run) {
         if ([...runs.current.keys()].some((id) => id.startsWith("pending:")))
           buffered.current.push(request);
-        return;
-      }
-      if (request.name === "edit_note") {
-        const proposal = parseNoteEdit(request.args);
-        if (!proposal) {
-          await agent
-            .toolRespond(request.requestId, false, "The edit proposal was malformed")
-            .catch(() => {});
-          return;
-        }
-        updateConversation(run.noteId, (conversation) => ({
-          ...conversation,
-          items: [
-            ...conversation.items,
-            {
-              id: request.requestId,
-              type: "note_edit",
-              runId: request.runId,
-              requestId: request.requestId,
-              ...proposal,
-              status: "pending",
-              message: null,
-            },
-          ],
-        }));
-        saveConversation(run.noteId);
         return;
       }
       if (request.name === "ask_user") {
@@ -565,7 +507,7 @@ export function AgentProvider({
         saveConversation(run.noteId);
         return;
       }
-      let result: { ok: boolean; output: string };
+      let result: Awaited<ReturnType<typeof executeDocumentTool>>;
       try {
         result = run.cancelRequested
           ? {
@@ -580,6 +522,15 @@ export function AgentProvider({
             );
       } catch (error) {
         result = { ok: false, output: agent.errorMessage(error) };
+      }
+      if (result.ok && result.change?.hunks.length) {
+        const change = result.change;
+        updateConversation(run.noteId, (conversation) => ({
+          ...conversation,
+          items: [...conversation.items, { id: `${request.requestId}:changes`, type: "changes", change }],
+        }));
+        // Keep applied changes even if the run is interrupted before its reply.
+        saveConversation(run.noteId);
       }
       try {
         await agent.toolRespond(request.requestId, result.ok, result.output);
@@ -619,17 +570,18 @@ export function AgentProvider({
     };
   }, [editorRef, processEvent, processTool]);
   const send = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, allowComputer = computerAccess, checkIn = false) => {
       const editor = editorRef.current;
       if (!editor || !currentNote || !prompt.trim() || !ready) return false;
       if (conversationsRef.current[currentNote.id]?.runId) return false;
       const temporaryId = `pending:${crypto.randomUUID()}`;
-      const binding = captureRunBinding(editor, temporaryId);
+      const binding = captureRunBinding(editor, temporaryId, !checkIn);
       if (!binding) return false;
       if (binding.noteId !== currentNote.id) {
         releaseRunBinding(editor, binding);
         return false;
       }
+      setCoeditingSession(binding.documentSession);
       const run: ActiveRun = {
         binding,
         noteId: binding.noteId,
@@ -642,6 +594,7 @@ export function AgentProvider({
         noteId: binding.noteId,
         noteTitle: binding.noteTitle,
         selection: binding.selectionMarkdown,
+        computerAccess: allowComputer,
       };
       updateConversation(binding.noteId, (conversation) => ({
         ...conversation,
@@ -654,8 +607,8 @@ export function AgentProvider({
           ...conversation.items,
           {
             id: crypto.randomUUID(),
-            type: "user",
-            text: prompt.trim(),
+            type: checkIn ? "activity" : "user",
+            text: checkIn ? "You edited the note. Checking in…" : prompt.trim(),
             ...(binding.selectionMarkdown && {
               selection: clipPreview(binding.selectionMarkdown).markdown,
             }),
@@ -670,6 +623,7 @@ export function AgentProvider({
           uiGuide,
           sessionId,
           prompt: prompt.trim(),
+          computerAccess: allowComputer,
           context,
         });
         if (runs.current.get(temporaryId) !== run) {
@@ -701,6 +655,7 @@ export function AgentProvider({
       } catch (error) {
         if (!runs.current.has(temporaryId)) return false;
         runs.current.delete(temporaryId);
+        setCoeditingSession(null);
         releaseRunBinding(editorRef.current, binding);
         updateConversation(run.noteId, (conversation) => ({
           ...conversation,
@@ -713,6 +668,7 @@ export function AgentProvider({
     },
     [
       currentNote,
+      computerAccess,
       editorRef,
       model,
       processEvent,
@@ -722,6 +678,8 @@ export function AgentProvider({
     ],
   );
   const stop = useCallback(async () => {
+    setCoeditingSession(null);
+    if (editorRef.current) clearAgentPresence(editorRef.current);
     const id = currentNote && conversationsRef.current[currentNote.id]?.runId;
     if (!id) return;
     const run = runs.current.get(id);
@@ -733,7 +691,12 @@ export function AgentProvider({
       if (run) run.cancelRequested = false;
       toast.error(`Couldn't stop the agent: ${agent.errorMessage(error)}`);
     }
-  }, [currentNote]);
+  }, [currentNote, editorRef]);
+  const setComputerAccess = useCallback((enabled: boolean) => {
+    updateComputerAccess(enabled);
+    persist({ agentComputerAccess: enabled });
+    if (!enabled) void stop();
+  }, [persist, stop]);
   const setModel = useCallback(
     (next: string) => {
       setSavedModel(next);
@@ -750,22 +713,28 @@ export function AgentProvider({
     [persist],
   );
   const toggle = useCallback(() => {
-    setOpen((value) => !value);
+    if (open) void stop();
+    setOpen(!open);
     setFocusComposer((value) => value + 1);
-  }, []);
+  }, [open, stop]);
   const close = useCallback(() => {
+    void stop();
     setOpen(false);
     editorRef.current?.commands.focus();
-  }, [editorRef]);
+  }, [editorRef, stop]);
   const newConversation = useCallback(() => {
-    if (currentNote && !conversationsRef.current[currentNote.id]?.runId)
-      updateConversation(currentNote.id, emptyConversation);
-  }, [currentNote, updateConversation]);
+    if (!currentNote || conversationsRef.current[currentNote.id]?.runId) return;
+    setCoeditingSession(null);
+    if (editorRef.current) clearAgentPresence(editorRef.current);
+    updateConversation(currentNote.id, emptyConversation);
+  }, [currentNote, editorRef, updateConversation]);
   const currentNoteId = currentNote?.id ?? null;
   const openConversation = useCallback(
     async (sessionId: string) => {
       const noteId = currentNoteId;
       if (!noteId || conversationsRef.current[noteId]?.runId) return;
+      setCoeditingSession(null);
+      if (editorRef.current) clearAgentPresence(editorRef.current);
       try {
         const items = parseTranscript(
           await agent.loadConversation(noteId, sessionId),
@@ -782,7 +751,7 @@ export function AgentProvider({
         );
       }
     },
-    [currentNoteId, updateConversation],
+    [currentNoteId, editorRef, updateConversation],
   );
   // Opening the panel on a note lists its conversations and, the first time,
   // picks up the most recent one where it left off.
@@ -835,6 +804,7 @@ export function AgentProvider({
   }, []);
   const signOut = useCallback(async () => {
     try {
+      setCoeditingSession(null);
       await agent.signOut();
       await refreshStatus();
     } catch (error) {
@@ -852,19 +822,13 @@ export function AgentProvider({
   const conversation = currentNote
     ? (conversations[currentNote.id] ?? emptyConversation())
     : emptyConversation();
-  // Only the active run's card can take a decision: a stopped run leaves its
-  // unanswered question or proposal in history, where nothing waits on it.
-  const { pendingQuestion, pendingEdit } = useMemo(() => {
+  const pendingQuestion = useMemo(() => {
     let question: QuestionItem | null = null;
-    let edit: NoteEditItem | null = null;
     if (conversation.runId)
-      for (const item of conversation.items) {
+      for (const item of conversation.items)
         if (item.type === "question" && item.runId === conversation.runId)
           question = item.answer === null ? item : null;
-        if (item.type === "note_edit" && item.runId === conversation.runId)
-          edit = item.status === "pending" ? item : null;
-      }
-    return { pendingQuestion: question, pendingEdit: edit };
+    return question;
   }, [conversation]);
   const answerQuestion = useCallback(
     async (answer: QuestionAnswer) => {
@@ -888,56 +852,42 @@ export function AgentProvider({
     },
     [pendingQuestion, updateConversation],
   );
-  const reviewNoteEdit = useCallback(
-    async (decision: NoteEditDecision) => {
-      const item = pendingEdit;
-      const run = item && runs.current.get(item.runId);
-      if (!item || !run) return;
-      const update = (patch: Partial<NoteEditItem>) =>
-        updateConversation(run.noteId, (current) => ({
-          ...current,
-          items: current.items.map((entry) =>
-            entry.id === item.id && entry.type === "note_edit"
-              ? { ...entry, ...patch }
-              : entry,
-          ),
-        }));
-      let result: { ok: boolean; output: string };
-      if (decision.approve) {
-        update({ status: "applying" });
+  const coediting = open && coeditingSession !== null &&
+    coeditingSession === editor?.storage.scratchDocument.session;
+  const resumeCoediting = useCallback(() => {
+    if (editor && ready) setCoeditingSession(editor.storage.scratchDocument.session);
+  }, [editor, ready]);
+  const checkIn = useCallback(() => {
+    const observe = async () => {
+      if (!coediting || !editor || editor.isDestroyed) return;
+      if (pendingQuestion) {
+        const run = runs.current.get(pendingQuestion.runId);
+        if (!run || run.cancelRequested) return;
         try {
-          await agent.applyNoteEdit(item.proposalId);
-          update({ status: "applied", message: null });
-          result = {
-            ok: true,
-            output: `The user approved, and the edit to "${item.title}" is saved.`,
-          };
+          await agent.toolRespond(pendingQuestion.requestId, true,
+            "The user edited the live document while you waited. This is not an answer to your question. Read the document again, respect their changes, and continue if they resolve your question. Otherwise ask only if you are blocked.");
+          updateConversation(run.noteId, (current) => ({
+            ...current,
+            items: current.items.map((item) =>
+              item.id === pendingQuestion.id && item.type === "question"
+                ? { ...item, answer: "Continued after your document edit." }
+                : item),
+          }));
         } catch (error) {
-          const message = agent.errorMessage(error);
-          update({ status: "failed", message });
-          result = {
-            ok: false,
-            output: `The user approved, but the edit couldn't be saved: ${message}`,
-          };
+          setCoeditingSession(null);
+          toast.error(`Couldn't notify the agent: ${agent.errorMessage(error)}`);
         }
-      } else {
-        const feedback = decision.feedback?.trim() || null;
-        update({ status: "declined", message: feedback });
-        result = {
-          ok: false,
-          output: feedback
-            ? `The user declined this edit and said: ${feedback}`
-            : "The user declined this edit.",
-        };
+        return;
       }
-      try {
-        await agent.toolRespond(item.requestId, result.ok, result.output);
-      } catch (error) {
-        toast.error(`Couldn't tell ChatGPT: ${agent.errorMessage(error)}`);
-      }
-    },
-    [pendingEdit, updateConversation],
-  );
+      await send(
+        "Document activity: the user edited the live note. Read the current document before acting. Respect their changes and continue the existing collaboration where useful. Do not revert their choices or invent a new task. Check in briefly only if you have something useful to add; otherwise finish without a message.",
+        computerAccess,
+        true,
+      );
+    };
+    void observe();
+  }, [coediting, editor, pendingQuestion, send, computerAccess, updateConversation]);
+  useCoeditingObserver(editor, coediting, !!conversation.runId && !pendingQuestion, checkIn);
   const value = useMemo<AgentContextValue>(
     () => ({
       open,
@@ -958,8 +908,10 @@ export function AgentProvider({
       refreshStatus,
       pendingQuestion,
       answerQuestion,
-      pendingEdit,
-      reviewNoteEdit,
+      coediting,
+      resumeCoediting,
+      computerAccess,
+      setComputerAccess,
       conversation,
       send,
       stop,
@@ -992,8 +944,10 @@ export function AgentProvider({
       refreshStatus,
       pendingQuestion,
       answerQuestion,
-      pendingEdit,
-      reviewNoteEdit,
+      coediting,
+      resumeCoediting,
+      computerAccess,
+      setComputerAccess,
       conversation,
       send,
       stop,

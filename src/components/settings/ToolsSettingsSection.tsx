@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "../ui";
@@ -8,6 +8,7 @@ import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "../agent/ChatGPTAc
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
+import { errorMessage, setupComputerPermissions } from "../../services/agent";
 
 type CliState = {
   status: CliStatus | null;
@@ -62,6 +63,7 @@ const STATUS_LABELS = { ready: "Ready", signed_out: "Signed out", plan_usage_dis
 export function ToolsSettingsSection() {
   const [cli, dispatchCli] = useReducer(cliReducer, cliInitialState);
   const agent = useAgent();
+  const [computerSetup, setComputerSetup] = useState<string | null>(null);
 
   useEffect(() => {
     cliService
@@ -114,7 +116,7 @@ export function ToolsSettingsSection() {
           <h2 className="text-xl font-medium mb-0.5">Agent</h2>
           <button type="button" className="text-xs text-text-muted hover:text-text" disabled={agent.statusLoading} onClick={() => { void agent.refreshStatus(); }}>Refresh</button>
         </div>
-        <p className="text-sm text-text-muted mb-4">Work alongside ChatGPT in your notes ({mod}J). Review every edit before accepting it.</p>
+        <p className="text-sm text-text-muted mb-4">Work alongside ChatGPT in your notes ({mod}J). Edits land directly while your caret stays yours.</p>
         {agent.statusLoading && <div className="flex items-center gap-2 p-3 text-sm text-text-muted"><SpinnerIcon className="w-4 h-4 animate-spin" />Checking your ChatGPT account…</div>}
         {agent.statusError && <p role="alert" className="text-sm text-red-500 mb-3">{agent.statusError}</p>}
         {agent.status && (
@@ -130,6 +132,39 @@ export function ToolsSettingsSection() {
             <PlanNotice />
           </div>
         )}
+        <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
+          <label className="flex items-center justify-between gap-4 text-sm font-medium">
+            Computer access
+            <input
+              type="checkbox"
+              checked={agent.computerAccess}
+              onChange={(event) => agent.setComputerAccess(event.target.checked)}
+              aria-describedby="computer-access-description"
+            />
+          </label>
+          <p id="computer-access-description" className="text-xs text-text-muted leading-relaxed">
+            Cua can read and interact with other apps, including your signed-in browser, in the background.
+            Captured content is sent to ChatGPT. Turning this off pauses the current session.
+            Actions already taken in other apps are not undone.
+          </p>
+          <p className="text-xs text-text-muted leading-relaxed">
+            During active coediting, a pause in your typing can start a check-in using your ChatGPT plan.
+            Pause in the agent panel stops check-ins and computer access.
+          </p>
+          <Button
+            variant="outline"
+            size="md"
+            onClick={() => {
+              void setupComputerPermissions().then(
+                setComputerSetup,
+                (error) => setComputerSetup(errorMessage(error)),
+              );
+            }}
+          >
+            Set up Cua permissions
+          </Button>
+          {computerSetup && <p role="status" className="text-xs text-text-muted">{computerSetup}</p>}
+        </div>
       </section>
 
       {/* CLI Tool (macOS only) */}

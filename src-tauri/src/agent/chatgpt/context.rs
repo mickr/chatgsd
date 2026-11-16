@@ -22,6 +22,10 @@ const REREADABLE: &[&str] = &[
     "search_notes",
     "list_notes",
     "note_links",
+    "cua_get_window_state",
+    "cua_get_browser_state",
+    "cua_list_apps",
+    "cua_list_windows",
 ];
 
 /// Tool outputs from earlier turns longer than this are cut to a stub.

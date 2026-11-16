@@ -19,6 +19,7 @@ export interface RunContext {
   noteId: string;
   noteTitle: string;
   selection: string | null;
+  computerAccess?: boolean;
 }
 export interface StartRunRequest {
   model: string | null;
@@ -26,6 +27,7 @@ export interface StartRunRequest {
   uiGuide: string;
   sessionId: string | null;
   prompt: string;
+  computerAccess: boolean;
   context: RunContext;
 }
 export type AgentErrorKind = "auth" | "usage_limit" | "not_eligible" | "other";
@@ -56,6 +58,8 @@ export interface ConversationSummary {
 }
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
+export const setupComputerPermissions = () =>
+  invoke<string>("agent_computer_permissions");
 export const listModels = () => invoke<ModelInfo[]>("agent_list_models");
 export const startRun = (request: StartRunRequest) =>
   invoke<{ runId: string }>("agent_start_run", { request });
@@ -73,9 +77,6 @@ export const saveConversation = (
   sessionId: string,
   items: unknown[],
 ) => invoke<void>("agent_save_conversation", { noteId, sessionId, items });
-/** Writes an approved edit_note proposal; the backend holds what and where. */
-export const applyNoteEdit = (proposalId: string) =>
-  invoke<void>("agent_apply_note_edit", { proposalId });
 export const signIn = () => invoke<ChatGptAccount>("chatgpt_sign_in");
 export const cancelSignIn = () => invoke<void>("chatgpt_cancel_sign_in");
 export const signOut = () => invoke<void>("chatgpt_sign_out");

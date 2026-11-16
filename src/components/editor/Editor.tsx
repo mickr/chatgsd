@@ -25,6 +25,7 @@ import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
 import { AgentChanges, ScratchDocument, setChangeMeta } from "./AgentChanges";
 import {
+  clearDocumentHistory,
   minimalDocumentDiff,
   parseDocument,
   serializeDocument,
@@ -1567,6 +1568,7 @@ export function Editor({
         } else {
           editor.commands.setContent(currentNote.content);
         }
+        clearDocumentHistory(editor);
         isLoadingRef.current = false;
         return;
       }
@@ -1604,6 +1606,7 @@ export function Editor({
     } else {
       editor.commands.setContent(currentNote.content);
     }
+    clearDocumentHistory(editor);
 
     // Scroll to top after content is set (must be after setContent to work reliably)
     scrollContainerRef.current?.scrollTo(0, 0);

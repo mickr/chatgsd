@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -46,7 +47,7 @@ import { formatDate } from "../../lib/utils";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "./ChatGPTAccount";
 import { AgentQuestion } from "./AgentQuestion";
-import { NoteEditCard } from "./NoteEditCard";
+import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
 import { OpenNoteContext } from "./ui/registry";
 import { SelectionCard, SelectionQuote } from "./SelectionCard";
 /** " (lines 120–260)" for a ranged read, otherwise nothing. */
@@ -68,6 +69,8 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
     const count = Array.isArray(input.edits) ? input.edits.length : 1;
     return `${item.ok ? "Edited" : "Edit"} ${count} ${count === 1 ? "place" : "places"}`;
   }
+  if (item.name === "edit_note")
+    return `${item.ok ? "Edited" : "Edit"} note: ${String(input.id ?? "")}`;
   if (item.name === "search_notes")
     return `Search: ${String(input.query ?? "notes")}`;
   if (item.name === "list_notes")
@@ -114,20 +117,17 @@ function UserMessage({ text, selection }: { text: string; selection?: string }) 
 const Message = memo(function Message({
   item,
   streaming,
+  active,
   pendingQuestionId,
-  pendingEditId,
   onAnswer,
-  onApproveEdit,
-  onDeclineEdit,
 }: {
   item: TranscriptItem;
   streaming: boolean;
+  active: boolean;
   pendingQuestionId: string | null;
-  pendingEditId: string | null;
   onAnswer: (answer: QuestionAnswer) => void;
-  onApproveEdit: () => void;
-  onDeclineEdit: () => void;
 }) {
+  if (item.type === "changes") return null;
   if (item.type === "question")
     return (
       <AgentQuestion
@@ -136,32 +136,27 @@ const Message = memo(function Message({
         onAnswer={onAnswer}
       />
     );
-  if (item.type === "note_edit")
-    return (
-      <NoteEditCard
-        item={item}
-        active={item.id === pendingEditId}
-        onApprove={onApproveEdit}
-        onDecline={onDeclineEdit}
-      />
-    );
+  if (item.type === "activity")
+    return <p className="text-xs text-text-muted">{item.text}</p>;
   if (item.type === "tool")
     return (
       <details className="agent-panel-tool">
         <summary>
           <span
-            className={`agent-panel-tool-dot ${item.ok === false ? "bg-red-500" : item.ok ? "bg-accent" : "bg-text-muted animate-pulse"}`}
+            className={`agent-panel-tool-dot ${item.ok === false ? "bg-red-500" : item.ok ? "bg-accent" : active ? "bg-text-muted animate-pulse" : "bg-text-muted"}`}
           />
           <span className="truncate">{toolLabel(item)}</span>
           <span className="ml-auto text-[10px] text-text-muted">
             {item.ok === false
               ? "Failed"
               : item.output === undefined
-                ? "Running"
+                ? active ? "Running" : "Result not saved"
                 : "Details"}
           </span>
         </summary>
-        <pre>{item.output ?? JSON.stringify(item.input, null, 2)}</pre>
+        <pre>{item.output ?? (active
+          ? JSON.stringify(item.input, null, 2)
+          : "This turn ended before a tool result was saved. Any recorded edits are shown below.")}</pre>
       </details>
     );
   if (item.type === "user")
@@ -255,6 +250,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const follow = useRef(true);
   const status = agent.status;
   const conversation = agent.conversation;
+  const turns = useMemo(() => conversationTurns(conversation.items), [conversation.items]);
   const running = conversation.runId !== null;
   const contextTitle = running
     ? conversation.context?.noteTitle
@@ -348,15 +344,9 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     follow.current = true;
     setReviewIndex(-1);
   }, [currentNote?.id]);
-  const { pendingQuestion, pendingEdit, answerQuestion, reviewNoteEdit } =
-    agent;
-  /** A card is waiting on the user; the run is paused until they decide. */
-  const waiting = !!(pendingQuestion || pendingEdit);
-  const sendLabel = pendingQuestion
-    ? "Send answer"
-    : pendingEdit
-      ? "Decline with this note"
-      : "Send message";
+  const { pendingQuestion, answerQuestion } = agent;
+  const waiting = !!pendingQuestion;
+  const sendLabel = pendingQuestion ? "Send answer" : "Send message";
   const answer = useCallback(
     (value: QuestionAnswer) => {
       follow.current = true;
@@ -364,14 +354,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     },
     [answerQuestion],
   );
-  const approveEdit = useCallback(() => {
-    follow.current = true;
-    void reviewNoteEdit({ approve: true });
-  }, [reviewNoteEdit]);
-  const declineEdit = useCallback(() => {
-    follow.current = true;
-    void reviewNoteEdit({ approve: false });
-  }, [reviewNoteEdit]);
   const openNote = useCallback(
     (id: string) => {
       void selectNote(id);
@@ -381,12 +363,11 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const submit = async () => {
     if (!currentNote || reason || sending || !draft.trim()) return;
     const id = currentNote.id;
-    if (pendingQuestion || pendingEdit) {
+    if (pendingQuestion) {
       const text = draft.trim();
       setDrafts((previous) => ({ ...previous, [id]: "" }));
       follow.current = true;
-      if (pendingQuestion) await answerQuestion(text);
-      else await reviewNoteEdit({ approve: false, feedback: text });
+      await answerQuestion(text);
       return;
     }
     if (running) return;
@@ -520,6 +501,24 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               onClear={clearSelection}
             />
           )}
+          <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+            <span role="status" className="text-text-muted">
+              {agent.coediting
+                ? running ? "Coediting · Working" : "Coediting · Following your edits"
+                : running ? "Finishing current turn" : "Coediting paused"}
+            </span>
+            <button
+              type="button"
+              className="agent-panel-link"
+              disabled={!running && !agent.coediting && !!reason}
+              onClick={() => {
+                if (agent.coediting || running) void agent.stop();
+                else agent.resumeCoediting();
+              }}
+            >
+              {agent.coediting || running ? "Pause" : "Start coediting"}
+            </button>
+          </div>
         </div>
         <OpenNoteContext.Provider value={openNote}>
           <div
@@ -544,25 +543,29 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                 <h2 className="text-sm font-medium">A second pair of eyes.</h2>
                 <p className="text-xs leading-relaxed text-text-muted">
                   Ask a question, refine a passage, or work through an idea.
-                  Edits appear in your note for you to review.
+                  Edits land directly. The agent follows your changes while coediting is active.
                 </p>
               </div>
             )}
-            {conversation.items.map((item, index) => (
-              <Message
-                key={item.id}
-                item={item}
-                streaming={
-                  running &&
-                  index === conversation.items.length - 1 &&
-                  item.type === "text"
-                }
-                pendingQuestionId={pendingQuestion?.id ?? null}
-                pendingEditId={pendingEdit?.id ?? null}
-                onAnswer={answer}
-                onApproveEdit={approveEdit}
-                onDeclineEdit={declineEdit}
-              />
+            {turns.map((turn, turnIndex) => (
+              <Fragment key={turn.id}>
+                {turn.items.map((item, index) => (
+                  <Message
+                    key={item.id}
+                    item={item}
+                    active={running && turnIndex === turns.length - 1}
+                    streaming={
+                      running &&
+                      turnIndex === turns.length - 1 &&
+                      index === turn.items.length - 1 &&
+                      item.type === "text"
+                    }
+                    pendingQuestionId={pendingQuestion?.id ?? null}
+                    onAnswer={answer}
+                  />
+                ))}
+                <AgentTurnChanges changes={turn.changes} turn={turnIndex + 1} />
+              </Fragment>
             ))}
           {running &&
             !waiting &&
@@ -575,7 +578,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             )}
           {conversation.cancelled && (
             <p className="text-xs text-text-muted">
-              Stopped. Any edits already made are ready to review.
+              Paused. Edits already made are saved; use Undo in the note to undo an editor change.
             </p>
           )}
           {conversation.error && (
@@ -618,9 +621,9 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           </div>
         </OpenNoteContext.Provider>
         {changes.length > 0 && (
-          <div className="agent-panel-review" aria-label="Review changes">
+          <div className="agent-panel-review" aria-label="Review external changes">
             <span className="mr-auto font-medium">
-              {changes.length} {changes.length === 1 ? "change" : "changes"}
+              {changes.length} external {changes.length === 1 ? "change" : "changes"}
             </span>
             <IconButton
               tabIndex={0}
@@ -701,9 +704,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               placeholder={
                 pendingQuestion
                   ? "Type your answer…"
-                  : pendingEdit
-                    ? "Or say what to change instead…"
-                    : "Ask or describe an edit…"
+                  : "Ask or describe an edit…"
               }
               value={draft}
               disabled={!!reason || sending}
@@ -733,28 +734,11 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               <span className="text-[10px] text-text-muted">
                 {pendingQuestion
                   ? "Enter to answer · ⇧ Enter for newline"
-                  : pendingEdit
-                    ? "Enter to decline with this note"
-                    : running
-                      ? "You can keep editing."
-                      : "Enter to send · ⇧ Enter for newline"}
+                  : running
+                    ? "You can keep editing."
+                    : "Enter to send · ⇧ Enter for newline"}
               </span>
               <div className="flex items-center gap-1.5">
-                {running && (
-                  <button
-                    type="button"
-                    className={
-                      waiting
-                        ? "agent-panel-link agent-panel-link-quiet"
-                        : "agent-panel-primary"
-                    }
-                    onClick={() => {
-                      void agent.stop();
-                    }}
-                  >
-                    Stop
-                  </button>
-                )}
                 {(!running || waiting) && (
                   <IconButton
                     tabIndex={0}

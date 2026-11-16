@@ -58,6 +58,7 @@ export interface Settings {
   interfaceZoom?: number;
   agentModel?: string;
   agentPanelWidthPx?: number;
+  agentComputerAccess?: boolean;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;

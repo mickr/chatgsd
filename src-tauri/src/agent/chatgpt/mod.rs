@@ -16,7 +16,7 @@ use tokio::sync::{watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use super::{
-    conversations,
+    computer::ComputerSession, conversations,
     events::{self, AgentEvent},
     prompt, tools, AgentError, AgentStatus, ChatGptAccount, ModelInfo, RunContext, RunResult,
 };
@@ -201,10 +201,19 @@ pub async fn run(
     user_prompt: String,
 ) -> RunResult {
     let mut account_changed = ACCOUNT_CHANGED.subscribe();
-    tokio::select! {
-        result = run_session(app, ctx, model, session_id, user_prompt) => result,
+    let mut computer = if ctx.computer_access {
+        Some(ComputerSession::start(&app.config().identifier).await.map_err(other)?)
+    } else {
+        None
+    };
+    let result = tokio::select! {
+        result = run_session(app, ctx, model, session_id, user_prompt, &mut computer) => result,
         _ = account_changed.changed() => Err(auth("The ChatGPT account changed or signed out. Start a new conversation.")),
+    };
+    if let Some(session) = computer.as_mut() {
+        session.shutdown().await;
     }
+    result
 }
 
 async fn run_session(
@@ -213,6 +222,7 @@ async fn run_session(
     model: Option<String>,
     session_id: Option<String>,
     user_prompt: String,
+    computer: &mut Option<ComputerSession>,
 ) -> RunResult {
     let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     if Uuid::parse_str(&session_id).is_err() {
@@ -284,7 +294,7 @@ async fn run_session(
         }
     };
     let instructions = prompt::instructions(&ctx);
-    let functions: Vec<_> = tools::catalog()
+    let mut functions: Vec<_> = tools::catalog()
         .into_iter()
         .map(|tool| {
             json!({
@@ -293,6 +303,9 @@ async fn run_session(
             })
         })
         .collect();
+    if let Some(session) = computer.as_ref() {
+        functions.extend(session.tools());
+    }
     let tools = [
         json!({"type":"namespace", "name":"scratch", "description":"Read and precisely edit the live note open in ChatGSD, or read workspace notes.", "tools":functions}),
     ];
@@ -333,24 +346,43 @@ async fn run_session(
                     input: call.args.clone(),
                 },
             );
-            let output = tools::execute(&app, &ctx.run_id, name, call.args.clone()).await;
+            let (ok, text, model_output) = if name.starts_with("cua_") {
+                match computer.as_mut() {
+                    Some(session) => match session.call(name, call.args.clone()).await {
+                        Ok(result) => computer_output(result),
+                        Err(error) => (false, error.clone(), Value::String(error)),
+                    },
+                    None => {
+                        let error = "Computer access is off for this message".to_owned();
+                        (false, error.clone(), Value::String(error))
+                    }
+                }
+            } else {
+                let output = tools::execute(&app, &ctx.run_id, name, call.args.clone()).await;
+                (output.ok, output.text.clone(), Value::String(output.text))
+            };
             events::emit(
                 &app,
                 &ctx.run_id,
                 AgentEvent::ToolResult {
                     call_id: call.id.clone(),
-                    ok: output.ok,
-                    output: output.text.chars().take(2000).collect(),
+                    ok,
+                    output: text.chars().take(2000).collect(),
                 },
             );
+            if name.starts_with("cua_") {
+                // Only the latest computer observation's pixels remain in model input.
+                strip_screenshots(&mut input);
+            }
             input.push(
-                json!({"type":"function_call_output", "call_id":call.id, "output":output.text}),
+                json!({"type":"function_call_output", "call_id":call.id, "output":model_output}),
             );
         }
         // Commit only complete rounds, so cancellation cannot leave dangling tool calls in history.
         saved_history.clone_from(&input);
+        strip_screenshots(&mut saved_history);
         if let Err(error) =
-            conversations::save_model(&app, &ctx.notes_folder, &session_id, &account, &input).await
+            conversations::save_model(&app, &ctx.notes_folder, &session_id, &account, &saved_history).await
         {
             eprintln!("Couldn't save ChatGPT conversation {session_id}: {error}");
         }
@@ -361,6 +393,108 @@ async fn run_session(
     Err(other(format!(
         "ChatGPT reached the limit of {MAX_ITERATIONS} tool rounds. Send another message to continue."
     )))
+}
+
+/// MCP image blocks become actual model vision input, not base64 text.
+fn computer_output(result: Value) -> (bool, String, Value) {
+    let ok = result.get("isError").and_then(Value::as_bool) != Some(true);
+    let mut content = Vec::new();
+    let mut text = String::new();
+    if let Some(blocks) = result.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(value) = block.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() { text.push('\n'); }
+                        text.push_str(value);
+                    }
+                }
+                Some("image") => {
+                    if let (Some(data), Some(mime)) = (
+                        block.get("data").and_then(Value::as_str),
+                        block.get("mimeType").and_then(Value::as_str),
+                    ) {
+                        if matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+                            content.push(json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{mime};base64,{data}"),
+                            }));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if text.is_empty() {
+        text = result.get("structuredContent").map(Value::to_string)
+            .unwrap_or_else(|| "Cua returned no textual observation. Verify the result before continuing.".into());
+    }
+    if content.is_empty() {
+        return (ok, text.clone(), Value::String(text));
+    }
+    content.insert(0, json!({"type": "input_text", "text": text}));
+    (ok, text, Value::Array(content))
+}
+
+/// Do not persist screenshots of other applications in conversation history.
+fn strip_screenshots(items: &mut [Value]) {
+    for item in items {
+        if item.get("type").and_then(Value::as_str) != Some("function_call_output") {
+            continue;
+        }
+        if let Some(blocks) = item.get("output").and_then(Value::as_array) {
+            let mut text = String::new();
+            for block in blocks {
+                let part = match block.get("type").and_then(Value::as_str) {
+                    Some("input_text") => block.get("text").and_then(Value::as_str),
+                    Some("input_image") => Some("[Earlier screenshot omitted. Observe again for current pixels.]"),
+                    _ => None,
+                };
+                if let Some(part) = part {
+                    if !text.is_empty() { text.push('\n'); }
+                    text.push_str(part);
+                }
+            }
+            item["output"] = Value::String(text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod computer_output_tests {
+    use super::*;
+
+    #[test]
+    fn screenshots_reach_vision_but_not_saved_history() {
+        let (ok, text, output) = computer_output(json!({
+            "content": [
+                {"type": "text", "text": "Document preview"},
+                {"type": "image", "mimeType": "image/png", "data": "private-pixels"}
+            ]
+        }));
+        assert!(ok);
+        assert_eq!(text, "Document preview");
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,private-pixels");
+        let mut history = vec![json!({
+            "type": "function_call_output", "call_id": "capture", "output": output
+        })];
+        strip_screenshots(&mut history);
+        assert!(!history[0].to_string().contains("private-pixels"));
+        assert!(history[0]["output"].as_str().unwrap().contains("Document preview"));
+        assert_eq!(history[0]["call_id"], "capture");
+    }
+
+    #[test]
+    fn driver_refusals_remain_failures_with_their_explanation() {
+        let (ok, text, output) = computer_output(json!({
+            "isError": true,
+            "content": [{"type": "text", "text": "background_unavailable"}]
+        }));
+        assert!(!ok);
+        assert_eq!(text, "background_unavailable");
+        assert_eq!(output, "background_unavailable");
+    }
 }
 
 struct ToolCall {

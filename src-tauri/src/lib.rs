@@ -132,6 +132,8 @@ pub struct Settings {
     pub agent_model: Option<String>,
     #[serde(rename = "agentPanelWidthPx")]
     pub agent_panel_width_px: Option<u32>,
+    #[serde(rename = "agentComputerAccess")]
+    pub agent_computer_access: Option<bool>,
     #[serde(rename = "foldersEnabled")]
     pub folders_enabled: Option<bool>,
     #[serde(rename = "ignoredPatterns")]
@@ -3349,6 +3351,7 @@ pub fn run() {
             git_remove_remote,
             git_push_with_upstream,
             agent::agent_status,
+            agent::computer_permissions::agent_computer_permissions,
             agent::agent_list_models,
             agent::agent_start_run,
             agent::agent_cancel_run,
@@ -3356,7 +3359,6 @@ pub fn run() {
             agent::conversations::agent_list_conversations,
             agent::conversations::agent_load_conversation,
             agent::conversations::agent_save_conversation,
-            agent::note_edits::agent_apply_note_edit,
             agent::chatgpt::chatgpt_sign_in,
             agent::chatgpt::chatgpt_cancel_sign_in,
             agent::chatgpt::chatgpt_sign_out,

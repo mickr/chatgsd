@@ -1,5 +1,5 @@
 import { Extension, type Editor } from "@tiptap/core";
-import { DOMSerializer, type Slice } from "@tiptap/pm/model";
+import { DOMSerializer, type Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import {
   Plugin,
   PluginKey,
@@ -9,6 +9,7 @@ import {
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { closeHistory } from "@tiptap/pm/history";
 import { useCallback, useSyncExternalStore } from "react";
+import { changeMarker, destroyChangeMarker, type AgentLineChange } from "./AgentChangeMarker";
 
 export interface AgentChangeSummary {
   id: string;
@@ -28,15 +29,24 @@ interface FocusRange {
 interface ChangeState {
   hunks: AgentChange[];
   focusRanges: FocusRange[];
+  presence: Record<string, { from: number; to: number }>;
+  arrival: DecorationSet;
+  lineChanges: AgentLineChange[];
 }
 interface ChangeMeta {
   source?: "agent" | "merge" | "review";
-  /** Positions are in the transaction's final document. */
   add?: AgentChange[];
   remove?: string[];
   clear?: boolean;
   focus?: FocusRange;
   releaseFocus?: string;
+  /** Agent presence metadata - keys are runIds, values are ranges */
+  presence?: { [runId: string]: { from: number; to: number } };
+  /** Clear presence for a specific runId */
+  clearPresence?: string;
+  arrival?: Array<{ from: number; to: number }>;
+  clearArrival?: boolean;
+  lineChanges?: AgentLineChange[];
 }
 export interface ScratchDocumentStorage {
   noteId: string | null;
@@ -131,10 +141,54 @@ const REVIEW_ICON_PATHS = {
   reject: "M18 6 6 18M6 6l12 12",
 } as const;
 
+/** Brief word-by-word reveal of committed text, without changing document marks. */
+function arrivalDecorations(doc: ProseMirrorNode, ranges: Array<{ from: number; to: number }>): DecorationSet {
+  const result: Decoration[] = [];
+  for (const { from, to } of ranges) {
+    doc.nodesBetween(from, to, (node, pos) => {
+      if (result.length >= 40) return false;
+      if (!node.isText || !node.text) return;
+      const end = Math.min(to - pos, node.nodeSize);
+      const words = /\S+\s*/gu;
+      words.lastIndex = Math.max(0, from - pos);
+      let match: RegExpExecArray | null;
+      while (result.length < 40 && (match = words.exec(node.text)) && match.index < end) {
+        result.push(Decoration.inline(pos + match.index, pos + Math.min(words.lastIndex, end), {
+          class: "agent-text-arrival",
+          style: `animation-delay: ${Math.min(result.length * 12, 120)}ms`,
+        }));
+      }
+    });
+  }
+  return result.length ? DecorationSet.create(doc, result) : DecorationSet.empty;
+}
+
 function decorations(editor: Editor, state: ChangeState): DecorationSet {
   const { doc, schema } = editor.state;
-  const result: Decoration[] = [];
+  const result: Decoration[] = state.arrival.find();
+  const markerGroups = new Map<number, AgentLineChange[]>();
+  for (const change of state.lineChanges) {
+    const position = doc.resolve(change.from);
+    // Nested blocks may establish positioning or clipping (notably table cells).
+    // Put their marker before the outer block, in the editor's own gutter.
+    const anchor = position.depth > 1 ? position.before(1) : change.from;
+    const group = markerGroups.get(anchor);
+    if (group) group.push(change);
+    else markerGroups.set(anchor, [change]);
+  }
+  for (const [anchor, changes] of markerGroups)
+    result.push(Decoration.widget(anchor, () => changeMarker(changes), {
+      key: changes.map((change) => change.id).join(":"),
+      side: -1,
+      stopEvent: () => true,
+      ignoreSelection: true,
+      destroy: destroyChangeMarker,
+    }));
+  
+  // Render hunks first (existing tracked changes) - only external origin for merge review
   for (const hunk of state.hunks) {
+    if (hunk.origin !== "external") continue;
+    
     const { from, to } = hunk;
     if (from < to) {
       doc.nodesBetween(from, to, (node, pos) => {
@@ -205,23 +259,19 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
       Decoration.widget(
         controlsAt,
         () => {
-          const kind = hunk.origin === "external" ? "external" : "agent";
           const controls = document.createElement("span");
           controls.className = "agent-change-controls";
           controls.contentEditable = "false";
           controls.setAttribute("role", "group");
-          controls.setAttribute(
-            "aria-label",
-            hunk.origin === "external" ? "External change" : "Agent change",
-          );
+          controls.setAttribute("aria-label", "External change");
           for (const [label, reject, path] of [
             ["Accept", false, REVIEW_ICON_PATHS.accept],
             ["Reject", true, REVIEW_ICON_PATHS.reject],
           ] as const) {
             const button = document.createElement("button");
             button.type = "button";
-            button.title = `${label} ${kind} change`;
-            button.setAttribute("aria-label", `${label} ${kind} change`);
+            button.title = `${label} external change`;
+            button.setAttribute("aria-label", `${label} external change`);
             button.dataset.action = reject ? "reject" : "accept";
             button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"/></svg>`;
             button.onmousedown = (event) => event.preventDefault();
@@ -243,12 +293,33 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
       ),
     );
   }
-  // The selection a run was sent with, so the note shows what the agent is working on.
+  
+  // Render focus ranges (the selection a run was sent with)
   for (const range of state.focusRanges)
     if (range.from < range.to)
       result.push(
         Decoration.inline(range.from, range.to, { class: "agent-selection" }),
       );
+  
+  // Render single agent presence caret (not accumulating per-run carets)
+  const agentPresence = state.presence["agent"];
+  if (agentPresence) {
+    const { to } = agentPresence;
+    // Only render the caret widget, not the range highlight
+    result.push(Decoration.widget(to, () => {
+      const caret = document.createElement("span");
+      caret.className = "agent-presence-caret";
+      caret.dataset.writing = String(state.arrival !== DecorationSet.empty);
+      caret.contentEditable = "false";
+      caret.setAttribute("aria-label", "Agent working here");
+      const label = document.createElement("span");
+      label.className = "agent-presence-label";
+      label.textContent = "Agent";
+      caret.append(label);
+      return caret;
+    }, { key: state.arrival === DecorationSet.empty ? "agent-presence-idle" : "agent-presence-writing", side: -1 }));
+  }
+  
   return DecorationSet.create(doc, result);
 }
 
@@ -354,6 +425,15 @@ export function detachSelection(editor: Editor): void {
   );
 }
 
+/** Clear the agent presence (single session-level caret) */
+export function clearAgentPresence(editor: Editor): void {
+  editor.view.dispatch(
+    setChangeMeta(editor.state.tr, {
+      clearPresence: "agent",
+    }).setMeta("addToHistory", false),
+  );
+}
+
 export const AgentChanges = Extension.create({
   name: "agentChanges",
   addCommands() {
@@ -425,15 +505,17 @@ export const AgentChanges = Extension.create({
       new Plugin<ChangeState>({
         key: agentChangesKey,
         state: {
-          init: () => ({ hunks: [], focusRanges: [] }),
+          init: () => ({ hunks: [], focusRanges: [], presence: {}, arrival: DecorationSet.empty, lineChanges: [] }),
           apply(tr, previous) {
             const meta = tr.getMeta(agentChangesKey) as ChangeMeta | undefined;
-            if (meta?.clear) return { hunks: [], focusRanges: [] };
+            if (meta?.clear) return { hunks: [], focusRanges: [], presence: {}, arrival: DecorationSet.empty, lineChanges: [] };
             if (!tr.docChanged && !meta) return previous;
             // Keep the same state object while nothing is tracked, so review UI
             // subscribed through useAgentChanges doesn't re-render on every keystroke.
-            if (!meta && !previous.hunks.length && !previous.focusRanges.length)
+            if (!meta && !previous.hunks.length && !previous.lineChanges.length && !previous.focusRanges.length && !Object.keys(previous.presence).length && previous.arrival === DecorationSet.empty)
               return previous;
+            
+            // Only external disk changes retain review hunks.
             const hunks = previous.hunks
               .filter((hunk) => {
                 if (meta?.remove?.includes(hunk.id)) return false;
@@ -449,7 +531,9 @@ export const AgentChanges = Extension.create({
                 from: tr.mapping.map(hunk.from, -1),
                 to: tr.mapping.map(hunk.to, 1),
               }));
-            if (meta?.add) hunks.push(...meta.add);
+            if (meta?.add) hunks.push(...meta.add.filter((hunk) => hunk.origin === "external"));
+            
+            // Update focus ranges
             const focusRanges = previous.focusRanges
               .filter((range) => range.id !== meta?.releaseFocus)
               .map((range) => ({
@@ -458,8 +542,60 @@ export const AgentChanges = Extension.create({
                 to: tr.mapping.map(range.to, 1),
               }));
             if (meta?.focus) focusRanges.push(meta.focus);
-            return { hunks, focusRanges };
+            
+            const presence: ChangeState["presence"] = {};
+            const previousPresence = previous.presence.agent;
+            if (previousPresence && meta?.clearPresence !== "agent") {
+              if (previousPresence.from === previousPresence.to) {
+                const pos = tr.mapping.map(previousPresence.to, 1);
+                presence.agent = { from: pos, to: pos };
+              } else {
+                const from = tr.mapping.map(previousPresence.from, 1);
+                const to = tr.mapping.map(previousPresence.to, -1);
+                if (from < to) presence.agent = { from, to };
+              }
+            }
+            if (meta?.presence?.agent) presence.agent = meta.presence.agent;
+            
+            let arrival = meta?.clearArrival || tr.docChanged ? DecorationSet.empty : previous.arrival;
+            if (meta?.arrival) arrival = arrivalDecorations(tr.doc, meta.arrival);
+            // Markers describe the latest editing turn, and disappear if their
+            // passage changes again. The immutable transcript keeps older edits.
+            let lineChanges = previous.lineChanges
+              .filter((change) => !tr.docChanged || !touches(tr, change.from, change.to))
+              .map((change) => ({
+                ...change,
+                from: tr.mapping.map(change.from, -1),
+                to: tr.mapping.map(change.to, 1),
+              }));
+            if (meta?.lineChanges?.length) {
+              if (previous.lineChanges[0]?.runId !== meta.lineChanges[0].runId) lineChanges = [];
+              for (const change of meta.lineChanges) {
+                const earlier = previous.lineChanges.find((item) =>
+                  item.runId === change.runId &&
+                  tr.mapping.map(item.from, -1) === change.from &&
+                  tr.mapping.map(item.to, 1) === change.to);
+                lineChanges.push(earlier ? { ...change, before: earlier.before } : change);
+              }
+            }
+            return { hunks, focusRanges, presence, arrival, lineChanges };
           },
+        },
+        view(view) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          let previous = DecorationSet.empty;
+          const update = () => {
+            const arrival = agentChangesKey.getState(view.state)!.arrival;
+            if (arrival === previous) return;
+            previous = arrival;
+            clearTimeout(timer);
+            if (arrival !== DecorationSet.empty)
+              timer = setTimeout(() => {
+                view.dispatch(setChangeMeta(view.state.tr, { clearArrival: true }).setMeta("addToHistory", false));
+              }, 420);
+          };
+          update();
+          return { update, destroy: () => clearTimeout(timer) };
         },
         props: {
           decorations: (state) =>
@@ -483,12 +619,9 @@ export function useAgentChanges(editor: Editor | null): AgentChangeSummary[] {
     },
     [editor],
   );
-  const snapshot = useCallback(
-    () =>
-      editor
-        ? (agentChangesKey.getState(editor.state)?.hunks ?? emptyChanges)
-        : emptyChanges,
-    [editor],
-  );
+  const snapshot = useCallback(() => {
+    const hunks = editor && agentChangesKey.getState(editor.state)?.hunks;
+    return hunks?.length ? hunks : emptyChanges;
+  }, [editor]);
   return useSyncExternalStore(subscribe, snapshot, () => emptyChanges);
 }

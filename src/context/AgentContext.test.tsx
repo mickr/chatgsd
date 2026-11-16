@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Editor } from "@tiptap/react";
+import { Editor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import { ScratchDocument, setChangeMeta } from "../components/editor/AgentChanges";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as agent from "../services/agent";
+import * as notes from "../services/notes";
 import type { Note } from "../types/note";
+import { executeDocumentTool } from "../lib/agent/documentTools";
 import {
   AgentProvider,
   useAgent,
@@ -27,7 +31,6 @@ vi.mock("../services/agent", async (importOriginal) => ({
   listConversations: vi.fn(),
   loadConversation: vi.fn(),
   saveConversation: vi.fn(() => Promise.resolve()),
-  applyNoteEdit: vi.fn(),
   onAgentEvent: vi.fn((handler: (payload: agent.AgentEventPayload) => void) => {
     mocks.eventHandler = handler;
     return Promise.resolve(() => {});
@@ -68,8 +71,7 @@ const READY: agent.AgentStatus = {
   detail: null,
   account: { email: "me@example.com", planUsage: true, planNoticeSeen: true },
 };
-// Document tools are mocked, so the provider only needs a non-null editor.
-const fakeEditor = {} as unknown as Editor;
+let editor: Editor;
 
 let root: Root;
 let current: AgentContextValue;
@@ -115,10 +117,12 @@ beforeEach(async () => {
   vi.mocked(agent.listModels).mockResolvedValue([{ id: "gpt-x", label: "GPT X" }]);
   vi.mocked(agent.startRun).mockResolvedValue({ runId: "run-1" });
   vi.mocked(agent.listConversations).mockResolvedValue([]);
+  editor = new Editor({ extensions: [StarterKit, ScratchDocument], content: "<p>Trip plan</p>" });
+  Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip plan", session: 1 });
   root = createRoot(document.createElement("div"));
   await act(async () => {
     root.render(
-      <AgentProvider editorRef={{ current: fakeEditor }} editor={null}>
+      <AgentProvider editorRef={{ current: editor }} editor={editor}>
         <Probe />
       </AgentProvider>,
     );
@@ -127,6 +131,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   act(() => root.unmount());
+  editor.destroy();
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
@@ -267,6 +273,34 @@ describe("AgentProvider ask_user", () => {
 });
 
 describe("AgentProvider conversation history", () => {
+  it("saves applied edits before the reply and restores them after an interrupted turn", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("Change the day"); });
+    act(() => mocks.eventHandler?.({
+      runId: "run-1", event: { type: "session", sessionId: "saved-turn" },
+    }));
+    const change = { noteTitle: "Trip plan", hunks: [{ before: ["Friday"], after: ["Saturday"], line: 3 }] };
+    vi.mocked(executeDocumentTool).mockResolvedValueOnce({ ok: true, output: "Applied.", change });
+    act(() => mocks.toolHandler?.({
+      requestId: "edit-request", runId: "run-1", name: "edit_document", args: {},
+    }));
+    await settle();
+    expect(agent.saveConversation).toHaveBeenCalledWith("trip", "saved-turn",
+      expect.arrayContaining([{ id: "edit-request:changes", type: "changes", change }]));
+    act(() => mocks.eventHandler?.({
+      runId: "run-1", event: { type: "error", kind: "other", message: "Connection lost" },
+    }));
+    await settle();
+    const calls = vi.mocked(agent.saveConversation).mock.calls;
+    const saved = calls[calls.length - 1][2];
+    vi.mocked(agent.loadConversation).mockResolvedValueOnce(saved);
+    await act(async () => { await current.openConversation("saved-turn"); });
+    expect(current.conversation.items).toContainEqual({
+      id: "edit-request:changes", type: "changes", change,
+    });
+  });
+
   it("restores the note's latest conversation and continues it", async () => {
     vi.mocked(agent.listConversations).mockResolvedValue([
       {
@@ -313,86 +347,134 @@ describe("AgentProvider conversation history", () => {
   });
 });
 
-describe("AgentProvider edit_note", () => {
-  const proposal = {
-    proposalId: "proposal-1",
-    id: "Packing tips",
-    title: "Packing tips",
-    summary: "Add the power bank from the trip plan.",
-    edits: [{ old_text: "- Rain jacket", new_text: "- Rain jacket\n- Power bank" }],
-    preview: [
-      { before: "", removed: "- Rain jacket", added: "- Rain jacket\n- Power bank", after: "" },
-    ],
-  };
-
-  async function propose() {
+describe("AgentProvider coediting", () => {
+  async function begin() {
     act(() => current.toggle());
     await settle();
-    await act(async () => {
-      await current.send("Sync my packing list");
-    });
-    act(() =>
-      mocks.toolHandler?.({
-        requestId: "e1",
-        runId: "run-1",
-        name: "edit_note",
-        args: proposal,
-      }),
-    );
+    await act(async () => { await current.send("Plan the trip"); });
+  }
+  async function complete() {
+    act(() => mocks.eventHandler?.({
+      runId: "run-1", event: { type: "done", stopReason: "completed" },
+    }));
     await settle();
   }
-  const card = () =>
-    current.conversation.items.find((item) => item.type === "note_edit");
+  async function advance(ms: number) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
 
-  it("writes an approved edit and tells the run", async () => {
-    vi.mocked(agent.applyNoteEdit).mockResolvedValue();
-    await propose();
-    expect(current.pendingEdit).toMatchObject({ noteId: "Packing tips", status: "pending" });
-
+  it("persists disabled computer access and honors it after reopening", async () => {
+    act(() => current.toggle());
+    await settle();
+    act(() => current.setComputerAccess(false));
+    await settle();
+    expect(notes.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ agentComputerAccess: false }));
+    const saved = { ...await notes.getSettings(), agentComputerAccess: false };
+    vi.mocked(notes.getSettings).mockResolvedValueOnce(saved);
+    act(() => root.unmount());
+    root = createRoot(document.createElement("div"));
     await act(async () => {
-      await current.reviewNoteEdit({ approve: true });
+      root.render(<AgentProvider editorRef={{ current: editor }} editor={editor}><Probe /></AgentProvider>);
     });
-    // Only the backend's proposal ID: it holds the note, edits and notes folder.
-    expect(agent.applyNoteEdit).toHaveBeenCalledWith("proposal-1");
-    expect(agent.toolRespond).toHaveBeenCalledWith(
-      "e1",
-      true,
-      'The user approved, and the edit to "Packing tips" is saved.',
-    );
-    expect(card()).toMatchObject({ status: "applied" });
-    expect(current.pendingEdit).toBeNull();
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("Read this note"); });
+    expect(vi.mocked(agent.startRun).mock.calls[0][0].computerAccess).toBe(false);
   });
 
-  it("reports a failed save instead of claiming success", async () => {
-    vi.mocked(agent.applyNoteEdit).mockRejectedValue(
-      new Error("The note changed since this was proposed."),
-    );
-    await propose();
-    await act(async () => {
-      await current.reviewNoteEdit({ approve: true });
+  it("logs direct cross-note edits without waiting for approval", async () => {
+    await begin();
+    act(() => {
+      mocks.eventHandler?.({ runId: "run-1", event: {
+        type: "tool_call", callId: "edit-1", name: "edit_note",
+        input: { id: "Packing tips", edits: [{ old_text: "jacket", new_text: "coat" }] },
+      } });
+      mocks.eventHandler?.({ runId: "run-1", event: {
+        type: "tool_result", callId: "edit-1", ok: true, output: "Saved Packing tips",
+      } });
     });
-    expect(agent.toolRespond).toHaveBeenCalledWith(
-      "e1",
-      false,
-      "The user approved, but the edit couldn't be saved: The note changed since this was proposed.",
-    );
-    expect(card()).toMatchObject({
-      status: "failed",
-      message: "The note changed since this was proposed.",
+    expect(current.conversation.items).toContainEqual(expect.objectContaining({
+      type: "tool", name: "edit_note", ok: true, output: "Saved Packing tips",
+    }));
+    expect(current.conversation.items[current.conversation.items.length - 1]).toMatchObject({
+      type: "changes",
+      change: { noteTitle: "Packing tips", hunks: [{ before: ["jacket"], after: ["coat"] }] },
     });
+    act(() => {
+      mocks.eventHandler?.({ runId: "run-1", event: {
+        type: "tool_call", callId: "failed-edit", name: "edit_note",
+        input: { id: "Packing tips", edits: [{ old_text: "coat", new_text: "parka" }] },
+      } });
+      mocks.eventHandler?.({ runId: "run-1", event: {
+        type: "tool_result", callId: "failed-edit", ok: false, output: "File changed on disk",
+      } });
+    });
+    expect(current.conversation.items.filter((item) => item.type === "changes")).toHaveLength(1);
+    expect(agent.toolRespond).not.toHaveBeenCalled();
   });
 
-  it("declines with the user's feedback and writes nothing", async () => {
-    await propose();
-    await act(async () => {
-      await current.reviewNoteEdit({ approve: false, feedback: "  Put it under Electronics  " });
+  it("debounces local edits, ignores agent changes, and pauses future check-ins", async () => {
+    await begin();
+    expect(vi.mocked(agent.startRun).mock.calls[0][0].computerAccess).toBe(true);
+    await complete();
+    vi.useFakeTimers();
+    act(() => editor.view.dispatch(setChangeMeta(editor.state.tr.insertText("Agent "), { source: "agent" })));
+    await advance(12000);
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
+    act(() => editor.commands.insertContent("Walking "));
+    await advance(1500);
+    act(() => editor.commands.insertContent("Saturday "));
+    await advance(1999);
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(agent.startRun).toHaveBeenCalledTimes(2);
+    expect(current.conversation.items[current.conversation.items.length - 1]).toMatchObject({ type: "activity" });
+    await complete();
+    act(() => editor.commands.insertContent("More "));
+    await act(async () => { await current.stop(); });
+    await advance(20000);
+    expect(agent.startRun).toHaveBeenCalledTimes(2);
+    expect(current.coediting).toBe(false);
+  });
+
+  it("queues user edits during a run without starting concurrent turns", async () => {
+    await begin();
+    vi.useFakeTimers();
+    act(() => editor.commands.insertContent("Coastal "));
+    await advance(3000);
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
+    await complete();
+    await advance(1);
+    expect(agent.startRun).toHaveBeenCalledTimes(2);
+    await complete();
+    act(() => editor.commands.insertContent("path "));
+    await advance(2000);
+    expect(agent.startRun).toHaveBeenCalledTimes(2);
+    await advance(8000);
+    expect(agent.startRun).toHaveBeenCalledTimes(3);
+  });
+
+  it("notifies a waiting question of document edits without inventing an answer", async () => {
+    await startRunAndAsk({ question: "Where?", options: [], form: null });
+    vi.useFakeTimers();
+    act(() => editor.commands.insertContent("Destination: Bath. "));
+    await advance(2000);
+    expect(agent.toolRespond).toHaveBeenCalledWith("q1", true, expect.stringContaining("This is not an answer"));
+    expect(current.pendingQuestion).toBeNull();
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a pending check-in when the document is replaced", async () => {
+    await begin();
+    await complete();
+    vi.useFakeTimers();
+    act(() => {
+      editor.commands.insertContent("Queued ");
+      editor.storage.scratchDocument.session++;
+      editor.view.dispatch(setChangeMeta(editor.state.tr, { clear: true }));
+      editor.commands.setContent("<p>Another note</p>");
     });
-    expect(agent.applyNoteEdit).not.toHaveBeenCalled();
-    expect(agent.toolRespond).toHaveBeenCalledWith(
-      "e1",
-      false,
-      "The user declined this edit and said: Put it under Electronics",
-    );
-    expect(card()).toMatchObject({ status: "declined", message: "Put it under Electronics" });
+    await advance(20000);
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
   });
 });
