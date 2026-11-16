@@ -38,8 +38,18 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
   const submitting = useRef(false);
   const target = useRef<{ from: number; to: number; selected: boolean } | null>(null);
   const running = agent.conversation.runId !== null;
-  const unavailable = agent.status?.status !== "ready" || agent.modelsLoading || !!agent.modelsError ||
+  const unavailable = agent.statusLoading || agent.status?.status !== "ready" || agent.modelsLoading || !!agent.modelsError ||
     (agent.status.account?.planUsage && !agent.status.account.planNoticeSeen);
+  const { refreshStatus } = agent;
+  useEffect(() => {
+    if (open) void refreshStatus();
+  }, [open, refreshStatus]);
+  const readinessMessage = agent.statusLoading
+    ? "Checking your ChatGPT account…"
+    : agent.modelsLoading
+      ? "Loading models…"
+      : agent.statusError ?? agent.modelsError ??
+        (unavailable ? "Set up ChatGPT in the sidebar to edit." : null);
 
   const dismiss = useCallback((restoreFocus: boolean) => {
     setOpen(false);
@@ -171,7 +181,7 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
       </div>
       {(sendError || agent.conversation.error) && <p role="alert" className="text-xs text-text-muted mt-2">{sendError ?? agent.conversation.error?.message}</p>}
       <div className="flex items-center justify-between gap-3 mt-2 text-[11px] text-text-muted">
-        <span role="status">{unavailable ? "Set up ChatGPT in the sidebar to edit." : agent.pendingQuestion ? "The agent has a question in the sidebar." : running ? "Editing your note…" : "Surrounding prose included"}</span>
+        <span role="status">{readinessMessage ?? (agent.pendingQuestion ? "The agent has a question in the sidebar." : running ? "Editing your note…" : "Surrounding prose included")}</span>
         <div className="flex items-center gap-2 shrink-0">
           {(running || agent.coediting) && <button type="button" className="agent-panel-link" onClick={() => void agent.stop()}>Pause</button>}
           <button type="button" className="agent-panel-link" onClick={() => { dismiss(false); onContinue(); }}>Continue in sidebar</button>

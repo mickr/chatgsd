@@ -83,7 +83,8 @@ the chat input when it is ready. Closing it returns focus to the note without
 moving your cursor, in both formatted and Markdown source mode.
 
 In the formatted editor, `Cmd+Option+Enter` opens a small inline edit prompt at
-the selection or cursor. Enter sends; Shift+Enter adds a newline; Escape returns
+the selection or cursor and checks your ChatGPT account without opening the
+sidebar first. Enter sends; Shift+Enter adds a newline; Escape returns
 to the note. Requests include up to 2,000 document positions of surrounding prose
 on each side and tell the agent to read the rest of the note when it needs more
 context. The selection is the default edit target; without one, the cursor is

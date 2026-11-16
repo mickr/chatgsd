@@ -24,7 +24,7 @@ beforeEach(() => {
   editor.storage.scratchDocument.noteId = "note";
   document.body.append(editor.view.dom);
   vi.spyOn(editor.view, "coordsAtPos").mockReturnValue({ top: 100, bottom: 120, left: 100, right: 100 });
-  state.agent = { editor, status: { status: "ready" }, conversation: { runId: null, error: null }, send: vi.fn().mockResolvedValue(true) };
+  state.agent = { editor, status: { status: "ready" }, refreshStatus: vi.fn().mockResolvedValue(undefined), conversation: { runId: null, error: null }, send: vi.fn().mockResolvedValue(true) };
   root = createRoot(container);
   act(() => root.render(<InlineAgentPrompt onContinue={vi.fn()} />));
 });
@@ -123,4 +123,33 @@ it.each([true, false])("retains and maps the selection after binding capture ret
   });
   await submit("Make that shorter");
   expect(selections).toEqual(["Target", "Target", "Revised"]);
+});
+
+it("checks an initially unknown account on inline open and enables sending when ready", async () => {
+  state.agent.status = null;
+  let resolveStatus!: () => void;
+  const statusReady = new Promise<void>((resolve) => { resolveStatus = resolve; });
+  const render = () => root.render(<InlineAgentPrompt onContinue={vi.fn()} />);
+  state.agent.refreshStatus = vi.fn(async () => {
+    state.agent.statusLoading = true;
+    render();
+    await statusReady;
+    state.agent.status = { status: "ready" };
+    state.agent.statusLoading = false;
+    render();
+  });
+  act(render);
+  open();
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("Checking your ChatGPT account…");
+  const input = document.querySelector("textarea")!;
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Shorten this");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(document.querySelector<HTMLButtonElement>('[aria-label="Send inline edit"]')?.disabled).toBe(true);
+  await act(async () => { resolveStatus(); await statusReady; });
+  expect(document.querySelector<HTMLButtonElement>('[aria-label="Send inline edit"]')?.disabled).toBe(false);
+  await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  expect(state.agent.send).toHaveBeenCalledOnce();
+  expect(state.agent.refreshStatus).toHaveBeenCalledOnce();
 });
