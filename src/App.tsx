@@ -17,6 +17,7 @@ import { SpinnerIcon } from "./components/icons";
 import { AgentProvider, useAgent } from "./context/AgentContext";
 import { AgentPanel } from "./components/agent/AgentPanel";
 import { useAgentPanelShortcut } from "./components/agent/useAgentPanelShortcut";
+import { InlineAgentPrompt } from "./components/agent/InlineAgentPrompt";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
 import {
@@ -443,6 +444,13 @@ function AppWorkspace({ editorRef, onEditorReady }: {
               onToggleAgentPanel={toggleAgentPanel}
             />
             <AgentPanel visible={agent.open && !focusMode} />
+            {currentNote && (
+              <InlineAgentPrompt key={currentNote.id} onContinue={() => {
+                setFocusMode(false);
+                if (!agent.open) agent.toggle();
+                else document.querySelector<HTMLTextAreaElement>('[aria-label="Message agent"]')?.focus();
+              }} />
+            )}
           </>
         )}
       </div>

@@ -82,6 +82,18 @@ Opening the agent panel with `Cmd+Option+B`, `Cmd+J`, or its toolbar button focu
 the chat input when it is ready. Closing it returns focus to the note without
 moving your cursor, in both formatted and Markdown source mode.
 
+In the formatted editor, `Cmd+Option+Enter` opens a small inline edit prompt at
+the selection or cursor. Enter sends; Shift+Enter adds a newline; Escape returns
+to the note. Requests include up to 2,000 document positions of surrounding prose
+on each side and tell the agent to read the rest of the note when it needs more
+context. The selection is the default edit target; without one, the cursor is
+the insertion point. While the prompt stays open, its target follows document
+edits and remains available for retries and follow-up instructions.
+Inline edits use the same conversation and direct editing
+tools as the sidebar, with computer access disabled for the inline request.
+**Continue in sidebar** opens the full conversation, including questions and
+change records. **Pause** stops the active coediting session.
+
 Small gutter markers identify passages changed in the latest editing turn.
 Hover, click, or focus a marker to inspect a read-only, word-level before/after
 diff rendered by [Pierre Diffs](https://diffs.com/). The viewer loads only when
@@ -148,6 +160,7 @@ ChatGSD is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Shift+F`     | Search notes           |
 | `Cmd+J`           | Toggle agent panel     |
 | `Cmd+Option+B`    | Toggle agent panel     |
+| `Cmd+Option+Enter` | Inline AI edit        |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |
 | `Cmd+\`           | Toggle sidebar         |
