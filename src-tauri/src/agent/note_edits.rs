@@ -2,6 +2,9 @@
 //! approves each in the panel, and only then is the file written. The open
 //! note keeps its own path: tracked changes in the live editor.
 use super::{tools::ToolOutput, workspace, AgentState, RunContext};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -108,18 +111,29 @@ pub async fn propose(app: &tauri::AppHandle, run_id: &str, ctx: &RunContext, arg
         Ok((_, preview)) => preview,
         Err(error) => return ToolOutput::error(error),
     };
+    // The panel approves by this ID; the backend keeps where and what to write,
+    // so an approval can't land in another workspace or change the edits.
+    let proposal_id = uuid::Uuid::new_v4().to_string();
+    let state = app.state::<AgentState>();
+    let _pending = state.proposals.hold(
+        &proposal_id,
+        Proposal {
+            notes_folder: ctx.notes_folder.clone(),
+            note_id: id.to_owned(),
+            edits: edits.clone(),
+        },
+    );
     let request = json!({
+        "proposalId": proposal_id,
         "id": id,
         "title": crate::extract_title(&content),
         "summary": summary,
         "edits": edits,
         "preview": preview,
     });
-    // Waits for the user, however long they take; Stop cancels the run.
-    app.state::<AgentState>()
-        .bridge
-        .execute(app, run_id, "edit_note", request, None)
-        .await
+    // Waits for the user, however long they take; Stop cancels the run, and
+    // dropping `_pending` then withdraws the proposal.
+    state.bridge.execute(app, run_id, "edit_note", request, None).await
 }
 
 async fn read(ctx: &RunContext, id: &str) -> Result<String, String> {
@@ -127,18 +141,67 @@ async fn read(ctx: &RunContext, id: &str) -> Result<String, String> {
     tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())
 }
 
-/// Writes an approved edit. The edits are re-applied to the note as it is now,
-/// so text the user changed since the proposal is kept or the edit is refused,
-/// and the write itself is compare-and-swap against what was read.
+/// An edit waiting for the user's decision, bound to the run's workspace and
+/// the exact edits they were shown.
+#[derive(Clone)]
+pub struct Proposal {
+    notes_folder: PathBuf,
+    note_id: String,
+    edits: Vec<NoteEdit>,
+}
+
+/// Proposals awaiting a decision, by ID.
+#[derive(Default)]
+pub struct Proposals(Mutex<HashMap<String, Proposal>>);
+
+impl Proposals {
+    /// Registers a proposal for as long as the returned guard lives.
+    fn hold(&self, id: &str, proposal: Proposal) -> Pending<'_> {
+        self.lock().insert(id.to_owned(), proposal);
+        Pending { proposals: self, id: id.to_owned() }
+    }
+
+    /// The proposal, once: a second approval finds nothing.
+    fn take(&self, id: &str) -> Option<Proposal> {
+        self.lock().remove(id)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Proposal>> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+struct Pending<'a> {
+    proposals: &'a Proposals,
+    id: String,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.proposals.take(&self.id);
+    }
+}
+
+/// Writes an approved proposal.
 #[tauri::command]
-pub async fn agent_apply_note_edit(app: tauri::AppHandle, note_id: String, edits: Vec<NoteEdit>) -> Result<(), String> {
-    let folder = super::notes_folder(&app).await?;
-    let path = workspace::note_path(&folder, &note_id).await?;
+pub async fn agent_apply_note_edit(proposal_id: String, state: tauri::State<'_, AgentState>) -> Result<(), String> {
+    let proposal = state
+        .proposals
+        .take(&proposal_id)
+        .ok_or("This proposal is no longer waiting for a decision. Ask ChatGPT again.")?;
+    write(&proposal).await
+}
+
+/// Re-applies the edits to the note as it is now, in the workspace they were
+/// proposed in, so text the user changed since is kept or the edit is refused;
+/// the write itself is compare-and-swap against what was read.
+async fn write(proposal: &Proposal) -> Result<(), String> {
+    let path = workspace::note_path(&proposal.notes_folder, &proposal.note_id).await?;
     let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let content = String::from_utf8(bytes).map_err(|e| e.to_string())?;
-    let (updated, _) =
-        apply(&content, &edits).map_err(|error| format!("The note changed since this was proposed. {error}."))?;
+    let (updated, _) = apply(&content, &proposal.edits)
+        .map_err(|error| format!("The note changed since this was proposed. {error}."))?;
     match crate::checked_write(&path, &path, &updated, Some(&hash)).await? {
         None => Ok(()),
         Some(_) => Err("The note changed while saving. Ask ChatGPT to try again.".into()),
@@ -186,5 +249,52 @@ mod tests {
         assert!(preview[0].before.starts_with('…'));
         assert_eq!(preview[0].before.chars().count(), CONTEXT_CHARS + 1);
         assert!(preview[0].after.ends_with('…'));
+    }
+
+    fn workspace(name: &str, note: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("scratch-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Plan.md"), note).unwrap();
+        std::fs::canonicalize(dir).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_approval_writes_only_where_it_was_proposed() {
+        // Two notes folders with a note of the same ID, as after a folder switch.
+        let proposed_in = workspace("a", "# Plan\n\nPack a rain jacket.\n");
+        let switched_to = workspace("b", "# Plan\n\nPack a rain jacket.\n");
+        let proposals = Proposals::default();
+        let _pending = proposals.hold(
+            "p1",
+            Proposal {
+                notes_folder: proposed_in.clone(),
+                note_id: "Plan".into(),
+                edits: vec![edit("rain jacket", "rain jacket and boots")],
+            },
+        );
+        write(&proposals.take("p1").unwrap()).await.unwrap();
+        let read = |dir: &PathBuf| std::fs::read_to_string(dir.join("Plan.md")).unwrap();
+        assert_eq!(read(&proposed_in), "# Plan\n\nPack a rain jacket and boots.\n");
+        assert_eq!(read(&switched_to), "# Plan\n\nPack a rain jacket.\n");
+        for dir in [proposed_in, switched_to] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn proposals_are_approved_once_and_withdrawn_with_their_run() {
+        let proposals = Proposals::default();
+        let proposal = || Proposal {
+            notes_folder: PathBuf::from("/notes"),
+            note_id: "Plan".into(),
+            edits: vec![edit("a", "b")],
+        };
+        let pending = proposals.hold("approved", proposal());
+        assert!(proposals.take("approved").is_some());
+        assert!(proposals.take("approved").is_none(), "a second approval finds nothing");
+        drop(pending);
+        // A run that stops or is cancelled drops its guard, so a late approval fails.
+        drop(proposals.hold("cancelled", proposal()));
+        assert!(proposals.take("cancelled").is_none());
     }
 }

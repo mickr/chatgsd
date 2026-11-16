@@ -58,6 +58,8 @@ export type TranscriptItem =
       type: "note_edit";
       runId: string;
       requestId: string;
+      /** The backend's record of what to write, and in which notes folder. */
+      proposalId: string;
       noteId: string;
       title: string;
       summary: string;
@@ -114,8 +116,9 @@ const hasStrings = (value: unknown, keys: string[]) =>
 function parseNoteEdit(args: unknown) {
   const input =
     args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-  const { id, title, summary, edits, preview } = input;
+  const { proposalId, id, title, summary, edits, preview } = input;
   if (
+    !isString(proposalId) ||
     !isString(id) ||
     !isString(title) ||
     !isString(summary) ||
@@ -128,6 +131,7 @@ function parseNoteEdit(args: unknown) {
   )
     return null;
   return {
+    proposalId,
     noteId: id,
     title,
     summary,
@@ -208,7 +212,7 @@ export interface AgentContextValue {
   pendingEdit: NoteEditItem | null;
   reviewNoteEdit: (decision: NoteEditDecision) => Promise<void>;
   conversation: Conversation;
-  send: (prompt: string) => Promise<boolean>;
+  send: (prompt: string, computerAccess?: boolean) => Promise<boolean>;
   stop: () => Promise<void>;
   newConversation: () => void;
   /** The current note's saved conversations, most recent first. */
@@ -615,7 +619,7 @@ export function AgentProvider({
     };
   }, [editorRef, processEvent, processTool]);
   const send = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, computerAccess = false) => {
       const editor = editorRef.current;
       if (!editor || !currentNote || !prompt.trim() || !ready) return false;
       if (conversationsRef.current[currentNote.id]?.runId) return false;
@@ -638,6 +642,7 @@ export function AgentProvider({
         noteId: binding.noteId,
         noteTitle: binding.noteTitle,
         selection: binding.selectionMarkdown,
+        computerAccess,
       };
       updateConversation(binding.noteId, (conversation) => ({
         ...conversation,
@@ -666,6 +671,7 @@ export function AgentProvider({
           uiGuide,
           sessionId,
           prompt: prompt.trim(),
+          computerAccess,
           context,
         });
         if (runs.current.get(temporaryId) !== run) {
@@ -902,7 +908,7 @@ export function AgentProvider({
       if (decision.approve) {
         update({ status: "applying" });
         try {
-          await agent.applyNoteEdit(item.noteId, item.edits);
+          await agent.applyNoteEdit(item.proposalId);
           update({ status: "applied", message: null });
           result = {
             ok: true,

@@ -315,6 +315,7 @@ describe("AgentProvider conversation history", () => {
 
 describe("AgentProvider edit_note", () => {
   const proposal = {
+    proposalId: "proposal-1",
     id: "Packing tips",
     title: "Packing tips",
     summary: "Add the power bank from the trip plan.",
@@ -351,7 +352,8 @@ describe("AgentProvider edit_note", () => {
     await act(async () => {
       await current.reviewNoteEdit({ approve: true });
     });
-    expect(agent.applyNoteEdit).toHaveBeenCalledWith("Packing tips", proposal.edits);
+    // Only the backend's proposal ID: it holds the note, edits and notes folder.
+    expect(agent.applyNoteEdit).toHaveBeenCalledWith("proposal-1");
     expect(agent.toolRespond).toHaveBeenCalledWith(
       "e1",
       true,
