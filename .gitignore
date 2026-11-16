@@ -27,8 +27,18 @@ dist-ssr
 src-tauri/target/
 src-tauri/gen/
 
-# Build secrets
-.env.build
+# Secrets: keys, certificates and env files never belong in the repo. CI's
+# gitleaks job scans every commit for any that slip through.
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.p8
+*.pem
+*.key
+*.cer
+*.mobileprovision
 
 # Release artifacts
 latest.json
