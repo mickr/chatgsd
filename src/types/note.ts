@@ -56,7 +56,8 @@ export interface Settings {
   sidebarWidthPx?: number;
   defaultNoteName?: string;
   interfaceZoom?: number;
-  ollamaModel?: string;
+  agentModel?: string;
+  agentPanelWidthPx?: number;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;

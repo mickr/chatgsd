@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SaveResult } from "./notes";
 
 export interface FileContent {
   path: string;
@@ -14,8 +15,9 @@ export async function readFileDirect(path: string): Promise<FileContent> {
 export async function saveFileDirect(
   path: string,
   content: string,
-): Promise<FileContent> {
-  return invoke("save_file_direct", { path, content });
+  expectedHash: string | null,
+): Promise<SaveResult<FileContent>> {
+  return invoke("save_file_direct", { path, content, expectedHash });
 }
 
 export async function openFilePreview(path: string): Promise<void> {

@@ -23,6 +23,14 @@ import { Markdown } from "@tiptap/markdown";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
+import { AgentChanges, ScratchDocument, setChangeMeta } from "./AgentChanges";
+import {
+  minimalDocumentDiff,
+  parseDocument,
+  serializeDocument,
+  trimTrailingEmptyParagraph,
+} from "../../lib/agent/documentTools";
+import { markdownHash, mergeExternalContent, type ExternalChange } from "../../lib/agent/merge";
 import { Extension, InputRule } from "@tiptap/core";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
@@ -101,7 +109,7 @@ import {
   DownloadIcon,
   ShareIcon,
   PanelLeftIcon,
-  RefreshCwIcon,
+  AgentIcon,
   PinIcon,
   SearchIcon,
   MarkdownIcon,
@@ -433,9 +441,9 @@ export interface PreviewModeData {
   title: string;
   filePath: string;
   modified: number;
-  hasExternalChanges: boolean;
+  externalChange: ExternalChange | null;
   reloadVersion: number;
-  save: (content: string) => Promise<void>;
+  save: (content: string, expectedHash: string) => Promise<notesService.SaveResult<{ content: string; title: string; modified: number }>>;
   reload: () => Promise<void>;
 }
 
@@ -447,6 +455,8 @@ interface EditorProps {
   onEditorReady?: (editor: TiptapEditor | null) => void;
   onSaveToFolder?: () => void;
   saveToFolderDisabled?: boolean;
+  agentPanelOpen?: boolean;
+  onToggleAgentPanel?: () => void;
 }
 
 /**
@@ -510,6 +520,8 @@ export function Editor({
   previewMode,
   onSaveToFolder,
   saveToFolderDisabled,
+  agentPanelOpen,
+  onToggleAgentPanel,
 }: EditorProps) {
   // Always call the hook (rules of hooks), but it returns null outside NotesProvider
   const notesCtx = useOptionalNotes();
@@ -527,19 +539,16 @@ export function Editor({
     : (notesCtx?.currentNote ?? null);
 
   const saveNote = previewMode
-    ? async (content: string, _noteId?: string) => {
-        await previewMode.save(content);
+    ? async (content: string, _noteId: string | undefined, expectedHash: string) => {
+        return previewMode.save(content, expectedHash);
       }
     : notesCtx!.saveNote;
 
   const createNote = notesCtx?.createNote;
   const consumePendingNewNote = notesCtx?.consumePendingNewNote;
-  const hasExternalChanges = previewMode
-    ? previewMode.hasExternalChanges
-    : notesCtx!.hasExternalChanges;
-  const reloadCurrentNote = previewMode
-    ? previewMode.reload
-    : notesCtx!.reloadCurrentNote;
+  const externalChange = previewMode
+    ? previewMode.externalChange
+    : notesCtx!.externalChange;
   const reloadVersion = previewMode
     ? previewMode.reloadVersion
     : notesCtx!.reloadVersion;
@@ -567,7 +576,11 @@ export function Editor({
   // Source mode state
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceContent, setSourceContent] = useState("");
-  const sourceTimeoutRef = useRef<number | null>(null);
+  const sourceModeRef = useRef(sourceMode);
+  sourceModeRef.current = sourceMode;
+  const sourceContentRef = useRef(sourceContent);
+  sourceContentRef.current = sourceContent;
+  const changingSourceRef = useRef(false);
   const sourceModeTransitionRef = useRef<{
     topBlockIndex: number;
     cursorBlockIndex: number;
@@ -589,28 +602,26 @@ export function Editor({
   const isLoadingRef = useRef(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<TiptapEditor | null>(null);
-  const currentNoteIdRef = useRef<string | null>(null);
   // Track if we need to save (use ref to avoid computing markdown on every keystroke)
   const needsSaveRef = useRef(false);
+  const baseRef = useRef("");
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const scheduleSaveRef = useRef<() => void>(() => {});
+  const pendingSavesRef = useRef(0);
+  const switchingAfterSaveRef = useRef(false);
+  const [saveVersion, setSaveVersion] = useState(0);
   // Stable refs for wikilink click handler (avoids re-registering listener on every notes change)
   const notesRef = useRef(notes);
   notesRef.current = notes;
   const notesCtxRef = useRef(notesCtx);
   notesCtxRef.current = notesCtx;
 
-  // Keep ref in sync with current note ID
-  currentNoteIdRef.current = currentNote?.id ?? null;
-
   // Get markdown from editor
   const getMarkdown = useCallback(
-    (editorInstance: ReturnType<typeof useEditor>) => {
+    (editorInstance: TiptapEditor | null) => {
       if (!editorInstance) return "";
-      const manager = editorInstance.storage.markdown?.manager;
-      if (manager) {
-        let markdown = manager.serialize(editorInstance.getJSON());
-        // Clean up nbsp entities that TipTap inserts (especially in table cells)
-        markdown = markdown.replace(/&nbsp;|&#160;/g, " ");
-        return markdown;
+      if (editorInstance.storage.markdown?.manager) {
+        return trimTrailingEmptyParagraph(serializeDocument(editorInstance));
       }
       // Fallback to plain text
       return editorInstance.getText();
@@ -730,15 +741,50 @@ export function Editor({
   // Immediate save function (used for flushing)
   const saveImmediately = useCallback(
     async (noteId: string, content: string) => {
-      setIsSaving(true);
-      try {
-        lastSaveRef.current = { noteId, content };
-        await saveNote(content, noteId);
-      } finally {
-        setIsSaving(false);
-      }
+      const instance = editorRef.current;
+      if (!instance) return;
+      const session = instance.storage.scratchDocument.session;
+      const capturedBase = baseRef.current;
+      pendingSavesRef.current++;
+      const task = saveQueueRef.current.then(async () => {
+        const stillOpen = () => !instance.isDestroyed && instance.storage.scratchDocument.session === session;
+        const expectedBase = stillOpen() ? baseRef.current : capturedBase;
+        setIsSaving(true);
+        try {
+          const savingId = stillOpen() ? instance.storage.scratchDocument.noteId ?? noteId : noteId;
+          if (stillOpen()) content = sourceModeRef.current ? sourceContentRef.current : getMarkdown(instance);
+          lastSaveRef.current = { noteId: savingId, content };
+          const result = await saveNote(content, savingId, await markdownHash(expectedBase));
+          if (!stillOpen()) {
+            if (result.status === "conflict") toast.error("The previous note changed on disk before it could be saved.");
+            return;
+          }
+          if (result.status === "conflict") {
+            mergeExternalContent(instance, expectedBase, result.diskContent);
+            baseRef.current = result.diskContent;
+            if (sourceModeRef.current) setSourceContent(getMarkdown(instance));
+            scheduleSaveRef.current();
+          } else {
+            baseRef.current = content;
+            if ("id" in result.note && typeof result.note.id === "string" && result.note.id !== loadedNoteIdRef.current) {
+              loadedNoteIdRef.current = result.note.id;
+              instance.storage.scratchDocument.noteId = result.note.id;
+              instance.storage.scratchDocument.title = result.note.title;
+              instance.view.dispatch(instance.state.tr.setMeta("addToHistory", false));
+            }
+          }
+        } catch (error) {
+          console.error("Failed to save note:", error);
+          toast.error("Failed to save note");
+        } finally {
+          pendingSavesRef.current--;
+          setIsSaving(false);
+        }
+      });
+      saveQueueRef.current = task;
+      await task;
     },
-    [saveNote],
+    [saveNote, getMarkdown],
   );
 
   // Flush any pending save immediately (saves to the note currently loaded in editor)
@@ -748,10 +794,10 @@ export function Editor({
       saveTimeoutRef.current = null;
     }
 
-    // Use loadedNoteIdRef (the note in the editor) not currentNoteIdRef (which may have changed)
+    // Flush to the document still loaded while a note switch is waiting.
     if (needsSaveRef.current && editorRef.current && loadedNoteIdRef.current) {
       needsSaveRef.current = false;
-      const markdown = getMarkdown(editorRef.current);
+      const markdown = sourceModeRef.current ? sourceContentRef.current : getMarkdown(editorRef.current);
       await saveImmediately(loadedNoteIdRef.current, markdown);
     }
   }, [saveImmediately, getMarkdown]);
@@ -762,24 +808,25 @@ export function Editor({
       clearTimeout(saveTimeoutRef.current);
     }
 
-    const savingNoteId = currentNote?.id;
+    const savingNoteId = loadedNoteIdRef.current;
     if (!savingNoteId) return;
 
     needsSaveRef.current = true;
 
     saveTimeoutRef.current = window.setTimeout(async () => {
-      if (currentNoteIdRef.current !== savingNoteId || !needsSaveRef.current) {
+      if (loadedNoteIdRef.current !== savingNoteId || !needsSaveRef.current) {
         return;
       }
 
       // Compute markdown only now, when we actually save
       if (editorRef.current) {
         needsSaveRef.current = false;
-        const markdown = getMarkdown(editorRef.current);
+        const markdown = sourceModeRef.current ? sourceContentRef.current : getMarkdown(editorRef.current);
         await saveImmediately(savingNoteId, markdown);
       }
-    }, 500);
+    }, 300);
   }, [saveImmediately, getMarkdown, currentNote?.id]);
+  scheduleSaveRef.current = scheduleSave;
 
   const closeBlockMathPopup = useCallback(() => {
     if (blockMathPopupRef.current) {
@@ -1048,6 +1095,8 @@ export function Editor({
   const editor = useEditor({
     textDirection,
     extensions: [
+      ScratchDocument,
+      AgentChanges,
       StarterKit.configure({
         heading: {
           levels: [1, 2, 3, 4, 5, 6],
@@ -1253,8 +1302,13 @@ export function Editor({
     onCreate: ({ editor: editorInstance }) => {
       editorRef.current = editorInstance;
     },
-    onUpdate: () => {
+    onUpdate: ({ editor: instance }) => {
       if (isLoadingRef.current) return;
+      if (sourceModeRef.current && !changingSourceRef.current) {
+        const markdown = getMarkdown(instance);
+        sourceContentRef.current = markdown;
+        setSourceContent(markdown);
+      }
       scheduleSave();
     },
     onSelectionUpdate: () => {
@@ -1437,9 +1491,14 @@ export function Editor({
   }, [editor]);
 
   // Load note content when the current note changes
-  useEffect(() => {
-    // Skip if no note or editor
-    if (!currentNote || !editor) {
+  useLayoutEffect(() => {
+    if (!editor) return;
+    if (!currentNote) {
+      if (editor.storage.scratchDocument.noteId !== null) {
+        editor.storage.scratchDocument = { noteId: null, title: "", session: editor.storage.scratchDocument.session + 1 };
+        loadedNoteIdRef.current = null;
+        editor.view.dispatch(setChangeMeta(editor.state.tr, { clear: true }).setMeta("addToHistory", false));
+      }
       return;
     }
 
@@ -1457,6 +1516,9 @@ export function Editor({
         loadedNoteIdRef.current = currentNote.id;
         loadedModifiedRef.current = currentNote.modified;
         lastSaveRef.current = null;
+        editor.storage.scratchDocument.noteId = currentNote.id;
+        editor.storage.scratchDocument.title = currentNote.title;
+        editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
         // If user typed during the rename, flush with the now-correct ID
         if (needsSaveRef.current) {
           flushPendingSave();
@@ -1466,18 +1528,20 @@ export function Editor({
     }
 
     // Flush any pending save before switching to a different note
-    if (!isSameNote && needsSaveRef.current) {
-      flushPendingSave();
+    if (!isSameNote && (needsSaveRef.current || pendingSavesRef.current > 0)) {
+      if (switchingAfterSaveRef.current) return;
+      switchingAfterSaveRef.current = true;
+      void flushPendingSave().then(() => saveQueueRef.current).finally(() => {
+        switchingAfterSaveRef.current = false;
+        setSaveVersion((version) => version + 1);
+      });
+      return;
     }
     // Reset source mode when genuinely switching notes (renames return early above)
     if (!isSameNote) {
       setSourceMode(false);
-      if (sourceTimeoutRef.current) {
-        clearTimeout(sourceTimeoutRef.current);
-        sourceTimeoutRef.current = null;
-      }
     }
-    // Check if this is a manual reload (user clicked Refresh button or pressed Cmd+R)
+    // Cmd+R remains an explicit force reload.
     const isManualReload = reloadVersion !== lastReloadVersionRef.current;
 
     if (isSameNote) {
@@ -1486,6 +1550,12 @@ export function Editor({
         lastReloadVersionRef.current = reloadVersion;
         loadedModifiedRef.current = currentNote.modified;
         isLoadingRef.current = true;
+        baseRef.current = currentNote.content;
+        needsSaveRef.current = false;
+        clearTimeout(saveTimeoutRef.current ?? undefined);
+        sourceContentRef.current = currentNote.content;
+        setSourceContent(currentNote.content);
+        editor.view.dispatch(setChangeMeta(editor.state.tr, { clear: true }).setMeta("addToHistory", false));
         const manager = editor.storage.markdown?.manager;
         if (manager) {
           try {
@@ -1502,6 +1572,7 @@ export function Editor({
       }
       // Just a save - update refs but don't reload content
       loadedModifiedRef.current = currentNote.modified;
+      editor.storage.scratchDocument.title = currentNote.title;
       return;
     }
 
@@ -1511,6 +1582,9 @@ export function Editor({
 
     loadedNoteIdRef.current = loadingNoteId;
     loadedModifiedRef.current = currentNote.modified;
+    baseRef.current = currentNote.content;
+    editor.storage.scratchDocument = { noteId: currentNote.id, title: currentNote.title, session: editor.storage.scratchDocument.session + 1 };
+    editor.view.dispatch(setChangeMeta(editor.state.tr, { clear: true }).setMeta("addToHistory", false));
 
     isLoadingRef.current = true;
 
@@ -1571,8 +1645,24 @@ export function Editor({
     editor,
     flushPendingSave,
     reloadVersion,
+    saveVersion,
     consumePendingNewNote,
   ]);
+
+  useEffect(() => {
+    if (!editor || !externalChange || externalChange.noteId !== loadedNoteIdRef.current) return;
+    try {
+      const ownSave = lastSaveRef.current;
+      if (ownSave?.noteId !== externalChange.noteId || ownSave.content !== externalChange.content) {
+        mergeExternalContent(editor, baseRef.current, externalChange.content);
+      }
+      baseRef.current = externalChange.content;
+      loadedModifiedRef.current = externalChange.modified;
+    } catch (error) {
+      console.error("Failed to merge external changes:", error);
+      toast.error("Could not merge the changes from disk. Your open note is unchanged.");
+    }
+  }, [editor, externalChange, saveVersion, currentNote?.id]);
 
   // Scroll to top on mount (e.g., when returning from settings)
   useEffect(() => {
@@ -1585,15 +1675,10 @@ export function Editor({
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
       }
-      // Flush any pending save before unmounting
-      if (needsSaveRef.current && editorRef.current) {
+      if (needsSaveRef.current && editorRef.current && loadedNoteIdRef.current) {
         needsSaveRef.current = false;
-        const manager = editorRef.current.storage.markdown?.manager;
-        const markdown = manager
-          ? manager.serialize(editorRef.current.getJSON())
-          : editorRef.current.getText();
-        // Fire and forget - save will complete in background
-        saveNote(markdown);
+        const markdown = sourceModeRef.current ? sourceContentRef.current : getMarkdown(editorRef.current);
+        void saveImmediately(loadedNoteIdRef.current, markdown);
       }
       if (linkPopupRef.current) {
         linkPopupRef.current.destroy();
@@ -2023,18 +2108,6 @@ export function Editor({
 
       sourceModeTransitionRef.current = { topBlockIndex, cursorBlockIndex };
 
-      // Parse and set content
-      const manager = editor.storage.markdown?.manager;
-      if (manager) {
-        try {
-          const parsed = manager.parse(sourceContent);
-          editor.commands.setContent(parsed);
-        } catch {
-          editor.commands.setContent(sourceContent);
-        }
-      } else {
-        editor.commands.setContent(sourceContent);
-      }
       setSourceMode(false);
     }
   }, [editor, sourceMode, sourceContent, getMarkdown]);
@@ -2117,29 +2190,22 @@ export function Editor({
     return () => window.removeEventListener("toggle-source-mode", handler);
   }, [toggleSourceMode]);
 
-  // Auto-save in source mode with debounce
+  // Keep source edits in the live document so agent tools and merges see them too.
   const handleSourceChange = useCallback(
     (value: string) => {
       setSourceContent(value);
-      if (sourceTimeoutRef.current) {
-        clearTimeout(sourceTimeoutRef.current);
+      sourceContentRef.current = value;
+      if (!editor) return;
+      try {
+        const diff = minimalDocumentDiff(editor.state.doc, parseDocument(editor, value));
+        changingSourceRef.current = true;
+        if (diff) editor.view.dispatch(editor.state.tr.replace(diff.from, diff.to, diff.slice));
+        else scheduleSave();
+      } finally {
+        changingSourceRef.current = false;
       }
-      sourceTimeoutRef.current = window.setTimeout(async () => {
-        if (currentNote) {
-          setIsSaving(true);
-          try {
-            lastSaveRef.current = { noteId: currentNote.id, content: value };
-            await saveNote(value, currentNote.id);
-          } catch (error) {
-            console.error("Failed to save note:", error);
-            toast.error("Failed to save note");
-          } finally {
-            setIsSaving(false);
-          }
-        }
-      }, 300);
     },
-    [currentNote, saveNote],
+    [editor, scheduleSave],
   );
 
   if (!currentNote) {
@@ -2264,19 +2330,18 @@ export function Editor({
         <div
           className={`titlebar-no-drag flex items-center gap-px shrink-0 transition-opacity duration-400 ${needsSidebarDelay ? "delay-200" : ""} ${focusMode ? "opacity-0 pointer-events-none" : "opacity-100"}`}
         >
-          {hasExternalChanges ? (
-            <Tooltip
-              content={`External changes detected (${mod}${isMac ? "" : "+"}R to refresh)`}
+          {onToggleAgentPanel && (
+            <IconButton
+              onClick={onToggleAgentPanel}
+              title={`Agent (${mod}${isMac ? "" : "+"}J)`}
+              variant={agentPanelOpen ? "secondary" : "ghost"}
+              aria-label="Toggle agent panel"
+              aria-pressed={agentPanelOpen}
             >
-              <button
-                onClick={reloadCurrentNote}
-                className="h-7 px-2 flex items-center gap-1 text-xs text-text-muted hover:bg-bg-emphasis rounded transition-colors font-medium"
-              >
-                <RefreshCwIcon className="w-4 h-4 stroke-[1.6]" />
-                <span>Refresh</span>
-              </button>
-            </Tooltip>
-          ) : isSaving ? (
+              <AgentIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+            </IconButton>
+          )}
+          {isSaving ? (
             <Tooltip content="Saving...">
               <div className="h-7 w-7 flex items-center justify-center">
                 <SpinnerIcon className="w-4.5 h-4.5 text-text-muted/40 stroke-[1.5] animate-spin" />

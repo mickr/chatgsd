@@ -9,20 +9,24 @@ Scratch is a cross-platform markdown note-taking app for macOS, Windows, and Lin
 ```bash
 npm run dev          # Start Vite dev server only
 npm run build        # Build frontend (tsc + vite)
+npm test             # Frontend unit tests (Vitest, jsdom)
 npm run tauri dev    # Run full app in development mode
 npm run tauri build  # Build production app
 ```
 
 ## CI
 
-Runs on every push to `main` and on PRs. Validates frontend build (`tsc` + Vite) and Rust compilation (`cargo check` + `cargo clippy`) on an Ubuntu runner.
+Runs on every push to `main` and on PRs. Validates frontend build (`tsc` + Vite), frontend unit tests (`npm test`), and Rust compilation (`cargo check` + `cargo clippy`) on an Ubuntu runner.
 
 ## Key Patterns
 
-- All backend operations go through Tauri commands in `src-tauri/src/lib.rs`. Frontend calls them via `invoke()` from `@tauri-apps/api/core`.
+- All backend operations go through Tauri commands registered in `src-tauri/src/lib.rs` (agent commands live in `src-tauri/src/agent/`). Frontend calls them via `invoke()` from `@tauri-apps/api/core`.
 - `NotesContext` uses a dual context pattern (data/actions separated) for performance.
 - Settings live in two places: app config at `{APP_DATA}/config.json`, per-folder settings at `{NOTES_FOLDER}/.scratch/settings.json`.
 - Tauri v2 permissions go in `src-tauri/capabilities/default.json`.
+- The agent never writes note files. ChatGPT (`src-tauri/src/agent/chatgpt/`: Sign in with ChatGPT OAuth plus a Responses API tool loop) edits the live TipTap doc through Scratch's document tools (`read_document`, `edit_document`, `replace_selection`, plus read-only `search_notes`/`read_note`). They're defined once in `src-tauri/src/agent/tools.rs` and the document tools execute in `src/lib/agent/documentTools.ts` over the `agent:tool-request` bridge.
+- Agent edits land as tracked hunks (`src/components/editor/AgentChanges.ts`). One tool call's edits are one transaction, so a batch applies atomically.
+- Saves are compare-and-swap: `save_note`/`save_file_direct` take the SHA-256 of the last disk-synced content and return a conflict instead of overwriting an outside write. External changes and save conflicts both go through the block-level three-way merge in `src/lib/agent/merge.ts`.
 
 ## Coding Conventions
 

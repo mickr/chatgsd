@@ -17,6 +17,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 mod git;
+mod agent;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,8 +126,11 @@ pub struct Settings {
     /// Custom sidebar width in px; `None` means the default width is used.
     #[serde(rename = "sidebarWidthPx")]
     pub sidebar_width_px: Option<u32>,
-    #[serde(rename = "ollamaModel")]
-    pub ollama_model: Option<String>,
+    /// ChatGPT model slug for the agent panel; `None` uses the first model listed.
+    #[serde(rename = "agentModel")]
+    pub agent_model: Option<String>,
+    #[serde(rename = "agentPanelWidthPx")]
+    pub agent_panel_width_px: Option<u32>,
     #[serde(rename = "foldersEnabled")]
     pub folders_enabled: Option<bool>,
     #[serde(rename = "ignoredPatterns")]
@@ -147,14 +151,6 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-// AI execution result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiExecutionResult {
-    pub success: bool,
-    pub output: String,
-    pub error: Option<String>,
-}
 
 // File watcher state
 pub struct FileWatcherState {
@@ -1024,13 +1020,52 @@ async fn read_note(id: String, state: State<'_, AppState>) -> Result<Note, Strin
         modified,
     })
 }
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum SaveResult<T> {
+    Saved { note: T },
+    Conflict { disk_content: String, disk_modified: i64 },
+}
+
+struct DiskConflict { content: String, modified: i64 }
+
+async fn checked_write(
+    current_path: &Path,
+    destination: &Path,
+    content: &str,
+    expected_hash: Option<&str>,
+) -> Result<Option<DiskConflict>, String> {
+    use sha2::{Digest, Sha256};
+    // Serialize Scratch saves so two concurrent editor saves cannot pass the same base.
+    static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = SAVE_LOCK.lock().await;
+    if let Some(expected) = expected_hash {
+        match fs::read(current_path).await {
+            Ok(disk) if format!("{:x}", Sha256::digest(&disk)) != expected => {
+                let content = String::from_utf8(disk).map_err(|e| e.to_string())?;
+                let modified = fs::metadata(current_path).await.map_err(|e| e.to_string())?
+                    .modified().ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs() as i64).unwrap_or(0);
+                return Ok(Some(DiskConflict { content, modified }));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    fs::write(destination, content).await.map_err(|e| e.to_string())?;
+    Ok(None)
+}
+
 
 #[tauri::command]
 async fn save_note(
     id: Option<String>,
     content: String,
+    expected_hash: Option<String>,
     state: State<'_, AppState>,
-) -> Result<Note, String> {
+) -> Result<SaveResult<Note>, String> {
     let folder = {
         let app_config = state.app_config.read().expect("app_config read lock");
         app_config
@@ -1094,10 +1129,10 @@ async fn save_note(
         (new_id, new_file_path, None)
     };
 
-    // Write the file to the new path
-    fs::write(&file_path, &content)
-        .await
-        .map_err(|e| e.to_string())?;
+    let current_path = old_id.as_ref().map(|(_, path)| path.as_path()).unwrap_or(&file_path);
+    if let Some(conflict) = checked_write(current_path, &file_path, &content, expected_hash.as_deref()).await? {
+        return Ok(SaveResult::Conflict { disk_content: conflict.content, disk_modified: conflict.modified });
+    }
 
     // Delete old file AFTER successful write (to prevent data loss)
     if let Some((_, ref old_file_path)) = old_id {
@@ -1133,13 +1168,13 @@ async fn save_note(
         cache.remove(old_id_str);
     }
 
-    Ok(Note {
+    Ok(SaveResult::Saved { note: Note {
         id: final_id,
         title,
         content,
         path: file_path.to_string_lossy().into_owned(),
         modified,
-    })
+    } })
 }
 
 #[tauri::command]
@@ -1828,7 +1863,7 @@ pub struct FileContent {
 
 /// Validate a file path for preview mode direct file operations.
 /// Ensures the path is a markdown file and resolves symlinks.
-fn validate_preview_path(path: &str) -> Result<PathBuf, String> {
+fn validate_preview_path(path: &str, allow_missing: bool) -> Result<PathBuf, String> {
     let file_path = PathBuf::from(path);
 
     // Must have a markdown extension
@@ -1838,16 +1873,22 @@ fn validate_preview_path(path: &str) -> Result<PathBuf, String> {
     }
 
     // Resolve symlinks to get the real path
-    let canonical = file_path
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    let canonical = match file_path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = file_path.parent().ok_or("File has no parent folder")?
+                .canonicalize().map_err(|e| format!("Cannot resolve parent folder: {e}"))?;
+            parent.join(file_path.file_name().ok_or("File has no name")?)
+        }
+        Err(error) => return Err(format!("Cannot resolve file path: {error}")),
+    };
 
     Ok(canonical)
 }
 
 #[tauri::command]
 async fn read_file_direct(path: String) -> Result<FileContent, String> {
-    let canonical = validate_preview_path(&path)?;
+    let canonical = validate_preview_path(&path, false)?;
 
     if !canonical.is_file() {
         return Err(format!("Not a file: {}", path));
@@ -1878,17 +1919,11 @@ async fn read_file_direct(path: String) -> Result<FileContent, String> {
 }
 
 #[tauri::command]
-async fn save_file_direct(path: String, content: String) -> Result<FileContent, String> {
-    // For save, the file must already exist (we validate extension + path security)
-    let canonical = validate_preview_path(&path)?;
-
-    if !canonical.is_file() {
-        return Err(format!("Not a file: {}", path));
+async fn save_file_direct(path: String, content: String, expected_hash: Option<String>) -> Result<SaveResult<FileContent>, String> {
+    let canonical = validate_preview_path(&path, true)?;
+    if let Some(conflict) = checked_write(&canonical, &canonical, &content, expected_hash.as_deref()).await? {
+        return Ok(SaveResult::Conflict { disk_content: conflict.content, disk_modified: conflict.modified });
     }
-
-    fs::write(&canonical, &content)
-        .await
-        .map_err(|_| "Failed to write file".to_string())?;
 
     let metadata = fs::metadata(&canonical)
         .await
@@ -1902,12 +1937,12 @@ async fn save_file_direct(path: String, content: String) -> Result<FileContent, 
 
     let title = extract_title(&content);
 
-    Ok(FileContent {
+    Ok(SaveResult::Saved { note: FileContent {
         path,
         content,
         title,
         modified,
-    })
+    } })
 }
 
 #[tauri::command]
@@ -1916,7 +1951,7 @@ async fn import_file_to_folder(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<NoteMetadata, String> {
-    let source = validate_preview_path(&path)?;
+    let source = validate_preview_path(&path, false)?;
     if !source.is_file() {
         return Err(format!("Not a file: {}", path));
     }
@@ -2138,7 +2173,11 @@ fn setup_file_watcher(
     debounce_map: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 ) -> Result<FileWatcherState, String> {
     let folder_path = PathBuf::from(notes_folder);
-    let notes_root = folder_path.clone();
+    // FSEvents reports resolved paths (e.g. /private/tmp for /tmp) while inotify keeps
+    // the watched spelling, so match events against both or symlinked notes folders
+    // never see external changes.
+    let given_root = folder_path.clone();
+    let notes_root = folder_path.canonicalize().unwrap_or_else(|_| folder_path.clone());
     let app_handle = app.clone();
 
     let watcher = RecommendedWatcher::new(
@@ -2153,7 +2192,9 @@ fn setup_file_watcher(
                         DEFAULT_IGNORED_DIRS.iter().map(|s| s.to_string()).collect()
                     };
 
-                    let note_id = match id_from_abs_path(&notes_root, path, &ignored_dirs) {
+                    let note_id = match id_from_abs_path(&notes_root, path, &ignored_dirs)
+                        .or_else(|| id_from_abs_path(&given_root, path, &ignored_dirs))
+                    {
                         Some(id) => id,
                         None => continue,
                     };
@@ -2766,83 +2807,6 @@ async fn git_push_with_upstream(state: State<'_, AppState>) -> Result<git::GitRe
     }
 }
 
-// Check if Claude CLI is installed
-fn get_expanded_path() -> String {
-    let system_path = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_else(|_| String::new());
-
-    if home.is_empty() {
-        return system_path;
-    }
-
-    // Common locations for node-installed CLIs (nvm, volta, fnm, mise, homebrew, global npm)
-    let candidate_dirs = vec![
-        format!("{home}/.nvm/versions/node"),
-        format!("{home}/.fnm/node-versions"),
-        format!("{home}/.local/share/mise/installs/node"),
-    ];
-    let static_dirs = vec![
-        format!("{home}/.bun/bin"),
-        format!("{home}/.volta/bin"),
-        format!("{home}/.local/bin"),
-        "/usr/local/bin".to_string(),
-        "/opt/homebrew/bin".to_string(),
-    ];
-
-    let mut expanded = Vec::new();
-
-    // Prefer well-known static locations (e.g. ~/.local/bin for native CLI installs)
-    for dir in static_dirs {
-        expanded.push(dir);
-    }
-
-    // Then scan nvm/fnm node version dirs containing a bin/ folder
-    for base in &candidate_dirs {
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let bin_path = entry.path().join("bin");
-                if bin_path.exists() {
-                    expanded.push(bin_path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    expanded.push(system_path);
-    expanded.join(":")
-}
-
-/// Create a `Command` that hides the console window on Windows.
-fn no_window_cmd(program: &str) -> std::process::Command {
-    let cmd = std::process::Command::new(program);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = cmd;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        cmd
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        cmd
-    }
-}
-
-fn check_cli_exists(command_name: &str, path: &str) -> Result<bool, String> {
-    let which_cmd = if cfg!(target_os = "windows") {
-        "where"
-    } else {
-        "which"
-    };
-
-    let check_output = no_window_cmd(which_cmd)
-        .arg(command_name)
-        .env("PATH", path)
-        .output()
-        .map_err(|e| format!("Failed to check for {} CLI: {}", command_name, e))?;
-
-    Ok(check_output.status.success())
-}
 
 /// Marker comment embedded in CLI wrapper scripts installed by Scratch.
 /// Used to identify and validate our own wrapper before modifying or removing it.
@@ -2981,521 +2945,6 @@ fn uninstall_cli() -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-async fn ai_check_claude_cli() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let path = get_expanded_path();
-        check_cli_exists("claude", &path)
-    })
-    .await
-    .map_err(|e| format!("Failed to check Claude CLI: {}", e))?
-}
-
-#[tauri::command]
-async fn ai_check_codex_cli() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let path = get_expanded_path();
-        check_cli_exists("codex", &path)
-    })
-    .await
-    .map_err(|e| format!("Failed to check Codex CLI: {}", e))?
-}
-
-#[tauri::command]
-async fn ai_check_opencode_cli() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let path = get_expanded_path();
-        check_cli_exists("opencode", &path)
-    })
-    .await
-    .map_err(|e| format!("Failed to check OpenCode CLI: {}", e))?
-}
-
-/// Shared AI CLI execution: spawns `command` with `args`, writes `stdin_input` to stdin,
-/// and returns the result with a 5-minute timeout.
-async fn execute_ai_cli(
-    cli_name: &str,
-    command: String,
-    args: Vec<String>,
-    stdin_input: String,
-    not_found_msg: String,
-    current_dir: Option<String>,
-    extra_env: Option<Vec<(String, String)>>,
-) -> Result<AiExecutionResult, String> {
-    use std::io::Write;
-    use std::process::{Child, Stdio};
-
-    let cli_name = cli_name.to_string();
-    let timeout_duration = std::time::Duration::from_secs(300);
-    let shared_child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
-    let child_for_task = Arc::clone(&shared_child);
-    let cli_name_task = cli_name.clone();
-
-    let mut task = tauri::async_runtime::spawn_blocking(move || {
-        // Blocking I/O: expand PATH and check CLI exists
-        let path = get_expanded_path();
-        match check_cli_exists(&command, &path) {
-            Ok(false) => {
-                return AiExecutionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(not_found_msg),
-                };
-            }
-            Err(e) => {
-                return AiExecutionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(e),
-                };
-            }
-            Ok(true) => {}
-        }
-
-        let mut cmd = no_window_cmd(&command);
-        cmd.env("PATH", &path);
-        if let Some(dir) = &current_dir {
-            cmd.current_dir(dir);
-        }
-        if let Some(env_pairs) = &extra_env {
-            for (key, value) in env_pairs {
-                cmd.env(key, value);
-            }
-        }
-        for arg in &args {
-            cmd.arg(arg);
-        }
-        let process = match cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return AiExecutionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to execute {}: {}", cli_name_task, e)),
-                };
-            }
-        };
-
-        // Store process in shared state so the timeout handler can kill it.
-        // We only take individual I/O handles below — the Child stays in the
-        // mutex so it remains reachable for kill().
-        if let Ok(mut guard) = child_for_task.lock() {
-            *guard = Some(process);
-        } else {
-            return AiExecutionResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to lock {} process handle", cli_name_task)),
-            };
-        }
-
-        // Take stdin handle (briefly locks then releases)
-        let stdin_handle = child_for_task
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().and_then(|p| p.stdin.take()));
-
-        if let Some(mut stdin) = stdin_handle {
-            if let Err(e) = stdin.write_all(stdin_input.as_bytes()) {
-                if let Ok(mut g) = child_for_task.lock() {
-                    if let Some(ref mut p) = *g {
-                        let _ = p.kill();
-                        let _ = p.wait();
-                    }
-                }
-                return AiExecutionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to write to {} stdin: {}", cli_name_task, e)),
-                };
-            }
-            // stdin dropped here — closes the pipe
-        } else {
-            if let Ok(mut g) = child_for_task.lock() {
-                if let Some(ref mut p) = *g {
-                    let _ = p.kill();
-                    let _ = p.wait();
-                }
-            }
-            return AiExecutionResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to open stdin for {}", cli_name_task)),
-            };
-        }
-
-        // Take stdout/stderr handles so we can read without holding the lock.
-        // This allows the timeout handler to lock the mutex and kill the process.
-        let stdout_handle = child_for_task
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().and_then(|p| p.stdout.take()));
-        let stderr_handle = child_for_task
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().and_then(|p| p.stderr.take()));
-
-        use std::io::Read;
-
-        let mut stdout_str = String::new();
-        if let Some(mut out) = stdout_handle {
-            let _ = out.read_to_string(&mut stdout_str);
-        }
-
-        let mut stderr_str = String::new();
-        if let Some(mut err) = stderr_handle {
-            let _ = err.read_to_string(&mut stderr_str);
-        }
-
-        // Collect exit status — process has exited after stdout/stderr close
-        let success = child_for_task
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().and_then(|p| p.wait().ok()))
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        // Strip ANSI escape sequences from output (e.g. Ollama progress spinners)
-        let ansi_re = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\].*?\x07").unwrap();
-        let stdout_clean = ansi_re.replace_all(&stdout_str, "").to_string();
-        let stderr_clean = ansi_re.replace_all(&stderr_str, "").trim().to_string();
-
-        if success {
-            AiExecutionResult {
-                success: true,
-                output: stdout_clean,
-                error: None,
-            }
-        } else {
-            AiExecutionResult {
-                success: false,
-                output: stdout_clean,
-                error: Some(stderr_clean),
-            }
-        }
-    });
-
-    let result = match tokio::time::timeout(timeout_duration, &mut task).await {
-        Ok(join_result) => {
-            join_result.map_err(|e| format!("Failed to join {} blocking task: {}", cli_name, e))?
-        }
-        Err(_) => {
-            // Kill through the shared handle — the Child is still in the mutex
-            // because the blocking task only takes I/O handles, not the Child.
-            // This sends SIGKILL, which closes the pipes and unblocks the reads.
-            if let Ok(mut guard) = shared_child.lock() {
-                if let Some(ref mut process) = *guard {
-                    let _ = process.kill();
-                }
-            }
-
-            match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
-                Ok(join_result) => {
-                    if let Err(e) = join_result {
-                        return Err(format!(
-                            "Failed to join {} blocking task after timeout: {}",
-                            cli_name, e
-                        ));
-                    }
-                }
-                Err(_) => {
-                    return Err(format!(
-                        "{} CLI timed out and failed to exit after kill signal",
-                        cli_name
-                    ));
-                }
-            }
-
-            AiExecutionResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("{} CLI timed out after 5 minutes", cli_name)),
-            }
-        }
-    };
-
-    Ok(result)
-}
-
-#[tauri::command]
-async fn ai_execute_claude(
-    file_path: String,
-    prompt: String,
-    state: State<'_, AppState>,
-) -> Result<AiExecutionResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone().ok_or("Notes folder not set")?
-    };
-    let path = PathBuf::from(&file_path);
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !ext.eq_ignore_ascii_case("md") && !ext.eq_ignore_ascii_case("markdown") {
-        return Err("AI editing is only supported for markdown files".to_string());
-    }
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| "Invalid file path".to_string())?;
-    let notes_root = PathBuf::from(&folder)
-        .canonicalize()
-        .map_err(|_| "Invalid notes folder".to_string())?;
-    if !canonical.starts_with(&notes_root) {
-        return Err("File must be within notes folder".to_string());
-    }
-
-    execute_ai_cli(
-        "Claude",
-        "claude".to_string(),
-        vec![
-            canonical.to_string_lossy().to_string(),
-            "--dangerously-skip-permissions".to_string(),
-            "--print".to_string(),
-        ],
-        prompt,
-        "Claude CLI not found. Please install it from https://claude.ai/code".to_string(),
-        None,
-        None,
-    )
-    .await
-}
-
-#[tauri::command]
-async fn ai_execute_codex(file_path: String, prompt: String) -> Result<AiExecutionResult, String> {
-    let stdin_input = format!(
-        "Edit only this markdown file: {file_path}\n\
-         Apply the user's instructions below directly to that file.\n\
-         Do not create, delete, rename, or modify any other files.\n\
-         User instructions:\n\
-         {prompt}"
-    );
-
-    execute_ai_cli(
-        "Codex",
-        "codex".to_string(),
-        vec![
-            "exec".to_string(),
-            "--skip-git-repo-check".to_string(),
-            "--dangerously-bypass-approvals-and-sandbox".to_string(),
-            "-".to_string(),
-        ],
-        stdin_input,
-        "Codex CLI not found. Please install it from https://github.com/openai/codex".to_string(),
-        None,
-        None,
-    )
-    .await
-}
-
-#[tauri::command]
-async fn ai_execute_opencode(
-    file_path: String,
-    prompt: String,
-    state: State<'_, AppState>,
-) -> Result<AiExecutionResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone().ok_or("Notes folder not set")?
-    };
-    let path = PathBuf::from(&file_path);
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !ext.eq_ignore_ascii_case("md") && !ext.eq_ignore_ascii_case("markdown") {
-        return Err("AI editing is only supported for markdown files".to_string());
-    }
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| "Invalid file path".to_string())?;
-    let notes_root = PathBuf::from(&folder)
-        .canonicalize()
-        .map_err(|_| "Invalid notes folder".to_string())?;
-    if !canonical.starts_with(&notes_root) {
-        return Err("File must be within notes folder".to_string());
-    }
-
-    let run_prompt = format!(
-        "Edit the attached markdown file in place.\n\
-         Do not create, delete, rename, or modify any other files.\n\
-         User instructions:\n\
-         {}",
-        prompt
-    );
-
-    execute_ai_cli(
-        "OpenCode",
-        "opencode".to_string(),
-        vec![
-            "run".to_string(),
-            "--file".to_string(),
-            canonical.to_string_lossy().to_string(),
-            "--".to_string(),
-            run_prompt,
-        ],
-        String::new(),
-        "OpenCode CLI not found. Please install it from https://opencode.ai".to_string(),
-        Some(notes_root.to_string_lossy().to_string()),
-        Some(vec![
-            (
-                "OPENCODE_PERMISSION".to_string(),
-                r#"{"*":"allow","bash":"deny","task":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","skill":"deny","external_directory":"deny","doom_loop":"deny"}"#.to_string(),
-            ),
-        ]),
-    )
-    .await
-}
-
-#[tauri::command]
-async fn ai_check_ollama_cli() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let path = get_expanded_path();
-        check_cli_exists("ollama", &path)
-    })
-    .await
-    .map_err(|e| format!("Failed to check Ollama CLI: {}", e))?
-}
-
-#[tauri::command]
-async fn ai_execute_ollama(
-    file_path: String,
-    prompt: String,
-    model: String,
-    state: State<'_, AppState>,
-) -> Result<AiExecutionResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone().ok_or("Notes folder not set")?
-    };
-    let path = PathBuf::from(&file_path);
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !ext.eq_ignore_ascii_case("md") && !ext.eq_ignore_ascii_case("markdown") {
-        return Err("AI editing is only supported for markdown files".to_string());
-    }
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| "Invalid file path".to_string())?;
-    let notes_root = PathBuf::from(&folder)
-        .canonicalize()
-        .map_err(|_| "Invalid notes folder".to_string())?;
-    if !canonical.starts_with(&notes_root) {
-        return Err("File must be within notes folder".to_string());
-    }
-
-    // Read the current file content
-    let file_content = tokio::fs::read_to_string(&canonical)
-        .await
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-
-    let stdin_input = format!(
-        "You are a markdown editor. Edit the markdown content below according to the user's instructions.\n\
-         Return ONLY the complete edited markdown content.\n\
-         Do NOT include any explanation, commentary, or code fences around the output.\n\
-         Do NOT add ```markdown or ``` wrappers.\n\n\
-         Current markdown content:\n{file_content}\n\n\
-         User instructions:\n{prompt}"
-    );
-
-    // Use the model provided (frontend reads from settings, defaults to "qwen3:8b")
-    let trimmed = model.trim();
-    let model_name = if trimmed.is_empty() {
-        "qwen3:8b".to_string()
-    } else {
-        trimmed.to_string()
-    };
-
-    // Check if the model is available locally before running (skip for cloud models)
-    if !model_name.contains("cloud") {
-        let mn = model_name.clone();
-        let available = tauri::async_runtime::spawn_blocking(move || {
-            let path = get_expanded_path();
-            let mut cmd = no_window_cmd("ollama");
-            cmd.env("PATH", &path);
-            cmd.args(["show", &mn]);
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            match cmd.status() {
-                Ok(status) => status.success(),
-                Err(_) => false,
-            }
-        })
-        .await
-        .unwrap_or(false);
-
-        if !available {
-            return Ok(AiExecutionResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Model '{}' is not installed. Run: ollama pull {}",
-                    model_name, model_name
-                )),
-            });
-        }
-    }
-
-    let result = execute_ai_cli(
-        "Ollama",
-        "ollama".to_string(),
-        vec!["run".to_string(), model_name.clone()],
-        stdin_input,
-        "Ollama CLI not found. Please install it from https://ollama.com".to_string(),
-        None,
-        None,
-    )
-    .await?;
-
-    // Improve error messages for common Ollama failures
-    if !result.success {
-        if let Some(ref err) = result.error {
-            let err_lower = err.to_lowercase();
-            if err_lower.contains("file does not exist")
-                || err_lower.contains("pull model manifest")
-                || err_lower.contains("model not found")
-                || err_lower.contains("model does not exist")
-            {
-                return Ok(AiExecutionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Model '{}' not found. Run `ollama pull {}` in your terminal to download it.",
-                        model_name, model_name
-                    )),
-                });
-            }
-            if err.contains("401") || err.contains("Unauthorized") {
-                return Ok(AiExecutionResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some("Authentication required. Run `ollama login` in your terminal to sign in.".to_string()),
-                });
-            }
-        }
-    }
-
-    // If successful, write the output back to the file
-    if result.success {
-        let edited_content = result.output.trim().to_string();
-        if edited_content.is_empty() {
-            return Ok(AiExecutionResult {
-                success: false,
-                output: String::new(),
-                error: Some("Ollama returned empty output. Please try again.".to_string()),
-            });
-        }
-        tokio::fs::write(&canonical, edited_content.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write edited file: {}", e))?;
-
-        Ok(AiExecutionResult {
-            success: true,
-            output: "Note edited successfully with Ollama.".to_string(),
-            error: None,
-        })
-    } else {
-        Ok(result)
-    }
-}
 
 /// Check if a markdown file is inside the configured notes folder.
 /// If so, emit a "select-note" event to the main window and focus it, returning true.
@@ -3777,6 +3226,7 @@ pub fn run() {
                 debounce_map: Arc::new(Mutex::new(HashMap::new())),
             };
             app.manage(state);
+            app.manage(agent::AgentState::default());
 
             // Add notes folder to asset protocol scope so images can be served
             if let Some(ref folder) = app.state::<AppState>().app_config.read().expect("app_config read lock").notes_folder.clone() {
@@ -3877,14 +3327,15 @@ pub fn run() {
             git_set_remote_url,
             git_remove_remote,
             git_push_with_upstream,
-            ai_check_claude_cli,
-            ai_check_codex_cli,
-            ai_check_opencode_cli,
-            ai_check_ollama_cli,
-            ai_execute_claude,
-            ai_execute_codex,
-            ai_execute_opencode,
-            ai_execute_ollama,
+            agent::agent_status,
+            agent::agent_list_models,
+            agent::agent_start_run,
+            agent::agent_cancel_run,
+            agent::agent_tool_respond,
+            agent::chatgpt::chatgpt_sign_in,
+            agent::chatgpt::chatgpt_cancel_sign_in,
+            agent::chatgpt::chatgpt_sign_out,
+            agent::chatgpt::chatgpt_ack_plan_notice,
             read_file_direct,
             save_file_direct,
             import_file_to_folder,
@@ -3993,4 +3444,35 @@ fn set_title_bar_theme(
         let _ = (app, is_dark, r, g, b);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn checked_write_preserves_conflicts_and_allows_matching_or_missing_bases() {
+        let dir = std::env::temp_dir().join(format!("scratch-save-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).await.unwrap();
+        let path = dir.join("note.md");
+        fs::write(&path, "base").await.unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"base"));
+        assert!(checked_write(&path, &path, "ours", Some(&hash)).await.unwrap().is_none());
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), "ours");
+
+        fs::write(&path, "outside edit").await.unwrap();
+        let conflict = checked_write(&path, &path, "stale edit", Some(&hash)).await.unwrap().unwrap();
+        assert_eq!(conflict.content, "outside edit");
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), "outside edit");
+
+        fs::remove_file(&path).await.unwrap();
+        assert!(checked_write(&path, &path, "restored", Some(&hash)).await.unwrap().is_none());
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), "restored");
+
+        let renamed = dir.join("renamed.md");
+        assert!(checked_write(&path, &renamed, "rename", Some(&hash)).await.unwrap().is_some());
+        assert!(!renamed.exists());
+        fs::remove_dir_all(&dir).await.unwrap();
+    }
 }

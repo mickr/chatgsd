@@ -17,8 +17,12 @@ export async function readNote(id: string): Promise<Note> {
   return invoke("read_note", { id });
 }
 
-export async function saveNote(id: string | null, content: string): Promise<Note> {
-  return invoke("save_note", { id, content });
+export type SaveResult<T> =
+  | { status: "saved"; note: T }
+  | { status: "conflict"; diskContent: string; diskModified: number };
+
+export async function saveNote(id: string | null, content: string, expectedHash: string | null): Promise<SaveResult<Note>> {
+  return invoke("save_note", { id, content, expectedHash });
 }
 
 export async function deleteNote(id: string): Promise<void> {
@@ -61,7 +65,9 @@ export async function duplicateNote(id: string): Promise<Note> {
   const newNote = await createNote(folder);
   // Save with the original content (title will be extracted from content)
   const duplicatedContent = original.content.replace(/^# (.+)$/m, (_, title) => `# ${title} (Copy)`);
-  return saveNote(newNote.id, duplicatedContent || original.content);
+  const result = await saveNote(newNote.id, duplicatedContent || original.content, null);
+  if (result.status === "conflict") throw new Error("The new note changed while it was being duplicated.");
+  return result.note;
 }
 
 export async function getSettings(): Promise<Settings> {

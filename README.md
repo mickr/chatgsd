@@ -21,8 +21,8 @@ A minimalist, offline-first markdown note-taking app for macOS, Windows, and Lin
 - **Wikilinks** - Type `[[` to link between notes with autocomplete
 - **Slash commands** - Type `/` to quickly insert headings, lists, code blocks, diagrams, and more
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
-- **Edit with Claude Code, OpenAI Codex, OpenCode, or Ollama** - Use your local CLI to edit notes with AI (including fully offline via Ollama)
-- **Works with other AI agents** - Detects external file changes
+- **Agent panel** - Co-edit the open note with ChatGPT, using your ChatGPT plan through Sign in with ChatGPT (`Cmd+J`). It reads your live note and selection, answers questions, and makes precise edits that show up as tracked changes you accept or reject, while you keep typing
+- **Works with other AI agents** - Changes made to an open note on disk merge in live, and conflicting edits show up as changes to review
 - **Folders** - Opt-in collapsible folder tree with drag-and-drop to organize notes
 - **Keyboard optimized** - Lots of shortcuts and a command palette
 - **Customizable** - Theme, typography, page width, and RTL text direction
@@ -89,6 +89,7 @@ Scratch is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Shift+M`     | Toggle Markdown source |
 | `Cmd+Shift+Enter` | Toggle Focus mode      |
 | `Cmd+Shift+F`     | Search notes           |
+| `Cmd+J`           | Toggle agent panel     |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |
 | `Cmd+\`           | Toggle sidebar         |

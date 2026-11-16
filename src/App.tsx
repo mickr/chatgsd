@@ -13,15 +13,9 @@ import type { Editor as TiptapEditor } from "@tiptap/react";
 import { FolderPicker } from "./components/layout/FolderPicker";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { SettingsPage } from "./components/settings";
-import {
-  SpinnerIcon,
-  ClaudeIcon,
-  CodexIcon,
-  OpenCodeIcon,
-  OllamaIcon,
-} from "./components/icons";
-import { AiEditModal } from "./components/ai/AiEditModal";
-import { AiResponseToast } from "./components/ai/AiResponseToast";
+import { SpinnerIcon } from "./components/icons";
+import { AgentProvider, useAgent } from "./context/AgentContext";
+import { AgentPanel } from "./components/agent/AgentPanel";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
 import {
@@ -29,8 +23,6 @@ import {
   type Update,
 } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import * as aiService from "./services/ai";
-import type { AiProvider } from "./services/ai";
 import { isMac, isWindows } from "./lib/platform";
 
 // Detect preview mode from URL search params
@@ -50,6 +42,24 @@ function getWindowMode(): {
 type ViewState = "notes" | "settings";
 
 function AppContent() {
+  const editorRef = useRef<TiptapEditor | null>(null);
+  const [editor, setEditor] = useState<TiptapEditor | null>(null);
+  const handleEditorReady = useCallback((ready: TiptapEditor | null) => {
+    editorRef.current = ready;
+    setEditor(ready);
+  }, []);
+  return (
+    <AgentProvider editorRef={editorRef} editor={editor}>
+      <AppWorkspace editorRef={editorRef} onEditorReady={handleEditorReady} />
+    </AgentProvider>
+  );
+}
+
+function AppWorkspace({ editorRef, onEditorReady }: {
+  editorRef: React.RefObject<TiptapEditor | null>;
+  onEditorReady: (editor: TiptapEditor | null) => void;
+}) {
+  const agent = useAgent();
   const {
     notesFolder,
     isLoading,
@@ -72,12 +82,12 @@ function AppContent() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [view, setView] = useState<ViewState>("notes");
   const [sidebarVisible, setSidebarVisible] = useState(true);
-  const [aiModalOpen, setAiModalOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [aiEditing, setAiEditing] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
-  const [aiProvider, setAiProvider] = useState<AiProvider>("claude");
-  const editorRef = useRef<TiptapEditor | null>(null);
+  const toggleAgentPanel = useCallback(() => {
+    setFocusMode(false);
+    if (!focusMode || !agent.open) agent.toggle();
+  }, [focusMode, agent.open, agent.toggle]);
 
   // Listen for set-notes-folder event from CLI (scratch .)
   // Placed here in AppContent where both NotesContext and ThemeContext are available
@@ -121,75 +131,6 @@ function AppContent() {
     setView("notes");
   }, []);
 
-  // Go back to command palette from AI modal
-  const handleBackToPalette = useCallback(() => {
-    setAiModalOpen(false);
-    setPaletteOpen(true);
-  }, []);
-
-  // AI Edit handler
-  const handleAiEdit = useCallback(
-    async (prompt: string, ollamaModel?: string) => {
-      if (!currentNote) {
-        toast.error("No note selected");
-        return;
-      }
-
-      setAiEditing(true);
-
-      try {
-        let result: aiService.AiExecutionResult;
-        if (aiProvider === "codex") {
-          result = await aiService.executeCodexEdit(currentNote.path, prompt);
-        } else if (aiProvider === "opencode") {
-          result = await aiService.executeOpenCodeEdit(currentNote.path, prompt);
-        } else if (aiProvider === "ollama") {
-          result = await aiService.executeOllamaEdit(
-            currentNote.path,
-            prompt,
-            ollamaModel || "qwen3:8b",
-          );
-        } else {
-          result = await aiService.executeClaudeEdit(currentNote.path, prompt);
-        }
-
-        // Reload the current note from disk
-        await reloadCurrentNote();
-
-        // Show results
-        if (result.success) {
-          // Close modal after success
-          setAiModalOpen(false);
-
-          // Show success toast with provider response
-          toast(
-            <AiResponseToast output={result.output} provider={aiProvider} />,
-            {
-              duration: Infinity,
-              closeButton: true,
-              className: "!min-w-[450px] !max-w-[600px]",
-            },
-          );
-        } else {
-          toast.error(
-            <div className="space-y-1">
-              <div className="font-medium">AI Edit Failed</div>
-              <div className="text-xs">{result.error || "Unknown error"}</div>
-            </div>,
-            { duration: Infinity, closeButton: true },
-          );
-        }
-      } catch (error) {
-        console.error("[AI] Error:", error);
-        toast.error(
-          `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
-      } finally {
-        setAiEditing(false);
-      }
-    },
-    [aiProvider, currentNote, reloadCurrentNote],
-  );
 
   // Memoize display items to prevent unnecessary recalculations
   const displayItems = useMemo(() => {
@@ -244,6 +185,12 @@ function AppContent() {
         return;
       }
 
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        toggleAgentPanel();
+        return;
+      }
+
       // Cmd+Shift+Enter - Toggle focus mode
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "Enter") {
         e.preventDefault();
@@ -274,9 +221,17 @@ function AppContent() {
         return;
       }
 
+      if (target.closest(".agent-panel") && !e.metaKey && !e.ctrlKey) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          editorRef.current?.commands.focus();
+        }
+        return;
+      }
+
       // Trap Tab/Shift+Tab in notes view only - prevent focus navigation
       // TipTap handles indentation internally before event bubbles up
-      if (e.key === "Tab") {
+      if (e.key === "Tab" && !target.closest(".agent-panel")) {
         e.preventDefault();
         return;
       }
@@ -444,6 +399,7 @@ function AppContent() {
     focusMode,
     view,
     setInterfaceZoom,
+    toggleAgentPanel,
   ]);
 
   const handleClosePalette = useCallback(() => {
@@ -485,21 +441,21 @@ function AppContent() {
               onToggleSidebar={toggleSidebar}
               sidebarVisible={sidebarVisible}
               focusMode={focusMode}
-              onEditorReady={(editor) => {
-                editorRef.current = editor;
-              }}
+              onEditorReady={onEditorReady}
+              agentPanelOpen={agent.open && !focusMode}
+              onToggleAgentPanel={toggleAgentPanel}
             />
+            <AgentPanel visible={agent.open && !focusMode} />
           </>
         )}
       </div>
 
-      {/* Shared backdrop for command palette and AI modal */}
-      {(paletteOpen || aiModalOpen) && (
+      {/* Command palette backdrop */}
+      {paletteOpen && (
         <div
           className="fixed inset-0 bg-text/50 backdrop-blur-sm z-40 animate-fade-in"
           onClick={() => {
             if (paletteOpen) handleClosePalette();
-            if (aiModalOpen) setAiModalOpen(false);
           }}
         />
       )}
@@ -514,47 +470,11 @@ function AppContent() {
         onClose={handleClosePalette}
         onOpenSettings={toggleSettings}
         onOpenShortcuts={() => setShortcutsOpen(true)}
-        onOpenAiModal={(provider) => {
-          setAiProvider(provider);
-          setAiModalOpen(true);
-        }}
+        onToggleAgentPanel={toggleAgentPanel}
         focusMode={focusMode}
         onToggleFocusMode={toggleFocusMode}
         editorRef={editorRef}
       />
-      <AiEditModal
-        open={aiModalOpen}
-        provider={aiProvider}
-        onBack={handleBackToPalette}
-        onExecute={handleAiEdit}
-        isExecuting={aiEditing}
-      />
-
-      {/* AI Editing Overlay */}
-      {aiEditing && (
-        <div className="fixed inset-0 bg-bg/50 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="flex items-center gap-2">
-            {aiProvider === "codex" ? (
-              <CodexIcon className="w-4.5 h-4.5 fill-text-muted animate-spin-slow" />
-            ) : aiProvider === "opencode" ? (
-              <OpenCodeIcon className="w-4.5 h-4.5 fill-text-muted animate-pulse-gentle" />
-            ) : aiProvider === "ollama" ? (
-              <OllamaIcon className="w-4.5 h-4.5 fill-text-muted animate-bounce-gentle" />
-            ) : (
-              <ClaudeIcon className="w-4.5 h-4.5 fill-text-muted animate-spin-slow" />
-            )}
-            <div className="text-sm font-medium text-text">
-              {aiProvider === "codex"
-                ? "Codex is editing your note..."
-                : aiProvider === "opencode"
-                  ? "OpenCode is editing your note..."
-                : aiProvider === "ollama"
-                  ? "Ollama is editing your note..."
-                  : "Claude is editing your note..."}
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }

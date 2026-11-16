@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { Editor, type PreviewModeData } from "../editor/Editor";
 import * as filesService from "../../services/files";
+import type { ExternalChange } from "../../lib/agent/merge";
 
 interface PreviewAppProps {
   filePath: string;
@@ -13,16 +14,19 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
   const [content, setContent] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [modified, setModified] = useState(0);
-  const [hasExternalChanges, setHasExternalChanges] = useState(false);
+  const [externalChange, setExternalChange] = useState<ExternalChange | null>(null);
   const [reloadVersion, setReloadVersion] = useState(0);
   const [focusMode, setFocusMode] = useState(false);
-  const recentlySavedRef = useRef(false);
+  const externalSequenceRef = useRef(0);
+  const readSequenceRef = useRef(0);
+  const diskContentRef = useRef<string | null>(null);
 
   // Load file on mount
   useEffect(() => {
     filesService
       .readFileDirect(filePath)
       .then((result) => {
+        diskContentRef.current = result.content;
         setContent(result.content);
         setTitle(result.title);
         setModified(result.modified);
@@ -33,39 +37,37 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
       });
   }, [filePath]);
 
-  // Listen for window focus to detect external changes
-  useEffect(() => {
-    const handleFocus = async () => {
-      if (recentlySavedRef.current) {
-        recentlySavedRef.current = false;
-        return;
-      }
-      try {
-        const result = await filesService.readFileDirect(filePath);
-        if (result.modified !== modified && content !== null) {
-          setHasExternalChanges(true);
-        }
-      } catch {
-        // File may have been deleted
-      }
-    };
+  const readExternalChange = useCallback(async () => {
+    const sequence = ++readSequenceRef.current;
+    try {
+      const result = await filesService.readFileDirect(filePath);
+      if (sequence !== readSequenceRef.current || diskContentRef.current === result.content) return;
+      diskContentRef.current = result.content;
+      setModified(result.modified);
+      setTitle(result.title);
+      setExternalChange({ noteId: filePath, content: result.content, modified: result.modified, seq: ++externalSequenceRef.current });
+    } catch (error) {
+      console.error("Failed to read external file changes:", error);
+      toast.error("Could not read the changes from disk.");
+    }
+  }, [filePath]);
 
+  useEffect(() => {
+    const handleFocus = () => { void readExternalChange(); };
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
-  }, [filePath, modified, content]);
+  }, [readExternalChange]);
 
   const save = useCallback(
-    async (newContent: string) => {
-      try {
-        const result = await filesService.saveFileDirect(filePath, newContent);
-        recentlySavedRef.current = true;
-        setModified(result.modified);
-        setTitle(result.title);
-        setHasExternalChanges(false);
-      } catch (error) {
-        console.error("Failed to save file:", error);
-        toast.error(`Failed to save: ${error}`);
+    async (newContent: string, expectedHash: string) => {
+      const result = await filesService.saveFileDirect(filePath, newContent, expectedHash);
+      if (result.status === "saved") {
+        diskContentRef.current = newContent;
+        setContent(newContent);
+        setModified(result.note.modified);
+        setTitle(result.note.title);
       }
+      return result;
     },
     [filePath],
   );
@@ -73,10 +75,12 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
   const reload = useCallback(async () => {
     try {
       const result = await filesService.readFileDirect(filePath);
+      readSequenceRef.current++;
+      diskContentRef.current = result.content;
       setContent(result.content);
       setTitle(result.title);
       setModified(result.modified);
-      setHasExternalChanges(false);
+      setExternalChange(null);
       setReloadVersion((v) => v + 1);
     } catch (error) {
       console.error("Failed to reload file:", error);
@@ -87,12 +91,12 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
   // Listen for preview-file-change events
   useEffect(() => {
     const unlisten = listen<string>("preview-file-change", () => {
-      setHasExternalChanges(true);
+      void readExternalChange();
     });
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, []);
+  }, [readExternalChange]);
 
   // Keyboard shortcuts for preview mode
   useEffect(() => {
@@ -179,7 +183,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     title,
     filePath,
     modified,
-    hasExternalChanges,
+    externalChange,
     reloadVersion,
     save,
     reload,

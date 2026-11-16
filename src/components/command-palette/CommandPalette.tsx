@@ -12,8 +12,9 @@ import { toast } from "sonner";
 import { useNotes } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
 import { useGit } from "../../context/GitContext";
+import { useAgent } from "../../context/AgentContext";
+import { useAgentChanges } from "../editor/AgentChanges";
 import * as notesService from "../../services/notes";
-import * as aiService from "../../services/ai";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
 import type { Settings } from "../../types/note";
 import type { Editor } from "@tiptap/react";
@@ -39,20 +40,16 @@ import {
   GitCommitIcon,
   RefreshCwIcon,
   AddNoteIcon,
-  TrashIcon,
+  AgentIcon,
   PinIcon,
-  ClaudeIcon,
+  TrashIcon,
   ZenIcon,
   MarkdownIcon,
-  CodexIcon,
-  OpenCodeIcon,
-  OllamaIcon,
   FolderIcon,
   FolderPlusIcon,
   KeyboardIcon,
 } from "../icons";
 import { mod, shift } from "../../lib/platform";
-import type { AiProvider } from "../../services/ai";
 
 interface Command {
   id: string;
@@ -67,7 +64,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   onOpenSettings?: () => void;
   onOpenShortcuts?: () => void;
-  onOpenAiModal?: (provider: AiProvider) => void;
+  onToggleAgentPanel?: () => void;
   focusMode?: boolean;
   onToggleFocusMode?: () => void;
   editorRef?: React.RefObject<Editor | null>;
@@ -78,11 +75,13 @@ export function CommandPalette({
   onClose,
   onOpenSettings,
   onOpenShortcuts,
-  onOpenAiModal,
+  onToggleAgentPanel,
   focusMode,
   onToggleFocusMode,
   editorRef,
 }: CommandPaletteProps) {
+  const agent = useAgent();
+  const changes = useAgentChanges(agent.editor);
   const {
     notes,
     selectNote,
@@ -104,9 +103,6 @@ export function CommandPalette({
     { id: string; title: string; preview: string; modified: number }[]
   >([]);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [availableAiProviders, setAvailableAiProviders] = useState<
-    AiProvider[]
-  >([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -117,31 +113,6 @@ export function CommandPalette({
     }
   }, [open, currentNote?.id]);
 
-  useEffect(() => {
-    if (!open || !currentNote) {
-      setAvailableAiProviders([]);
-      return;
-    }
-
-    let active = true;
-    aiService
-      .getAvailableAiProviders()
-      .then((providers) => {
-        if (active) {
-          setAvailableAiProviders(providers);
-        }
-      })
-      .catch((error) => {
-        if (active) {
-          console.error("Failed to discover AI providers:", error);
-          setAvailableAiProviders([]);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [open, currentNote?.id]);
 
   // Memoize commands array
   const commands = useMemo<Command[]>(() => {
@@ -172,51 +143,21 @@ export function CommandPalette({
     if (currentNote) {
       const isPinned =
         settings?.pinnedNoteIds?.includes(currentNote.id) || false;
-      const aiCommands: Command[] = onOpenAiModal
-        ? availableAiProviders.map((provider) => {
-            const action = () => {
-              onOpenAiModal(provider);
-              onClose();
-            };
-
-            if (provider === "codex") {
-              return {
-                id: "ai-edit-codex",
-                label: "Edit with OpenAI Codex",
-                icon: <CodexIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            if (provider === "opencode") {
-              return {
-                id: "ai-edit-opencode",
-                label: "Edit with OpenCode",
-                icon: (
-                  <OpenCodeIcon className="w-4.5 h-4.5 fill-text-muted" />
-                ),
-                action,
-              };
-            }
-
-            if (provider === "ollama") {
-              return {
-                id: "ai-edit-ollama",
-                label: "Edit with Ollama",
-                icon: <OllamaIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            return {
-              id: "ai-edit-claude",
-              label: "Edit with Claude Code",
-              icon: <ClaudeIcon className="w-4.5 h-4.5 fill-text-muted" />,
-              action,
-            };
-          })
-        : [];
-
+      const agentCommands: Command[] = [
+        {
+          id: "agent-toggle",
+          label: "Agent: Toggle panel",
+          shortcut: `${mod} J`,
+          icon: <AgentIcon className="w-4.5 h-4.5" />,
+          action: () => { onClose(); (onToggleAgentPanel ?? agent.toggle)(); },
+        },
+      ];
+      if (changes.length > 0) {
+        agentCommands.push(
+          { id: "agent-accept", label: "Agent: Accept all changes", icon: <AgentIcon className="w-4.5 h-4.5" />, action: () => { agent.editor?.commands.acceptAllAgentChanges(); onClose(); } },
+          { id: "agent-reject", label: "Agent: Reject all changes", icon: <AgentIcon className="w-4.5 h-4.5" />, action: () => { agent.editor?.commands.rejectAllAgentChanges(); onClose(); } },
+        );
+      }
       baseCommands.push(
         {
           id: isPinned ? "unpin-note" : "pin-note",
@@ -236,7 +177,7 @@ export function CommandPalette({
             }
           },
         },
-        ...aiCommands,
+        ...agentCommands,
         {
           id: "duplicate-note",
           label: "Duplicate Current Note",
@@ -508,8 +449,10 @@ export function CommandPalette({
     deleteNote,
     onClose,
     onOpenSettings,
-    onOpenAiModal,
-    availableAiProviders,
+    agent.toggle,
+    onToggleAgentPanel,
+    agent.editor,
+    changes.length,
     setTheme,
     gitEnabled,
     gitAvailable,
