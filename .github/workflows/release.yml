@@ -103,6 +103,7 @@ jobs:
       APPLE_SIGNING_IDENTITY: ${{ vars.SCRATCH_SIGN_IDENTITY }}
       APPLE_TEAM_ID: M9G92WURV3
       VERSION: ${{ needs.plan.outputs.version }}
+      COMMIT: ${{ needs.plan.outputs.commit }}
       # The fork's updater public key (~/.tauri/scratch-fork-updater.key.pub),
       # pinned here rather than read from tauri.conf.json so a merge from
       # upstream can't swap the key or the endpoint without failing a release.
@@ -111,8 +112,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.commit }}
+          ref: ${{ env.COMMIT }}
           persist-credentials: false
+
+      # The release must attach to the tag the plan made on this commit. After
+      # a withdrawal, re-running only this job would find no tag, and GitHub
+      # would then tag main's current tip; a reused number could be another
+      # commit's. Either way the binaries wouldn't match the tag, so stop.
+      - name: Check the version is tagged on this commit
+        run: |
+          tagged=$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)
+          if [ "$tagged" != "$COMMIT" ]; then
+            echo "::error::v$VERSION is on ${tagged:-no commit}, not $COMMIT. Use \"Re-run all jobs\" to plan a new version."
+            exit 1
+          fi
 
       - name: Set the version
         run: node scripts/set-version.mjs "$VERSION"
@@ -164,6 +177,8 @@ jobs:
           feeds=$(grep -aoE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/latest/download/latest\.json' "$bin" | sort -u)
           test "$feeds" = "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
           grep -aqF "$UPDATER_PUBKEY" "$bin"
+          # The MIT license must ship with every copy.
+          cmp LICENSE "$app/Contents/Resources/LICENSE"
 
       # Only a verified build becomes the latest release the updater sees.
       - name: Publish
@@ -179,7 +194,7 @@ jobs:
         if: failure() || cancelled()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: scripts/withdraw-release.sh "v$VERSION"
+        run: scripts/withdraw-release.sh "v$VERSION" "$COMMIT"
 
       - name: Remove signing identity
         if: always()
