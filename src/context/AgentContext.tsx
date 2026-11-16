@@ -37,6 +37,13 @@ export type TranscriptItem =
     }
   | {
       id: string;
+      type: "user";
+      text: string;
+      /** The opening of the selection the message was sent with. */
+      selection?: string;
+    }
+  | {
+      id: string;
       type: "tool";
       name: string;
       input: unknown;
@@ -588,6 +595,93 @@ export function AgentProvider({
       }
     },
     [editorRef, saveConversation, updateConversation],
+    [editorRef, refreshStatus, saveConversation, updateConversation],
+  );
+  const processTool = useCallback(
+    async (request: agent.ToolRequest) => {
+      const run = runs.current.get(request.runId);
+      if (!run) {
+        if ([...runs.current.keys()].some((id) => id.startsWith("pending:")))
+          buffered.current.push(request);
+        return;
+      }
+      if (request.name === "edit_note") {
+        const proposal = parseNoteEdit(request.args);
+        if (!proposal) {
+          await agent
+            .toolRespond(request.requestId, false, "The edit proposal was malformed")
+            .catch(() => {});
+          return;
+        }
+        updateConversation(run.noteId, (conversation) => ({
+          ...conversation,
+          items: [
+            ...conversation.items,
+            {
+              id: request.requestId,
+              type: "note_edit",
+              runId: request.runId,
+              requestId: request.requestId,
+              ...proposal,
+              status: "pending",
+              message: null,
+            },
+          ],
+        }));
+        saveConversation(run.noteId);
+        return;
+      }
+      if (request.name === "ask_user") {
+        const { question, options, form } = parseQuestion(request.args);
+        if (!question) {
+          await agent
+            .toolRespond(request.requestId, false, "question must be a nonempty string")
+            .catch(() => {});
+          return;
+        }
+        updateConversation(run.noteId, (conversation) => ({
+          ...conversation,
+          items: [
+            ...conversation.items,
+            {
+              id: request.requestId,
+              type: "question",
+              runId: request.runId,
+              requestId: request.requestId,
+              question,
+              options,
+              form,
+              answer: null,
+            },
+          ],
+        }));
+        // The run may wait here for a long time; keep the question if the app closes.
+        saveConversation(run.noteId);
+        return;
+      }
+      let result: { ok: boolean; output: string };
+      try {
+        result = run.cancelRequested
+          ? {
+              ok: false,
+              output: "The user stopped this run. No edit was applied.",
+            }
+          : await executeDocumentTool(
+              editorRef.current,
+              run.binding,
+              request.name,
+              request.args,
+            );
+      } catch (error) {
+        result = { ok: false, output: agent.errorMessage(error) };
+      }
+      try {
+        await agent.toolRespond(request.requestId, result.ok, result.output);
+      } catch (error) {
+        toast.error(`Couldn't answer the agent: ${agent.errorMessage(error)}`);
+      }
+    },
+    [editorRef, saveConversation, updateConversation],
   );
   useEffect(() => {
     let disposed = false;
@@ -1011,6 +1105,11 @@ export function AgentProvider({
   return (
     <AgentContext.Provider value={value}>{children}</AgentContext.Provider>
   );
+}
+export function useAgent() {
+  const value = useContext(AgentContext);
+  if (!value) throw new Error("useAgent requires AgentProvider");
+  return value;
 }
 export function useAgent() {
   const value = useContext(AgentContext);
