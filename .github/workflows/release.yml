@@ -23,8 +23,9 @@ jobs:
       cancel-in-progress: false
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-      # Public in every signed build; pinned so a wrong certificate fails early.
-      APPLE_SIGNING_IDENTITY: A80792DBE5D34EC0F453FD5FE4E683603D02402C
+      # Public in every signed build. The identity is set with the certificate
+      # secret by scripts/configure-release-secrets.py, so a mismatch fails early.
+      APPLE_SIGNING_IDENTITY: ${{ vars.SCRATCH_SIGN_IDENTITY }}
       APPLE_TEAM_ID: M9G92WURV3
 
     steps:
@@ -39,6 +40,7 @@ jobs:
         env:
           SCRATCH_CERTIFICATE_BASE64: ${{ secrets.SCRATCH_CERTIFICATE_BASE64 }}
           SCRATCH_CERTIFICATE_PASSWORD: ${{ secrets.SCRATCH_CERTIFICATE_PASSWORD }}
+          SCRATCH_NOTARY_API_KEY: ${{ secrets.SCRATCH_NOTARY_API_KEY }}
         run: scripts/ci-signing.sh install
 
       # Builds, signs, notarizes and staples the app, signs the updater bundle,
@@ -48,8 +50,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_ID: ${{ vars.SCRATCH_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.SCRATCH_NOTARY_PASSWORD }}
+          # Notarization with an App Store Connect API key; ci-signing.sh sets
+          # APPLE_API_KEY_PATH to the key file it wrote for this job.
+          APPLE_API_KEY: ${{ vars.SCRATCH_NOTARY_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.SCRATCH_NOTARY_ISSUER_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
