@@ -186,7 +186,8 @@ jobs:
           test -x "$driver"
           test "$("$driver" --version)" = "cua-driver 0.38.0"
           requirement="anchor apple generic and certificate leaf = H\"$APPLE_SIGNING_IDENTITY\" and certificate leaf[subject.OU] = \"$APPLE_TEAM_ID\""
-          codesign --verify --strict --verbose=2 --test-requirement "$requirement" "$driver"
+          # Prefix literal requirement text with "=" so codesign doesn't read it as a path.
+          codesign --verify --strict --verbose=2 --test-requirement "=$requirement" "$driver"
           signature=$(codesign --display --verbose=4 "$driver" 2>&1)
           grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
 
