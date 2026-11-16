@@ -234,8 +234,8 @@ export function AgentProvider({
       if (!conversation?.sessionId || !conversation.items.length) return;
       transcriptQueue.current = transcriptQueue.current
         .then(async () => {
-          await agent.saveConversation(noteId, conversation.sessionId!, conversation.items);
-          await refreshHistory(noteId);
+          await agent.saveConversation(conversation.sessionId!, conversation.items);
+          if (historyNote.current) await refreshHistory(historyNote.current);
         })
         .catch((error) => {
           toast.error(`Couldn't save this conversation: ${agent.errorMessage(error)}`);

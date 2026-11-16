@@ -77,6 +77,8 @@ or switch notes; the saved record remains available.
 Each new editing turn also has a **Changes this turn** card in the conversation.
 Successful edits are saved as they happen, including other-note edits and edits
 made before a turn was interrupted. They remain available in earlier conversations.
+Saves use stable session ownership, so renaming a note while a save is queued
+does not lose its recorded changes.
 The record excludes your own intervening edits; later typing or Undo does not
 rewrite it. This is an edit-time record, not an approval step or a new revision
 system. Conversations saved before change recording was added have no diff cards.

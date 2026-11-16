@@ -273,6 +273,44 @@ describe("AgentProvider ask_user", () => {
 });
 
 describe("AgentProvider conversation history", () => {
+  it("drains deferred saves after a heading rename without losing the final diff", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("Revise the plan"); });
+    act(() => mocks.eventHandler?.({
+      runId: "run-1", event: { type: "session", sessionId: "stable-session" },
+    }));
+    let release!: () => void;
+    vi.mocked(agent.saveConversation).mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const changes = [
+      { noteTitle: "Trip plan", hunks: [{ before: ["Friday"], after: ["Saturday"] }] },
+      { noteTitle: "Trip plan", hunks: [{ before: ["Trip plan"], after: ["Summer trip"] }] },
+    ];
+    for (const [index, change] of changes.entries()) {
+      vi.mocked(executeDocumentTool).mockResolvedValueOnce({ ok: true, output: "Applied.", change });
+      act(() => mocks.toolHandler?.({
+        requestId: `edit-${index}`, runId: "run-1", name: "edit_document", args: {},
+      }));
+      await settle();
+    }
+    expect(agent.saveConversation).toHaveBeenCalledTimes(1);
+    act(() => {
+      mocks.currentNote = { ...mocks.currentNote!, id: "Summer trip", title: "Summer trip" };
+      editor.storage.scratchDocument.noteId = "Summer trip";
+      editor.view.dispatch(editor.state.tr);
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+      release();
+    });
+    await settle();
+    const calls = vi.mocked(agent.saveConversation).mock.calls;
+    expect(calls[calls.length - 1]).toEqual([
+      "stable-session",
+      expect.arrayContaining(changes.map((change, index) => ({
+        id: `edit-${index}:changes`, type: "changes", change,
+      }))),
+    ]);
+  });
+
   it("saves applied edits before the reply and restores them after an interrupted turn", async () => {
     act(() => current.toggle());
     await settle();
@@ -286,14 +324,14 @@ describe("AgentProvider conversation history", () => {
       requestId: "edit-request", runId: "run-1", name: "edit_document", args: {},
     }));
     await settle();
-    expect(agent.saveConversation).toHaveBeenCalledWith("trip", "saved-turn",
+    expect(agent.saveConversation).toHaveBeenCalledWith("saved-turn",
       expect.arrayContaining([{ id: "edit-request:changes", type: "changes", change }]));
     act(() => mocks.eventHandler?.({
       runId: "run-1", event: { type: "error", kind: "other", message: "Connection lost" },
     }));
     await settle();
     const calls = vi.mocked(agent.saveConversation).mock.calls;
-    const saved = calls[calls.length - 1][2];
+    const saved = calls[calls.length - 1][1];
     vi.mocked(agent.loadConversation).mockResolvedValueOnce(saved);
     await act(async () => { await current.openConversation("saved-turn"); });
     expect(current.conversation.items).toContainEqual({
@@ -337,9 +375,8 @@ describe("AgentProvider conversation history", () => {
       }),
     );
     await settle();
-    const [noteId, sessionId, items] = vi.mocked(agent.saveConversation).mock
-      .calls[0];
-    expect([noteId, sessionId]).toEqual(["trip", "s-old"]);
+    const [sessionId, items] = vi.mocked(agent.saveConversation).mock.calls[0];
+    expect(sessionId).toBe("s-old");
     expect(items.map((item) => (item as { text?: string }).text)).toEqual([
       "Plan the trip",
       "Now the budget",

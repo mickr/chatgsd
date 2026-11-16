@@ -73,10 +73,9 @@ export const listConversations = (noteId: string) =>
 export const loadConversation = (noteId: string, sessionId: string) =>
   invoke<unknown>("agent_load_conversation", { noteId, sessionId });
 export const saveConversation = (
-  noteId: string,
   sessionId: string,
   items: unknown[],
-) => invoke<void>("agent_save_conversation", { noteId, sessionId, items });
+) => invoke<void>("agent_save_conversation", { sessionId, items });
 export const signIn = () => invoke<ChatGptAccount>("chatgpt_sign_in");
 export const cancelSignIn = () => invoke<void>("chatgpt_cancel_sign_in");
 export const signOut = () => invoke<void>("chatgpt_sign_out");

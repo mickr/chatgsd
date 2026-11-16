@@ -45,6 +45,14 @@ impl Index {
             .ok_or_else(|| "That conversation isn't part of this note's history.".to_owned())
     }
 
+    /// Save through stable session ownership, never a path captured before a rename.
+    fn session_for_save(&mut self, session_id: &str) -> Result<&mut ConversationSummary, String> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.id == session_id && self.documents.contains_key(&session.document_id))
+            .ok_or_else(|| "That conversation no longer belongs to a note in this folder.".to_owned())
+    }
+
     /// Rewrites note IDs after a rename or move. A `from` ending in `/` is a
     /// folder prefix; anything else is one note.
     fn rename(&mut self, from: &str, to: &str) -> bool {
@@ -301,14 +309,14 @@ pub async fn agent_load_conversation(app: AppHandle, note_id: String, session_id
 }
 
 #[tauri::command]
-pub async fn agent_save_conversation(app: AppHandle, note_id: String, session_id: String, items: Value) -> Result<(), String> {
+pub async fn agent_save_conversation(app: AppHandle, session_id: String, items: Value) -> Result<(), String> {
     if !items.is_array() {
         return Err("A conversation transcript must be a list".into());
     }
     let store = Store::open(&app, &super::notes_folder(&app).await?).await?;
     let _lock = INDEX_LOCK.lock().await;
     let mut index = store.index().await?;
-    index.owned(&note_id, &session_id)?.updated_at = now();
+    index.session_for_save(&session_id)?.updated_at = now();
     store.write(&store.session_file(&session_id, "")?, &items).await?;
     store.write(&store.index_path(), &index).await
 }
@@ -330,6 +338,18 @@ mod tests {
             });
         }
         index
+    }
+
+    #[test]
+    fn queued_session_save_survives_rename_but_not_deletion() {
+        let mut index = index();
+        let queued_session = "s-d1";
+        assert!(index.rename("Trip plan", "Summer trip"));
+        index.session_for_save(queued_session).unwrap().updated_at = 42;
+        assert_eq!(index.owned("Summer trip", queued_session).unwrap().updated_at, 42);
+        assert!(Index::default().session_for_save(queued_session).is_err());
+        index.forget("Summer trip");
+        assert!(index.session_for_save(queued_session).is_err());
     }
 
     #[test]
