@@ -40,7 +40,7 @@ jobs:
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     outputs:
       release: ${{ steps.version.outputs.release }}
       commit: ${{ steps.version.outputs.commit }}
@@ -53,8 +53,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Tags the commit here, while it's known to be main's tip: GitHub won't
+      # let the job token tag a commit whose workflow files differ from main's,
+      # so a tag created later would fail whenever a push lands mid-build.
       - id: version
         env:
+          GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
           BUMP: ${{ inputs.bump || 'patch' }}
           MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
@@ -67,13 +71,9 @@ jobs:
           released=$(git tag --points-at "$COMMIT" --list 'v[0-9]*')
           [ "$MANUAL" = true ] || [ -z "$released" ] || skip "${COMMIT:0:7} is already released as $released."
 
-          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "$COMMIT")
-          IFS=. read -r major minor patch <<< "${previous#v}"
-          case "$BUMP" in
-            major) version="$((major + 1)).0.0" ;;
-            minor) version="$major.$((minor + 1)).0" ;;
-            *) version="$major.$minor.$((patch + 1))" ;;
-          esac
+          plan=$(scripts/next-version.sh "$BUMP")
+          read -r previous version <<< "$plan"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$version" -f sha="$COMMIT" > /dev/null
           echo "Releasing ${COMMIT:0:7} as v$version (previous $previous)"
 
           delimiter="notes_$(openssl rand -hex 8)"
@@ -123,8 +123,8 @@ jobs:
         run: scripts/ci-signing.sh install
 
       # Builds, signs, notarizes and staples the app, signs the updater bundle,
-      # and uploads everything to a draft release with latest.json. The tag is
-      # created on the built commit when the release is published.
+      # and uploads everything to a draft release with latest.json for the tag
+      # the plan created.
       - name: Build and upload
         uses: tauri-apps/tauri-action@v0
         env:
@@ -159,6 +159,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      # A failed or cancelled run withdraws its version, so no tag points at a
+      # build that never shipped and the next run reuses the number. A
+      # published release is never touched. Retry with "Re-run all jobs", which
+      # plans and tags again.
+      - name: Withdraw the unpublished version
+        if: failure() || cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          draft=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2> /dev/null || echo missing)
+          if [ "$draft" = false ]; then
+            echo "v$VERSION is published; leaving it."
+            exit 0
+          fi
+          [ "$draft" = missing ] || gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION"
 
       - name: Remove signing identity
         if: always()
