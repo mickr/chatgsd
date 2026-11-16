@@ -18,10 +18,15 @@ on:
         options: [patch, minor, major]
         default: patch
 
-# One release at a time, so two runs never pick the same version.
+# One release at a time, so two runs never pick the same version. Runs queue
+# rather than replace each other: by default a newly queued run cancels the
+# pending one, so an older or failed CI completion could push out the run for
+# the newest main and then skip itself. Order doesn't matter, because only a
+# run whose commit is still main's tip releases.
 concurrency:
   group: release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   plan:
