@@ -103,6 +103,10 @@ jobs:
       APPLE_SIGNING_IDENTITY: ${{ vars.SCRATCH_SIGN_IDENTITY }}
       APPLE_TEAM_ID: M9G92WURV3
       VERSION: ${{ needs.plan.outputs.version }}
+      # The fork's updater public key (~/.tauri/scratch-fork-updater.key.pub),
+      # pinned here rather than read from tauri.conf.json so a merge from
+      # upstream can't swap the key or the endpoint without failing a release.
+      UPDATER_PUBKEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBCRUM5NURCNkYzODk4NTUKUldSVm1EaHYyNVhzQzJpNnNsRWlaUDladlAwN2ExcGg5L2g3UC9GQWRlT1FQa1lMd29ySmNzQ00K
 
     steps:
       - uses: actions/checkout@v4
@@ -153,6 +157,12 @@ jobs:
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          # Installed copies must only ever update from this fork: the built app
+          # has to carry exactly this repo's update feed and the fork's key.
+          bin="$app/Contents/MacOS/Scratch"
+          feeds=$(grep -aoE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/latest/download/latest\.json' "$bin" | sort -u)
+          test "$feeds" = "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          grep -aqF "$UPDATER_PUBKEY" "$bin"
 
       # Only a verified build becomes the latest release the updater sees.
       - name: Publish
