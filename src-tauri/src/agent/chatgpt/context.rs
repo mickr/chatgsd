@@ -2,13 +2,27 @@
 //! has no server-side truncation, so Scratch trims what it sends.
 //!
 //! Two steps, cheapest first:
-//! - When a new turn starts, earlier tool outputs above a size are cut to their
-//!   opening. They are mostly note reads, stale by now, and the agent re-reads
-//!   what it needs. Doing this once per turn keeps the prefix stable for caching.
-//! - If the input still exceeds the budget, older outputs in the current turn
-//!   are cut too, then the oldest whole turns are dropped (their calls and
-//!   reasoning go together, so the input stays well formed).
+//! - When a new turn starts, earlier outputs of tools the agent can call again
+//!   (note reads, searches) are cut to their opening if long. They are stale by
+//!   now, and the agent re-reads what it needs. Doing this once per turn keeps
+//!   the prefix stable for caching. Anything else, above all the user's answers
+//!   to ask_user, can't be fetched again and is never cut.
+//! - If the input still exceeds the budget, older rereadable outputs in the
+//!   current turn are cut too, then the oldest whole turns are dropped (their
+//!   calls and reasoning go together, so the input stays well formed).
+use super::super::events::canonical_tool_name;
 use serde_json::{json, Value};
+use std::collections::HashSet;
+
+/// Tools whose output the agent can get again by calling them.
+const REREADABLE: &[&str] = &[
+    "read_document",
+    "read_notes",
+    "find_in_note",
+    "search_notes",
+    "list_notes",
+    "note_links",
+];
 
 /// Tool outputs from earlier turns longer than this are cut to a stub.
 const STALE_OUTPUT_CHARS: usize = 1_500;
@@ -19,8 +33,27 @@ pub const MAX_INPUT_BYTES: usize = 600_000;
 const KEEP_RECENT_OUTPUTS: usize = 4;
 const TRIMMED_NOTICE: &str = "Earlier turns of this conversation were removed to fit the context window. Re-read notes as needed, and ask the user if you need something only they said earlier.";
 
-fn is_output(item: &Value) -> bool {
-    item.get("type").and_then(Value::as_str) == Some("function_call_output")
+/// Indices of outputs from rereadable tools, in order.
+fn rereadable_outputs(items: &[Value]) -> Vec<usize> {
+    let calls: HashSet<&str> = items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .filter(|item| {
+            item.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| REREADABLE.contains(&canonical_tool_name(name)))
+        })
+        .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+        .collect();
+    (0..items.len())
+        .filter(|&index| {
+            items[index].get("type").and_then(Value::as_str) == Some("function_call_output")
+                && items[index]
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| calls.contains(id))
+        })
+        .collect()
 }
 
 fn is_user_turn(item: &Value) -> bool {
@@ -43,9 +76,11 @@ fn stub(item: &mut Value) {
     ));
 }
 
-/// Cuts every earlier tool output; call before a new user message is added.
+/// Cuts earlier rereadable outputs; call before a new user message is added.
 pub fn compact(items: &mut [Value]) {
-    items.iter_mut().filter(|item| is_output(item)).for_each(stub);
+    for index in rereadable_outputs(items) {
+        stub(&mut items[index]);
+    }
 }
 
 fn size(item: &Value) -> usize {
@@ -59,7 +94,7 @@ pub fn fit(items: &mut Vec<Value>, budget: usize) {
     if total <= budget {
         return;
     }
-    let outputs: Vec<usize> = (0..items.len()).filter(|&index| is_output(&items[index])).collect();
+    let outputs = rereadable_outputs(items);
     for &index in outputs.iter().rev().skip(KEEP_RECENT_OUTPUTS).rev() {
         let before = size(&items[index]);
         stub(&mut items[index]);
@@ -96,33 +131,63 @@ mod tests {
     fn user(text: &str) -> Value {
         json!({"role": "user", "content": text})
     }
-    fn output(chars: usize) -> Value {
-        json!({"type": "function_call_output", "call_id": "c", "output": "x".repeat(chars)})
+    /// A tool call and its output; names come back namespaced, as from ChatGPT.
+    fn call(name: &str, id: &str, chars: usize) -> [Value; 2] {
+        [
+            json!({"type": "function_call", "call_id": id, "name": format!("scratch.{name}"), "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": id, "output": "x".repeat(chars)}),
+        ]
     }
-    fn output_len(item: &Value) -> usize {
-        item["output"].as_str().unwrap().chars().count()
+    fn output_len(items: &[Value], id: &str) -> usize {
+        items
+            .iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == id)
+            .map(|item| item["output"].as_str().unwrap().chars().count())
+            .unwrap()
     }
 
     #[test]
-    fn compact_cuts_only_long_outputs() {
-        let mut items = vec![user("hi"), output(10_000), output(100)];
+    fn compact_cuts_only_long_rereadable_outputs() {
+        let mut items = vec![user("hi")];
+        items.extend(call("read_document", "read", 10_000));
+        items.extend(call("search_notes", "search", 100));
         compact(&mut items);
-        assert!(output_len(&items[1]) < STALE_OUTPUT_CHARS);
-        assert!(items[1]["output"].as_str().unwrap().contains("9600 more characters omitted"));
-        assert_eq!(output_len(&items[2]), 100);
+        assert!(output_len(&items, "read") < STALE_OUTPUT_CHARS);
+        assert!(items[2]["output"].as_str().unwrap().contains("9600 more characters omitted"));
+        assert_eq!(output_len(&items, "search"), 100);
         let once = items.clone();
         compact(&mut items);
         assert_eq!(items, once, "compacting twice changes nothing");
     }
 
     #[test]
+    fn the_users_answers_survive_compaction_and_the_budget() {
+        // A long form submission and a long typed answer can't be re-read.
+        let mut items = vec![user("plan the trip")];
+        items.extend(call("ask_user", "form", 6_000));
+        items.extend(call("ask_user", "typed", 3_000));
+        items.extend(call("edit_note", "decision", 2_000));
+        items.extend(call("read_document", "read", 6_000));
+        compact(&mut items);
+        items.push(user("now the budget"));
+        items.extend((0..6).flat_map(|n| call("read_notes", &format!("r{n}"), 20_000)));
+        fit(&mut items, 100_000);
+        assert_eq!(output_len(&items, "form"), 6_000);
+        assert_eq!(output_len(&items, "typed"), 3_000);
+        assert_eq!(output_len(&items, "decision"), 2_000);
+        assert!(output_len(&items, "read") < STALE_OUTPUT_CHARS);
+        assert!(output_len(&items, "r0") < STALE_OUTPUT_CHARS, "older reads in the turn are cut");
+        assert_eq!(output_len(&items, "r5"), 20_000, "the latest reads stay whole");
+    }
+
+    #[test]
     fn fit_cuts_older_outputs_in_the_turn_before_dropping_turns() {
         let mut items = vec![user("only turn")];
-        items.extend((0..8).map(|_| output(50_000)));
+        items.extend((0..8).flat_map(|n| call("read_notes", &format!("r{n}"), 50_000)));
         fit(&mut items, 250_000);
         assert_eq!(items[0], user("only turn"));
-        let long = items.iter().filter(|item| is_output(item) && output_len(item) == 50_000).count();
-        assert!(long >= KEEP_RECENT_OUTPUTS, "the latest outputs stay whole");
+        let whole = (0..8).filter(|n| output_len(&items, &format!("r{n}")) == 50_000).count();
+        assert!(whole >= KEEP_RECENT_OUTPUTS, "the latest outputs stay whole");
         assert!(items.iter().map(size).sum::<usize>() <= 250_000);
     }
 
