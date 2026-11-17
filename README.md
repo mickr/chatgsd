@@ -110,7 +110,9 @@ activity: reading, editing, researching, replying, waiting, done, paused, or an
 error. Click it to see the
 conversation turns, changes, and questions, or send a follow-up. Clicking back
 into the note collapses the conversation without dismissing the companion.
-**Open sidebar** continues the same conversation there; **Pause** stops the session.
+The collapsed companion's right arrow opens the conversation in the sidebar
+without stopping the agent. **Open sidebar** in the expanded view does the same;
+**Pause** stops the session.
 Inline edits use the sidebar's direct editing tools, with computer access
 disabled for the inline request.
 

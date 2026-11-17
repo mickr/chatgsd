@@ -172,6 +172,8 @@ it("checks an initially unknown account on inline open and enables sending when 
 });
 
 it("docks while working, reveals real turns, and keeps activity visible when writing resumes", async () => {
+  const onContinue = vi.fn();
+  act(() => root.render(<InlineAgentPrompt onContinue={onContinue} />));
   let conversation: Conversation = { items: [], runId: null, sessionId: null, context: null, error: null, cancelled: false };
   state.agent.send = vi.fn(async (prompt: string) => {
     conversation = { ...conversation, runId: "run", items: [{ id: "user", type: "user", text: prompt }] };
@@ -193,7 +195,7 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
   conversation = { ...conversation, items: [...conversation.items,
     { id: "tool", type: "tool", name: "read_document", input: {} }] };
   state.agent.conversation = conversation;
-  act(() => root.render(<InlineAgentPrompt onContinue={vi.fn()} />));
+  act(() => root.render(<InlineAgentPrompt onContinue={onContinue} />));
   expect(document.querySelector('.inline-agent-dock[data-state="reading"]')).not.toBeNull();
   composerInput();
   const log = document.querySelector('[aria-label="Inline conversation turns"]')!;
@@ -210,7 +212,7 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
     question: "Keep the technical detail?", options: ["Keep it", "Simplify"], form: null, answer: null };
   state.agent.pendingQuestion = question;
   state.agent.conversation = { ...conversation, items: [...conversation.items, question] };
-  act(() => root.render(<InlineAgentPrompt onContinue={vi.fn()} />));
+  act(() => root.render(<InlineAgentPrompt onContinue={onContinue} />));
   expect(document.querySelector(".inline-agent-dock-copy > :first-child")?.textContent).toBe(question.question);
   composerInput();
   act(() => [...document.querySelectorAll("button")].find((button) => button.textContent === "Keep it")!.click());
@@ -218,4 +220,8 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
   act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   expect(document.querySelector('[aria-label="Inline conversation turns"]')).toBeNull();
   expect(document.activeElement?.getAttribute("aria-expanded")).toBe("false");
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Open in sidebar"]')!.click());
+  expect(onContinue).toHaveBeenCalledOnce();
+  expect(document.querySelector(".inline-agent-prompt")).toBeNull();
+  expect(state.agent.stop).toHaveBeenCalledOnce();
 });

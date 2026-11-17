@@ -274,6 +274,10 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
             <span role="status" aria-live="polite">{turnDetail}</span>
           </span>
         </button>
+        {!expanded && <button type="button" className="inline-agent-dock-action" aria-label="Open in sidebar" title="Open in sidebar"
+          onClick={() => { dismiss(false); onContinue(); }}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h9M7 4l4 4-4 4M14 3v10" /></svg>
+        </button>}
         {(running || sending || agent.coediting)
           ? <button type="button" className="inline-agent-dock-action" aria-label="Pause agent" title="Pause agent" onClick={() => void agent.stop()}>
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 4v8M11 4v8" /></svg>
