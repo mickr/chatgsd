@@ -4,11 +4,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { AgentChanges } from "../editor/AgentChanges";
+import { AgentChanges, ScratchDocument } from "../editor/AgentChanges";
 import { TooltipProvider } from "../ui";
 import { AgentPanel } from "./AgentPanel";
 import { useAgentPanelShortcut } from "./useAgentPanelShortcut";
 import type * as AgentContext from "../../context/AgentContext";
+import { prepareWritingOffer } from "../../lib/agent/writingOffers";
 
 const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown> }));
 vi.mock("../../context/AgentContext", async (original) => ({
@@ -58,8 +59,10 @@ function Workspace() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
   const editorElement = document.body.appendChild(document.createElement("div"));
-  editor = new Editor({ element: editorElement, extensions: [StarterKit, AgentChanges], content: "<p>A note that must not become a quote.</p>" });
+  editor = new Editor({ element: editorElement, extensions: [StarterKit, ScratchDocument, AgentChanges], content: "<p>A note that must not become a quote.</p>" });
+  editor.storage.scratchDocument.noteId = "note";
   container = document.body.appendChild(document.createElement("div"));
   root = createRoot(container);
   state.agent = {
@@ -68,6 +71,10 @@ beforeEach(() => {
     statusLoading: false, modelsLoading: false,
     model: "model", models: [{ id: "model", label: "Model" }],
     history: [], conversation: { items: [], runId: null },
+    writingOffer: null, writingOfferDraft: "", writingOfferReplay: 0,
+    setWritingOfferDraft: vi.fn(), requestWritingHelp: vi.fn().mockResolvedValue(undefined),
+    acceptWritingOffer: vi.fn(), showWritingOffer: vi.fn(), dismissWritingSuggestion: vi.fn(),
+    send: vi.fn().mockResolvedValue(true),
   };
   act(() => root.render(<Workspace />));
 });
@@ -77,11 +84,54 @@ afterEach(() => {
   editor.destroy();
   document.body.replaceChildren();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 function nextFrame() {
   act(() => vi.advanceTimersByTime(20));
 }
+
+it("shares the current proposal and stages Add to chat in the sidebar without sending", () => {
+  const prepared = prepareWritingOffer(editor, { kind: "rewrite", quote: "A note that must not become a quote.",
+    replacement: "An improved sentence.", explanation: "Keep the thought direct.", question: null,
+    destination: null, trace: [], sources: [] });
+  state.agent.writingOffer = { id: "offer", prepared, stale: false };
+  state.agent.writingOfferDraft = "The writer's revision.";
+  act(() => container.querySelector("button")!.click());
+  nextFrame();
+  expect(container.querySelector('[aria-label="Proposed wording"]')!.textContent).toBe("The writer's revision.");
+  const click = (label: string) => act(() => [...container.querySelectorAll("button")].find(button => button.textContent === label)!.click());
+  click("Add to chat");
+  const input = container.querySelector<HTMLTextAreaElement>('[aria-label="Message agent"]')!;
+  expect(input.value).toContain("A note that must not become a quote.");
+  expect(input.value).toContain("The writer's revision.");
+  expect(input.value).not.toContain("An improved sentence.");
+  expect(document.activeElement).toBe(input);
+  expect(state.agent.send).not.toHaveBeenCalled();
+  click("Show passage");
+  expect(state.agent.showWritingOffer).toHaveBeenCalledOnce();
+  click("Accept rewrite");
+  expect(state.agent.acceptWritingOffer).toHaveBeenCalledExactlyOnceWith("The writer's revision.");
+});
+
+it("resolves a model-authored card in the sidebar without adding a duplicate", () => {
+  const prepared = prepareWritingOffer(editor, { kind: "question", quote: "A note that must not become a quote.",
+    replacement: null, explanation: "One connection is missing.", question: "Why does this follow?",
+    destination: null, trace: [], sources: [] });
+  state.agent.writingOffer = { id: "offer", prepared, stale: false };
+  state.agent.writingOfferDraft = "The incentives changed.";
+  state.agent.conversation = { runId: null, items: [{ id: "reply", type: "text", text: [
+    "```spec", '{"op":"add","path":"/root","value":"card"}',
+    '{"op":"add","path":"/elements/card","value":{"type":"WritingSuggestion","props":{"id":"offer"},"children":[]}}', "```",
+  ].join("\n") }] };
+  act(() => container.querySelector("button")!.click());
+  nextFrame();
+  expect(container.querySelectorAll(".writing-offer-card")).toHaveLength(1);
+  expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Answer the writing question"]')!.value).toBe("The incentives changed.");
+  act(() => [...container.querySelectorAll("button")].find(button => button.textContent === "Send answer")!.click());
+  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("question", "The incentives changed.");
+  expect(state.agent.send).not.toHaveBeenCalled();
+});
 
 it("shows computer setup as a notice while leaving chat available", () => {
   state.agent.conversation = {

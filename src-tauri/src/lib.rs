@@ -3381,6 +3381,7 @@ pub fn run() {
             agent::codex::account::chatgpt_sign_out,
             agent::codex::account::chatgpt_ack_plan_notice,
             agent::codex::decisions::agent_classify_inline,
+            agent::codex::decisions::agent_review_writing,
             read_file_direct,
             save_file_direct,
             import_file_to_folder,

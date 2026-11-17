@@ -48,6 +48,8 @@ import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
 import { OpenNoteContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
+import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
+import { writingOfferChatText } from "../../lib/agent/writingOffers";
 function ResizeHandle() {
   const { width, setWidth } = useAgent();
   const drag = useRef<{ x: number; width: number; current: number } | null>(
@@ -136,6 +138,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const status = agent.status;
   const conversation = agent.conversation;
   const turns = useMemo(() => conversationTurns(conversation.items), [conversation.items]);
+  const offerInTranscript = useMemo(() => !!agent.writingOffer && hasWritingOfferCard(conversation.items, agent.writingOffer.id), [conversation.items, agent.writingOffer?.id]);
   const running = conversation.runId !== null;
   const contextTitle = running
     ? conversation.context?.noteTitle
@@ -282,6 +285,22 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     setReviewIndex(next);
     agent.editor?.commands.scrollToAgentChange(changes[next].id);
   };
+  const offer = agent.writingOffer;
+  const offerControls: WritingOfferControls | null = offer ? {
+    id: offer.id, offer: offer.prepared, stale: offer.stale, busy: running || sending || waiting || agent.companionChecking || !!reason,
+    draft: agent.writingOfferDraft, onDraftChange: agent.setWritingOfferDraft,
+    onAccept: agent.acceptWritingOffer,
+    onAnswer: (answer) => { void agent.requestWritingHelp("question", answer); },
+    onShow: agent.showWritingOffer,
+    onDismiss: agent.dismissWritingSuggestion,
+    onAddToChat: () => {
+      if (!currentNote) return;
+      const context = writingOfferChatText(offer.prepared, agent.writingOfferDraft);
+      setDrafts((previous) => ({ ...previous, [currentNote.id]: previous[currentNote.id]?.trim()
+        ? `${previous[currentNote.id]}\n\n${context}` : context }));
+      composer.current?.focus({ preventScroll: true });
+    },
+  } : null;
   return (
     <aside
       className={`agent-panel ${visible ? "agent-panel-open" : ""}`}
@@ -393,7 +412,9 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           )}
           <div className="mt-2 flex items-center justify-between gap-2 text-xs">
             <span role="status" className="text-text-muted">
-              {agent.coediting
+              {agent.companionActive
+                ? agent.companionChecking ? "Writing companion · Reviewing" : "Writing companion · Following your edits"
+                : agent.coediting
                 ? running ? "Coediting · Working" : "Coediting · Following your edits"
                 : running ? "Finishing current turn" : "Coediting paused"}
             </span>
@@ -411,6 +432,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           </div>
         </div>
         <OpenNoteContext.Provider value={openNote}>
+          <WritingOfferContext.Provider value={offerControls}>
           <div
             ref={scroll}
             className="agent-panel-messages"
@@ -427,7 +449,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                   60;
             }}
           >
-            {!conversation.items.length && (
+            {!conversation.items.length && !offer && (
               <div className="agent-panel-empty">
                 <AgentIcon className="w-7 h-7 text-text-muted/50" />
                 <h2 className="text-sm font-medium">A second pair of eyes.</h2>
@@ -458,6 +480,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                 <AgentTurnChanges changes={turn.changes} turn={turnIndex + 1} />
               </Fragment>
             ))}
+          {visible && offerControls && !offerInTranscript && <WritingOfferCard {...offerControls} />}
           {running &&
             !waiting &&
             conversation.items[conversation.items.length - 1]?.type !==
@@ -515,6 +538,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           )}
           <PlanNotice />
           </div>
+          </WritingOfferContext.Provider>
         </OpenNoteContext.Provider>
         {changes.length > 0 && (
           <div className="agent-panel-review" aria-label="Review external changes">

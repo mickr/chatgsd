@@ -28,6 +28,8 @@ vi.mock("../services/agent", async (importOriginal) => ({
   getStatus: vi.fn(),
   listModels: vi.fn(),
   startRun: vi.fn(),
+  reviewWriting: vi.fn(),
+  classifyInlineContext: vi.fn(),
   toolRespond: vi.fn(() => Promise.resolve()),
   cancelRun: vi.fn(() => Promise.resolve()),
   listConversations: vi.fn(),
@@ -116,6 +118,8 @@ beforeEach(async () => {
     modified: 0,
   };
   vi.mocked(agent.getStatus).mockResolvedValue(READY);
+  vi.mocked(agent.classifyInlineContext).mockResolvedValue({ intent: "suggest", confidence: 0.95, route: "fast" });
+  vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: null, anchor: null, route: "fast" });
   vi.mocked(agent.listModels).mockResolvedValue([{ id: "gpt-x", label: "GPT X" }]);
   vi.mocked(agent.startRun).mockResolvedValue({ runId: "run-1" });
   vi.mocked(agent.listConversations).mockResolvedValue([]);
@@ -894,4 +898,268 @@ describe("AgentProvider research and skill offers", () => {
     await settle();
     expect(current.conversation.items.map((item) => item.id)).toEqual(["o2"]);
   });
+});
+
+describe("writing companion", () => {
+  async function ready() {
+    await act(async () => { await current.refreshStatus(); });
+    await settle();
+  }
+  async function finish(text = "This claim needs a source before the conclusion follows.") {
+    act(() => {
+      if (text) mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text } });
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+    });
+    await settle();
+  }
+  async function advance(ms: number) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
+
+  it("uses only the cheap gate for clean writing and reuses an unchanged passage", async () => {
+    await ready();
+    await act(async () => { await current.startCompanion(); });
+    expect(current.open).toBe(false);
+    expect(current.companionActive).toBe(true);
+    expect(agent.reviewWriting).toHaveBeenCalledOnce();
+    expect(agent.startRun).not.toHaveBeenCalled();
+    await act(async () => { await current.stop(); await current.startCompanion(); });
+    expect(agent.reviewWriting).toHaveBeenCalledOnce();
+    expect(current.writingFocus).toBeNull();
+    expect(current.writingSuggestion).toBeNull();
+  });
+
+  it("grounds a concern, generates one read-only suggestion, and keeps it out of the transcript", async () => {
+    await ready();
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "evidence", anchor: 0, route: "fast" });
+    await act(async () => { await current.startCompanion(); });
+    expect(current.open).toBe(false);
+    expect(current.writingFocus).toBe("evidence");
+    expect(current.writingTarget).toEqual({ from: 0, to: editor.state.doc.firstChild!.nodeSize });
+    expect(agent.startRun).toHaveBeenCalledWith(expect.objectContaining({
+      readOnly: true, computerAccess: false, webAccess: true, sessionId: null,
+    }));
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "session", sessionId: "ephemeral" } }));
+    await finish();
+    expect(current.writingSuggestion?.text).toContain("needs a source");
+    expect(current.conversation.items).toEqual([]);
+    expect(current.conversation.sessionId).toBeNull();
+    expect(agent.saveConversation).not.toHaveBeenCalled();
+    act(() => { current.focusPanel(); current.close(); });
+    expect(current.companionActive).toBe(true);
+    expect(agent.cancelRun).not.toHaveBeenCalled();
+    act(() => current.dismissWritingSuggestion());
+    expect(current.writingFocus).toBeNull();
+    expect(current.writingTarget).toBeNull();
+    expect(current.writingSuggestion).toBeNull();
+    vi.useFakeTimers();
+    act(() => editor.commands.insertContent("New idea "));
+    await advance(5000);
+    expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ dismissed: [expect.stringContaining("needs a source")] }));
+  });
+
+  it("checks after writing pauses with the sidebar closed, and limits repeat requests", async () => {
+    await ready();
+    await act(async () => { await current.startCompanion(); });
+    vi.useFakeTimers();
+    act(() => editor.commands.insertContent("First "));
+    await advance(4000);
+    act(() => editor.commands.insertContent("Second "));
+    await advance(4999);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+    act(() => editor.commands.insertContent("Third "));
+    await advance(5000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+    await advance(25000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(3);
+    act(() => editor.view.dispatch(setChangeMeta(editor.state.tr.insertText("Agent "), { source: "agent" })));
+    await advance(40000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(3);
+    await act(async () => { await current.stop(); });
+    act(() => editor.commands.insertContent("Paused "));
+    await advance(40000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["edit", "pause"])("ignores an assessment after %s", async (action) => {
+    await ready();
+    let resolve!: (value: { focus: "clarity"; anchor: number; route: "fast" }) => void;
+    vi.mocked(agent.reviewWriting).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    let pending!: Promise<void>;
+    act(() => { pending = current.startCompanion(); });
+    if (action === "edit") act(() => editor.commands.insertContent("Changed "));
+    else await act(async () => { await current.stop(); });
+    await act(async () => { resolve({ focus: "clarity", anchor: 0, route: "fast" }); await pending; });
+    expect(agent.startRun).not.toHaveBeenCalled();
+    expect(current.writingFocus).toBeNull();
+    expect(current.writingTarget).toBeNull();
+  });
+
+  it("discards a generated suggestion when the reviewed text changes", async () => {
+    await ready();
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
+    await act(async () => { await current.startCompanion(); });
+    act(() => editor.commands.insertContent("Revised "));
+    await finish();
+    expect(current.writingSuggestion).toBeNull();
+    expect(current.writingTarget).toBeNull();
+    expect(current.writingFocus).toBeNull();
+  });
+
+  it("does not turn an API failure into criticism or an expensive fallback", async () => {
+    await ready();
+    vi.mocked(agent.reviewWriting).mockRejectedValueOnce(new Error("Offline"));
+    await act(async () => { await current.startCompanion(); });
+    expect(current.conversation.error?.message).toContain("Offline");
+    expect(current.companionActive).toBe(false);
+    expect(current.writingFocus).toBeNull();
+    expect(agent.startRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit requests on the normal agent path and guards background edits", async () => {
+    await ready();
+    await act(async () => { await current.send("Please tighten this paragraph", false, "companion"); });
+    expect(agent.reviewWriting).not.toHaveBeenCalled();
+    expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ readOnly: false, prompt: "Please tighten this paragraph" }));
+    await finish("Tightened the paragraph.");
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
+    await act(async () => { await current.startCompanion(); });
+    await act(async () => { await mocks.toolHandler?.({ runId: "run-1", requestId: "forbidden", name: "edit_document", args: { edits: [] } }); });
+    expect(executeDocumentTool).not.toHaveBeenCalled();
+    expect(agent.toolRespond).toHaveBeenCalledWith("forbidden", false, expect.stringContaining("only read"));
+  });
+});
+
+it("retries a failed writing suggestion on unchanged text", async () => {
+  await act(async () => { await current.refreshStatus(); });
+  await settle();
+  vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
+  vi.mocked(agent.startRun).mockRejectedValueOnce(new Error("Temporary failure"));
+  await act(async () => { await current.startCompanion(); });
+  expect(current.writingFocus).toBeNull();
+  expect(current.conversation.error?.message).toContain("Temporary failure");
+  await act(async () => { await current.startCompanion(); });
+  expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+  expect(agent.startRun).toHaveBeenCalledTimes(2);
+  expect(current.writingFocus).toBe("clarity");
+});
+
+it.each(["assessment", "generation"])("lets an explicit request preempt background %s", async (stage) => {
+  await act(async () => { await current.refreshStatus(); });
+  await settle();
+  let resolve!: (value: { focus: "clarity"; anchor: number; route: "fast" }) => void;
+  if (stage === "assessment") vi.mocked(agent.reviewWriting).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  else vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
+  let background!: Promise<void>;
+  await act(async () => { background = current.startCompanion(); });
+  act(() => current.prepareCompanionMessage());
+  if (stage === "assessment") await act(async () => { resolve({ focus: "clarity", anchor: 0, route: "fast" }); await background; });
+  vi.mocked(agent.startRun).mockResolvedValueOnce({ runId: "foreground" });
+  await act(async () => { expect(await current.send("Please help me write this", false, "companion")).toBe(true); });
+  expect(current.conversation.runId).toBe("foreground");
+  expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ readOnly: false, prompt: "Please help me write this" }));
+  if (stage === "generation") expect(agent.cancelRun).toHaveBeenCalledWith("run-1");
+  expect(current.writingFocus).toBeNull();
+});
+
+it("remembers delivered advice after unrelated typing so it does not nag", async () => {
+  await act(async () => { await current.refreshStatus(); });
+  await settle();
+  vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
+  await act(async () => { await current.startCompanion(); });
+  act(() => {
+    mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text: "Explain which route you mean." } });
+    mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+  });
+  vi.useFakeTimers();
+  act(() => editor.commands.insertContent("Another thought. "));
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ dismissed: ["Explain which route you mean."] }));
+});
+
+describe("structured writing offers", () => {
+  const offer = {
+    kind: "rewrite", quote: "Trip plan", explanation: "Give the opening a clearer direction.",
+    replacement: "A quieter trip", question: null, destination: null, trace: [], sources: [],
+  };
+  async function readyWithModels() {
+    vi.mocked(agent.listModels).mockResolvedValue([
+      { id: "gpt-x", label: "GPT X" }, { id: "gpt-6-luna", label: "Luna" },
+    ]);
+    act(() => current.reloadModels());
+    await act(async () => { await current.refreshStatus(); });
+    await settle();
+  }
+  async function deliver(args = offer) {
+    await act(async () => { await mocks.toolHandler?.({ runId: "run-1", requestId: "offer-1", name: "offer_writing_help", args }); });
+    expect(current.writingOffer).toBeNull();
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+  }
+  it("routes simple proposals to Luna and applies only on explicit acceptance", async () => {
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("rewrite"); });
+    expect(agent.classifyInlineContext).toHaveBeenCalledOnce();
+    expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({
+      model: "gpt-6-luna", readOnly: true, sessionId: null, webAccess: false, computerAccess: false,
+    }));
+    await deliver();
+    expect(current.writingOffer?.prepared.offer).toEqual(offer);
+    expect(current.writingOfferDraft).toBe("A quieter trip");
+    expect(editor.getText()).toBe("Trip plan");
+    expect(current.conversation.items).toEqual([]);
+    act(() => current.acceptWritingOffer("A thoughtful trip"));
+    expect(editor.getText()).toBe("A thoughtful trip");
+    expect(current.writingOffer).toBeNull();
+    act(() => editor.commands.undo());
+    expect(editor.getText()).toBe("Trip plan");
+  });
+  it("uses the selected model for heavy work and the same model for delegated research", async () => {
+    await readyWithModels();
+    act(() => { current.setModel("gpt-x"); current.setWebAccess(true); });
+    vi.mocked(agent.classifyInlineContext).mockResolvedValueOnce({ intent: "research", confidence: 0.98, route: "deep" });
+    await act(async () => { await current.requestWritingHelp("evidence"); });
+    expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ model: "gpt-x", researchModel: "gpt-x", webAccess: true, readOnly: true }));
+  });
+  it("marks an offer stale when its passage changes and prevents acceptance", async () => {
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("rewrite"); });
+    await deliver();
+    act(() => editor.commands.setContent("<p>A different thought</p>"));
+    expect(current.writingOffer?.stale).toBe(true);
+    act(() => current.acceptWritingOffer());
+    expect(editor.getText()).toBe("A different thought");
+  });
+  it("rejects invented anchors before a card can become actionable", async () => {
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("rewrite"); });
+    await deliver({ ...offer, quote: "Not in this note" });
+    expect(agent.toolRespond).toHaveBeenCalledWith("offer-1", false, expect.any(String));
+    expect(current.writingOffer).toBeNull();
+  });
+  it("discards a prepared offer if the passage changes before completion", async () => {
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("rewrite"); });
+    await act(async () => { await mocks.toolHandler?.({ runId: "run-1", requestId: "offer-1", name: "offer_writing_help", args: offer }); });
+    act(() => editor.commands.setContent("<p>Changed while working</p>"));
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    expect(current.writingOffer).toBeNull();
+    expect(current.writingSuggestion).toBeNull();
+  });
+});
+
+it("coalesces repeated explicit offer requests while the classifier is pending", async () => {
+  await act(async () => { await current.refreshStatus(); });
+  await settle();
+  let resolve!: (value: agent.InlineDecision) => void;
+  vi.mocked(agent.classifyInlineContext).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  let first!: Promise<void>;
+  act(() => { first = current.requestWritingHelp("question"); });
+  await act(async () => { await current.requestWritingHelp("question"); });
+  expect(agent.classifyInlineContext).toHaveBeenCalledOnce();
+  expect(agent.startRun).not.toHaveBeenCalled();
+  await act(async () => { resolve({ intent: "suggest", confidence: .95, route: "fast" }); await first; });
+  expect(agent.startRun).toHaveBeenCalledOnce();
 });

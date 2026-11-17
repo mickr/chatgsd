@@ -23,6 +23,8 @@ export interface RunContext {
   webAccess?: boolean;
 }
 export interface StartRunRequest {
+  /** Background writing check-ins can read the note but cannot edit or use other apps. */
+  readOnly?: boolean;
   model: string | null;
   /** Scratch UI block guide, generated from the json-render catalog. */
   uiGuide: string;
@@ -103,7 +105,8 @@ export interface ConversationSummary {
 }
 
 export type InlineIntent = "discuss" | "suggest" | "edit" | "research" | "clarify";
-export interface InlineDecision { intent: InlineIntent; confidence: number }
+export type ModelRoute = "fast" | "deep";
+export interface InlineDecision { intent: InlineIntent; confidence: number; route: ModelRoute }
 export interface InlineContext {
   title: string;
   selection: string;
@@ -114,6 +117,17 @@ export interface InlineContext {
 }
 export const classifyInlineContext = (context: InlineContext) =>
   invoke<InlineDecision>("agent_classify_inline", { context });
+
+export interface WritingReviewContext {
+  title: string;
+  passage: string;
+  paragraphCount: number;
+  recent: string[];
+  dismissed: string[];
+}
+export type WritingFocus = "clarity" | "evidence" | "development";
+export const reviewWriting = (context: WritingReviewContext) =>
+  invoke<{ focus: WritingFocus | null; anchor: number | null; route: ModelRoute }>("agent_review_writing", { context });
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const setupComputerPermissions = (permission: ComputerPermission) =>

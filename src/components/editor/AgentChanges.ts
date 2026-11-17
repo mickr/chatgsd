@@ -357,11 +357,11 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
   return DecorationSet.create(doc, result);
 }
 
-export function scrollPositionIntoView(editor: Editor, pos: number): void {
+export function scrollPositionIntoView(editor: Editor, pos: number, behavior: ScrollBehavior = "smooth"): void {
   const dom = editor.view.domAtPos(pos).node;
   (dom instanceof HTMLElement ? dom : dom.parentElement)?.scrollIntoView({
     block: "center",
-    behavior: "smooth",
+    behavior,
   });
 }
 

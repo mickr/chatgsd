@@ -12,14 +12,6 @@ export const intentGuidance: Record<InlineIntent, string> = {
   clarify: "Ask one short question to resolve the ambiguity before taking action. Do not edit notes.",
 };
 
-export const intentSuggestions: Record<InlineIntent, readonly string[]> = {
-  discuss: ["Explain this passage", "Summarize the main idea", "What am I missing?"],
-  suggest: ["Suggest improvements", "Offer another approach", "Challenge this argument"],
-  edit: ["Make this clearer", "Tighten this passage", "Suggest wording first"],
-  research: ["Check the facts", "Find supporting sources", "What needs verifying?"],
-  clarify: ["Help me think this through", "What should I clarify?", "Suggest next steps"],
-};
-
 export function classifyInline(
   editor: Editor,
   range: { from: number; to: number },

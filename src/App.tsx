@@ -229,7 +229,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
         return;
       }
 
-      if (target.closest(".agent-panel") && !e.metaKey && !e.ctrlKey) {
+      if (target.closest(".agent-panel, .inline-agent-prompt") && !e.metaKey && !e.ctrlKey) {
         if (e.key === "Escape") {
           e.preventDefault();
           editorRef.current?.commands.focus();
@@ -239,7 +239,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
 
       // Trap Tab/Shift+Tab in notes view only - prevent focus navigation
       // TipTap handles indentation internally before event bubbles up
-      if (e.key === "Tab" && !target.closest(".agent-panel")) {
+      if (e.key === "Tab" && !target.closest(".agent-panel, .inline-agent-prompt")) {
         e.preventDefault();
         return;
       }
@@ -445,18 +445,20 @@ function AppWorkspace({ editorRef, onEditorReady }: {
               <Sidebar onOpenSettings={toggleSettings} />
               {sidebarVisible && !focusMode && <SidebarResizeHandle />}
             </div>
-            <Editor
-              onToggleSidebar={toggleSidebar}
-              sidebarVisible={sidebarVisible}
-              focusMode={focusMode}
-              onEditorReady={onEditorReady}
-              agentPanelOpen={agent.open && !focusMode}
-              onToggleAgentPanel={toggleAgentPanel}
-            />
+            <div className="flex flex-1 flex-col min-w-0 min-h-0" data-writing-workspace>
+              <Editor
+                onToggleSidebar={toggleSidebar}
+                sidebarVisible={sidebarVisible}
+                focusMode={focusMode}
+                onEditorReady={onEditorReady}
+                agentPanelOpen={agent.open && !focusMode}
+                onToggleAgentPanel={toggleAgentPanel}
+              />
+              {currentNote && (
+                <InlineAgentPrompt key={currentNote.id} onContinue={focusAgentPanel} />
+              )}
+            </div>
             <AgentPanel visible={agent.open && !focusMode} />
-            {currentNote && (
-              <InlineAgentPrompt key={currentNote.id} onContinue={focusAgentPanel} />
-            )}
           </>
         )}
       </div>

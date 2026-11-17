@@ -86,15 +86,22 @@ pub async fn run(app: tauri::AppHandle, ctx: RunContext, model: Option<String>, 
 }
 
 async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<String>, session_id: Option<String>, user_prompt: &str, computer: &mut Option<ComputerSession>) -> RunResult {
+    // Check-ins are transient observations, never new saved chats or continuations
+    // of an interactive thread that may carry broader tools and edit instructions.
+    let session_id = if ctx.read_only { None } else { session_id };
     let fresh = session_id.is_none();
     let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     Uuid::parse_str(&session_id).map_err(|_| other("Invalid conversation ID"))?;
     let mut server = Server::start(app).await.map_err(other)?;
     let account = account::read(&mut server).await.map_err(other)?.ok_or_else(|| auth("Sign in with ChatGPT to use Codex"))?;
-    conversations::begin(app, &ctx.notes_folder, &ctx.note_id, &session_id, user_prompt).await.map_err(other)?;
-    if fresh { conversations::initialize_codex(app, &ctx.notes_folder, &session_id, &account).await.map_err(other)?; }
-    let saved = conversations::load_codex(app, &ctx.notes_folder, &session_id, &account, None).await.map_err(other)?;
-    if ctx.computer_access {
+    let saved = if ctx.read_only {
+        conversations::CodexConversation { thread_id: None, tool_catalog_version: tools::CATALOG_VERSION, legacy_context: None, continuation: None }
+    } else {
+        conversations::begin(app, &ctx.notes_folder, &ctx.note_id, &session_id, user_prompt).await.map_err(other)?;
+        if fresh { conversations::initialize_codex(app, &ctx.notes_folder, &session_id, &account).await.map_err(other)?; }
+        conversations::load_codex(app, &ctx.notes_folder, &session_id, &account, None).await.map_err(other)?
+    };
+    if ctx.computer_access && !ctx.read_only {
         match ComputerSession::start(&app.config().identifier).await {
             Ok(session) => *computer = Some(session),
             Err(issue) => events::emit(app, &ctx.run_id, AgentEvent::ComputerUnavailable {
@@ -102,17 +109,23 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
             }),
         }
     }
-    events::emit(app, &ctx.run_id, AgentEvent::Session { session_id: session_id.clone() });
-    native_skills(app, &mut server).await.map_err(other)?;
-    let mut functions: Vec<_> = tools::catalog(true).into_iter().map(|tool| dynamic_tool(tool.name, tool.description, tool.parameters)).collect();
+    if !ctx.read_only {
+        events::emit(app, &ctx.run_id, AgentEvent::Session { session_id: session_id.clone() });
+        native_skills(app, &mut server).await.map_err(other)?;
+    }
+    let mut functions: Vec<_> = tools::catalog(!ctx.read_only || ctx.web_access, ctx.read_only).into_iter().map(|tool| dynamic_tool(tool.name, tool.description, tool.parameters)).collect();
     if let Some(computer) = computer.as_ref() {
         functions.extend(computer.tools().into_iter().map(|tool| dynamic_tool(tool["name"].as_str().unwrap_or_default(), tool["description"].as_str().unwrap_or_default(), tool["parameters"].clone())));
     }
     let permitted: HashSet<String> = functions.iter().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect();
-    let instructions = prompt::instructions(ctx, &skills::enabled(app).await, computer.is_some());
+    let enabled_skills = if ctx.read_only { Vec::new() } else { skills::enabled(app).await };
+    let instructions = prompt::instructions(ctx, &enabled_skills, computer.is_some());
     let mut params = json!({"cwd":server.cwd,"model":model,"sandbox":"read-only","approvalPolicy":"on-request","baseInstructions":instructions});
+    // Dynamic tools belong to the native thread, and thread/resume cannot
+    // replace them. Import readable history once when the catalog changes.
+    let refresh_tools = saved.thread_id.is_some() && saved.tool_catalog_version < tools::CATALOG_VERSION;
     let mut historical = String::new();
-    if ctx.computer_access {
+    if !ctx.read_only && (ctx.computer_access || refresh_tools) {
         if let Some(thread) = saved.thread_id.as_ref() {
             let response = server.rpc("thread/read", json!({"threadId":thread,"includeTurns":true})).await.map_err(other)?;
             historical = readable_thread(&response["thread"]).map_err(other)?;
@@ -122,13 +135,15 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
         if !historical.is_empty() { historical.push_str("\n\n"); }
         historical.push_str(context);
     }
-    let (method, params) = if !ctx.computer_access && saved.thread_id.is_some() {
+    let (method, params) = if !ctx.read_only && !ctx.computer_access && !refresh_tools && saved.thread_id.is_some() {
         params["threadId"] = json!(saved.thread_id);
         ("thread/resume", params)
     } else {
-        params["ephemeral"] = json!(ctx.computer_access);
+        params["ephemeral"] = json!(ctx.computer_access || ctx.read_only);
         params["environments"] = json!([]);
-        params["dynamicTools"] = json!([{"type":"namespace","name":"scratch","description":"Read and precisely edit ChatGSD notes through its live tracked tools.","tools":functions}]);
+        let description = if ctx.read_only { "Read the current ChatGSD note for a writing suggestion without changing it." }
+            else { "Read and precisely edit ChatGSD notes through its live tracked tools." };
+        params["dynamicTools"] = json!([{"type":"namespace","name":"scratch","description":description,"tools":functions}]);
         ("thread/start", params)
     };
     let started = server.rpc(method, params).await.map_err(other)?;
@@ -138,12 +153,14 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
     let input = vec![json!({"type":"text","text":text,"text_elements":[]})];
     let started = server.rpc("turn/start", json!({"threadId":thread,"input":input,"model":model,"approvalPolicy":"on-request","sandboxPolicy":{"type":"readOnly","networkAccess":false}})).await.map_err(other)?;
     let turn = started["turn"]["id"].as_str().ok_or_else(|| other("Codex returned no turn ID"))?.to_owned();
-    if !ctx.computer_access { conversations::save_codex_thread(app, &ctx.notes_folder, &session_id, &account, &thread).await.map_err(other)?; }
+    if !ctx.read_only && !ctx.computer_access { conversations::save_codex_thread(app, &ctx.notes_folder, &session_id, &account, &thread, saved.thread_id.as_deref(), tools::CATALOG_VERSION).await.map_err(other)?; }
     let mut transcript = format!("User:\n{user_prompt}\n");
     let mut checkpoint = tokio::time::Instant::now();
     save_computer_context(app, ctx, &session_id, &account, saved.continuation.as_deref(), &transcript, &HashMap::new()).await?;
     let mut streamed = HashMap::<String, String>::new();
     let mut calls = HashSet::new();
+    let mut researched = false;
+    let mut opened_sources = Vec::new();
     loop {
         let message = server.next().await.map_err(other)?;
         let params = &message["params"];
@@ -169,11 +186,25 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
                     },
                     None => output(false, "Computer access is off for this message".into()),
                 }
+            } else if name == "research" && ctx.read_only && researched {
+                output(false, "Background writing help permits one focused research request.".into())
             } else if name == "research" {
+                researched = true;
                 match research::run(app, ctx, ctx.research_model.as_deref().or(model.as_deref()), call_id, &args).await {
-                    Ok(result) => output(result.ok, result.text),
+                    Ok(result) => {
+                        opened_sources.extend(result.sources);
+                        output(result.output.ok, result.output.text)
+                    },
                     Err(error) if matches!(error.kind, AgentErrorKind::Other) => output(false, error.message),
                     Err(error) => return Err(error),
+                }
+            } else if name == "offer_writing_help" {
+                match research::validate_evidence_sources(&args, &opened_sources) {
+                    Ok(()) => {
+                        let result = tools::execute(app, &ctx.run_id, name, args.clone()).await;
+                        output(result.ok, result.text)
+                    }
+                    Err(error) => output(false, error),
                 }
             } else {
                 let result = tools::execute(app, &ctx.run_id, name, args.clone()).await;
@@ -213,7 +244,7 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
                 turn_result(&params["turn"])?;
                 if ctx.computer_access {
                     save_computer_context(app, ctx, &session_id, &account, saved.continuation.as_deref(), &transcript, &streamed).await?;
-                } else {
+                } else if !ctx.read_only {
                     conversations::complete_codex_migration(app, &ctx.notes_folder, &session_id, &account).await.map_err(other)?;
                 }
                 return Ok(());
@@ -224,7 +255,7 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
 }
 
 async fn save_computer_context(app: &tauri::AppHandle, ctx: &RunContext, session_id: &str, account: &str, previous: Option<&str>, transcript: &str, pending: &HashMap<String, String>) -> RunResult {
-    if !ctx.computer_access { return Ok(()); }
+    if !ctx.computer_access || ctx.read_only { return Ok(()); }
     let mut continuation = previous.map_or_else(|| transcript.to_owned(), |previous| format!("{previous}\n\n{transcript}"));
     for text in pending.values() { continuation.push_str(&format!("\nAssistant (partial):\n{text}\n")); }
     conversations::save_codex_continuation(app, &ctx.notes_folder, session_id, account, &continuation).await.map_err(other)

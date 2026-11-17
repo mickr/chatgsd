@@ -124,40 +124,60 @@ Keyboard focus only crosses between the note and the sidebar when you move it:
 `Cmd+Option+←` returns to the note where you left your cursor. Account checks,
 coediting check-ins, and agent edits never move focus.
 
-In the formatted editor, **Ask agent** opens a compact agent conversation above
-the companion at the bottom of the editor. `Cmd+Option+Enter` opens it with the
-current selection or cursor as context. Ask questions, discuss ideas, research,
-or request edits. Enter sends; Shift+Enter adds a newline; Escape minimizes the
-conversation. Selected text and nearby prose are context, not permission to edit.
-Closing restores the **Ask agent** trigger. Reopening it keeps the conversation,
-draft, and passage, which follows document edits even while closed.
+In the formatted editor, **Writing companion** opens one expanding interface
+beside the document, or below it in a narrow workspace. Drag the six-dot grip
+to dock it left, right, or below; drag the inner edge to resize it. With the grip
+focused, Left/Right/Down Arrow choose a dock. With the resize handle focused,
+arrow keys resize, Shift makes larger steps, and Home/End choose the size limits.
+The position and size are remembered. Its space is reserved in the layout, so
+neither the compact bubble nor the conversation covers your writing. `Cmd+Option+Enter` opens it
+with the current selection or cursor as context. Enter sends; Shift+Enter adds
+a newline; Escape minimizes. Closing keeps the draft and conversation and
+restores the launcher. It does not pause assistance. **Pause companion** stops
+assistance; **Write with me** resumes it. The sidebar is optional.
 
-The inline classifier calls OpenAI's Decisions API (`gpt-6-luna`) directly,
-separately from Codex app-server's coediting turns. It uses the app's refreshed
-ChatGPT sign-in. Opening the interface classifies context to offer three
-suggestions; choosing one fills the composer without sending. Submitting a
-message classifies it as Discuss, Suggest, Edit, Research, or Clarify and adds
-that response guidance to the agent request. Confidence below 0.75 selects
-Discuss. These modes guide the model; they are not tool-permission boundaries.
-Context includes the note title, up to 4,000 document positions of selected text,
-2,000 positions on each side, and six recent user/assistant messages clipped to
-2,000 characters each. Inline messages are limited to 8,000 characters so the
-classifier reads the entire request. API failures leave the draft available
-for retry rather than silently switching classifiers. Computer access remains
-disabled for inline requests.
+Opening the companion starts quiet writing check-ins. After a five-second pause
+in local typing, at most once every thirty seconds, a cheap `gpt-6-luna`
+Decisions request evaluates clarity, evidence, and development. A fourth question
+identifies the paragraph, and a routing question chooses fast or deep work. These questions share one bounded context: up to
+6,000 characters of labelled nearby prose, six recent messages, and eight
+previously offered or dismissed suggestions. Unchanged passages reuse the recent result. Blank notes,
+agent edits, selection moves, and unread suggestions do not start extra reviews.
 
-The conversation stays open after sending and while you write in the note.
-The companion previews the current turn's latest prose, or your instruction
-until the agent replies with prose. Structured UI specs stay out of the preview.
-The line below shows the turn number and actual
-activity: reading, editing, researching, replying, waiting, done, paused, or an
-error. Click it to minimize or restore the
-conversation turns, changes, and questions, or send a follow-up.
-The collapsed companion's right arrow opens the conversation in the sidebar
-without stopping the agent. **Open sidebar** in the expanded view does the same;
-**Pause** stops the session. Closing the interface leaves a running agent working.
-Inline edits use the sidebar's direct editing tools, with computer access
-disabled for the inline request.
+Only an actionable concern with probability at least 0.85 and a valid paragraph
+anchor starts the writing agent. The classifier result is a lead, not a verified
+finding. The agent reads the live note and offers one brief contextual suggestion,
+or stays silent if it finds nothing worth adding. These background runs are
+read-only and use fresh ephemeral threads. They cannot edit notes, access other
+apps, or block on questions. Evidence checks may use the enabled internet access,
+with one research task limited to six search/fetch steps and a sixty-second
+research deadline. They do not fill the chat history.
+
+A concern changes the companion's expression and labels the reason: a claim
+worth checking, a passage worth another look, or an idea to explore. A small
+agent cursor glides from the companion to the prose gutter beside the identified paragraph.
+It never moves the user's mouse, typing cursor, or scroll position. **Show
+passage** scrolls there and replays the gesture on request. Reduced motion skips the travel. Offscreen pointers hide instead of pointing
+at unrelated text. Findings and pointers clear when the note changes or the
+suggestion is dismissed. Results from an older document snapshot are discarded.
+
+Four actions make the collaboration tangible: propose an editable rewrite,
+trace an argument to one useful question, research a claim with opened sources,
+and preview moving a paragraph earlier. Shared json-render cards appear in both
+the companion and sidebar. Rewrite and answer drafts stay in sync. **Add to
+chat** stages the card's context in that surface's composer without sending it.
+Only explicit acceptance changes the document, in one undoable transaction.
+Accepted rewrites and moves use the same progressive typing reveal and agent
+caret as other agent edits; reduced motion shows the complete change immediately.
+Changed or ambiguous passages disable acceptance until a fresh offer is made.
+
+A cheap Decisions classifier chooses Luna for straightforward work and the
+selected model for heavier reasoning. Low-confidence routing uses the selected
+model; if Luna is unavailable, the selected model is the fallback. Explicit
+messages also classify Discuss, Suggest, Edit, Research, and Clarify; confidence
+below 0.75 selects Discuss. Classification does not grant permission to edit.
+Messages are limited to 8,000 characters, and failed classification retains the
+draft for retry. Computer access stays disabled for inline requests.
 
 The face combines an image-generated shell with animated LED eyes. The editing
 model chooses expressions, sentiment, and intensity through a bounded

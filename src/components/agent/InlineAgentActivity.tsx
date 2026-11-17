@@ -1,5 +1,13 @@
 import type { Conversation, TranscriptItem } from "../../context/AgentContext";
 import { splitReply } from "../../lib/agent/ui/content";
+import type { AgentExpression, WritingFocus } from "../../services/agent";
+
+/** A writing check describes the passage, never the writer's mood. */
+export const writingFeedback: Record<WritingFocus, { label: string; expression: AgentExpression }> = {
+  evidence: { label: "A claim worth checking", expression: { expression: "concerned", sentiment: -0.4, intensity: 0.6 } },
+  clarity: { label: "A passage worth another look", expression: { expression: "uncertain", sentiment: -0.2, intensity: 0.5 } },
+  development: { label: "An idea to explore", expression: { expression: "curious", sentiment: 0.3, intensity: 0.5 } },
+};
 
 export type InlineActivityState = "thinking" | "reading" | "editing" | "researching" | "responding" | "waiting" | "done" | "paused" | "error";
 

@@ -119,7 +119,7 @@ mod tests {
         fn context(&self) -> RunContext {
             RunContext {
                 run_id: "test".into(), note_id: "Open".into(), note_title: "Open".into(),
-                selection: None, computer_access: false, web_access: false, research_model: None,
+                selection: None, read_only: false, computer_access: false, web_access: false, research_model: None,
                 research_brief: None, notes_folder: self.0.clone(), ui_guide: String::new(),
             }
         }

@@ -25,6 +25,8 @@ pub struct RunContext {
     pub note_id: String,
     pub note_title: String,
     pub selection: Option<String>,
+    /// Background writing suggestions can only read the current document.
+    pub read_only: bool,
     pub computer_access: bool,
     /// Internet access for this message: research and skill offers.
     pub web_access: bool,
@@ -86,6 +88,8 @@ pub struct StartRunRequest {
     ui_guide: String,
     session_id: Option<String>,
     prompt: String,
+    #[serde(default)]
+    read_only: bool,
     #[serde(default)]
     computer_access: bool,
     #[serde(default)]
@@ -163,7 +167,8 @@ pub async fn agent_start_run(
         note_id: request.context.note_id,
         note_title: request.context.note_title,
         selection: request.context.selection,
-        computer_access: request.computer_access,
+        read_only: request.read_only,
+        computer_access: request.computer_access && !request.read_only,
         web_access: request.web_access,
         research_model: request.research_model.filter(|model| !model.is_empty()),
         research_brief: request

@@ -77,6 +77,11 @@ export const componentDefinitions = {
     description:
       "A link to another note by ID (from list_notes, search_notes or read_notes). Clicking opens it.",
   },
+  WritingSuggestion: {
+    props: z.object({ id: z.string() }),
+    description:
+      "An existing writing offer with its grounded passage and native actions: accept or edit a rewrite, answer a question, inspect sources, preview or apply a paragraph move, and Add to chat. Use only the id returned by offer_writing_help. The application owns these actions; inventing an id cannot create an offer.",
+  },
   Choice: {
     props: z.object({
       label: z.string(),
@@ -160,5 +165,6 @@ A spec block is a fenced block tagged spec with one JSON Patch operation per lin
 \`\`\`
 Every element needs type, props (all listed props, null when unused) and children (element IDs, [] for none).
 For ask_user, pass form as a complete spec object {root, elements, state} instead of patch lines. Bind each input's value to {"$bindState":"/answers/<key>"} and seed state.answers with an initial value per key. Scratch adds the send button and returns the answers object. Use a form when the question has several parts or needs context alongside it; for one simple choice, options alone are enough.
+For a writing proposal, call offer_writing_help first. Its returned id can be shown in either companion surface with {"type":"WritingSuggestion","props":{"id":"<returned id>"},"children":[]}. That card includes the proposal, source links or question, and the appropriate user actions. Do not recreate its action buttons in prose or fabricate offer ids. Add to chat prepares context for the user's next message; it does not send a message or accept an edit.
 Components:
 ${componentLines.join("\n")}`;

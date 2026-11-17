@@ -133,14 +133,34 @@ impl CodexThreads {
 #[derive(Serialize, Deserialize)]
 struct CodexThread {
     thread_id: Option<String>,
+    #[serde(default)]
+    tool_catalog_version: u32,
     migration_pending: bool,
     #[serde(default)]
     continuation: Option<String>,
 }
 
+impl CodexThread {
+    fn save_native_thread(&mut self, thread_id: &str, previous_thread: Option<&str>, version: u32) -> Result<(), String> {
+        // Compare the pointer read before migration: concurrent runs must never
+        // replace a newer thread and silently discard its intervening turns.
+        if self.thread_id.as_deref() != previous_thread {
+            return Err("This conversation changed while its tools were being refreshed. Its saved history was not replaced; retry the message.".into());
+        }
+        let replacing = self.thread_id.as_deref().is_some_and(|existing| existing != thread_id);
+        if replacing && version <= self.tool_catalog_version {
+            return Err("This conversation already has a different Codex thread with current tools. Its saved history was not replaced.".into());
+        }
+        self.thread_id = Some(thread_id.to_owned());
+        self.tool_catalog_version = self.tool_catalog_version.max(version);
+        Ok(())
+    }
+}
+
 /// A native thread to resume, plus readable history still awaiting import.
 pub struct CodexConversation {
     pub thread_id: Option<String>,
+    pub tool_catalog_version: u32,
     pub legacy_context: Option<String>,
     pub continuation: Option<String>,
 }
@@ -329,6 +349,7 @@ pub async fn initialize_codex(
     let threads = CodexThreads {
         accounts: BTreeMap::from([(account, CodexThread {
             thread_id: None,
+            tool_catalog_version: 0,
             migration_pending: false,
             continuation: None,
         })]),
@@ -354,6 +375,7 @@ pub async fn load_codex(
     if thread.is_some_and(|thread| !thread.migration_pending) {
         return Ok(CodexConversation {
             thread_id: thread.and_then(|thread| thread.thread_id.clone()),
+            tool_catalog_version: thread.map_or(0, |thread| thread.tool_catalog_version),
             legacy_context: None,
             continuation: thread.and_then(|thread| thread.continuation.clone()),
         });
@@ -371,6 +393,7 @@ pub async fn load_codex(
     let legacy_context = migration_context(&store, session_id, &owners).await?;
     Ok(CodexConversation {
         thread_id: thread.and_then(|thread| thread.thread_id.clone()),
+        tool_catalog_version: thread.map_or(0, |thread| thread.tool_catalog_version),
         legacy_context,
         continuation: thread.and_then(|thread| thread.continuation.clone()),
     })
@@ -384,6 +407,8 @@ pub async fn save_codex_thread(
     session_id: &str,
     account: &str,
     thread_id: &str,
+    previous_thread: Option<&str>,
+    tool_catalog_version: u32,
 ) -> Result<(), String> {
     if thread_id.trim().is_empty() {
         return Err("Codex returned an empty conversation ID.".into());
@@ -399,14 +424,12 @@ pub async fn save_codex_thread(
         std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::btree_map::Entry::Vacant(entry) => entry.insert(CodexThread {
             thread_id: None,
+            tool_catalog_version: 0,
             migration_pending: store.read::<ModelHistory>(&store.session_file(session_id, ".model")?).await?.is_some(),
             continuation: None,
         }),
     };
-    if entry.thread_id.as_deref().is_some_and(|existing| existing != thread_id) {
-        return Err("This conversation already has a different Codex thread. Its history has not been replaced; start a new conversation instead.".into());
-    }
-    entry.thread_id = Some(thread_id.to_owned());
+    entry.save_native_thread(thread_id, previous_thread, tool_catalog_version)?;
     store.write(&path, &threads).await
 }
 
@@ -430,6 +453,7 @@ pub async fn save_codex_continuation(
         std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::btree_map::Entry::Vacant(entry) => entry.insert(CodexThread {
             thread_id: None,
+            tool_catalog_version: 0,
             migration_pending: store.read::<ModelHistory>(&store.session_file(session_id, ".model")?).await?.is_some(),
             continuation: None,
         }),
@@ -751,15 +775,47 @@ mod tests {
     }
 
     #[test]
+    fn old_native_catalogs_migrate_once_without_dropping_pending_history() {
+        let mut thread: CodexThread = serde_json::from_value(serde_json::json!({
+            "thread_id":"old-thread", "migration_pending":true,
+            "continuation":"Saved computer turn"
+        })).unwrap();
+        assert_eq!(thread.tool_catalog_version, 0, "pre-version files require a catalog refresh");
+        thread.save_native_thread("updated-thread", Some("old-thread"), 1).unwrap();
+        let mut restored: CodexThread = serde_json::from_slice(&serde_json::to_vec(&thread).unwrap()).unwrap();
+        assert_eq!(restored.tool_catalog_version, 1);
+        assert_eq!(restored.thread_id.as_deref(), Some("updated-thread"));
+        assert!(restored.migration_pending, "pending legacy import is only consumed after a successful turn");
+        assert_eq!(restored.continuation.as_deref(), Some("Saved computer turn"));
+        restored.save_native_thread("updated-thread", Some("updated-thread"), 1).unwrap();
+        assert!(restored.save_native_thread("another-thread", Some("updated-thread"), 1).is_err(),
+            "a current catalog must resume its existing thread");
+    }
+
+    #[test]
+    fn catalog_migration_refuses_a_stale_thread_pointer() {
+        let mut thread: CodexThread = serde_json::from_value(serde_json::json!({
+            "thread_id":"old-thread", "migration_pending":false
+        })).unwrap();
+        thread.save_native_thread("winner-thread", Some("old-thread"), 1).unwrap();
+        assert!(thread.save_native_thread("late-thread", Some("old-thread"), 1).is_err());
+        assert_eq!(thread.thread_id.as_deref(), Some("winner-thread"));
+        assert_eq!(thread.tool_catalog_version, 1);
+        assert!(thread.save_native_thread("unowned-thread", None, 2).is_err());
+    }
+
+    #[test]
     fn native_threads_and_text_continuations_are_account_isolated() {
         let threads = CodexThreads { accounts: BTreeMap::from([
             ("first@example.com".into(), CodexThread {
                 thread_id: Some("durable-thread".into()),
+                tool_catalog_version: 1,
                 migration_pending: false,
                 continuation: Some("Exact ephemeral turn text".into()),
             }),
             ("second@example.com".into(), CodexThread {
                 thread_id: None,
+                tool_catalog_version: 0,
                 migration_pending: true,
                 continuation: Some("Different account".into()),
             }),

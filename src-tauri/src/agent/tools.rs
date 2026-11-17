@@ -13,6 +13,9 @@ const DEFAULT_LIST_LIMIT: u64 = 30;
 const MAX_LIST_LIMIT: u64 = 100;
 const SEARCH_RESULT_LIMIT: usize = 8;
 
+/// Increment when saved native threads need a new dynamic tool catalog.
+pub const CATALOG_VERSION: u32 = 1;
+
 pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
@@ -20,10 +23,17 @@ pub struct ToolSpec {
 }
 /// The agent's tools for one message. Web tools are listed only when the
 /// message was sent with internet access on.
-pub fn catalog(web_access: bool) -> Vec<ToolSpec> {
+pub fn catalog(web_access: bool, read_only: bool) -> Vec<ToolSpec> {
     let mut tools = vec![
         ToolSpec { name: "set_expression", description: "Set the agent face's expressive UI metadata from conversation and task context, not the user's psychological state or task completion. expression is neutral, curious, focused, uncertain, pleased or concerned; sentiment is a number from -1 to 1; intensity is a number from 0 to 1. Use at the start and meaningful shifts alongside useful work, never repetitive animation calls.", parameters: json!({"type":"object","properties":{"expression":{"type":"string","enum":["neutral","curious","focused","uncertain","pleased","concerned"]},"sentiment":{"type":"number"},"intensity":{"type":"number"}},"required":["expression","sentiment","intensity"],"additionalProperties":false}) },
         ToolSpec { name: "read_document", description: "Read the current live note, including unsaved typing, and the user's selection. Always call before editing. Short notes come back whole; a long note comes back as an outline with line numbers and its opening, so pass start_line and end_line (1-based, inclusive, up to 400 lines) to read further. Pass null for both to start.", parameters: json!({"type":"object","properties":{"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["start_line","end_line"],"additionalProperties":false}) },
+        ToolSpec { name: "offer_writing_help", description: "Offer one grounded writing interaction without changing the note. Read the live note first. kind rewrite proposes plain-text replacement for quote; question asks one useful question at quote and traces up to three exact passages in argument order; evidence returns source detail for a claim, using only URLs successfully opened by research in this run; move previews moving the entire quoted top-level paragraph immediately BEFORE the entire earlier destination paragraph. quote, destination and trace must copy exact visible plain text from the note (not markdown syntax). explanation is brief. Use null for irrelevant replacement/question/destination; trace and sources are empty when unused. The user can review, edit, accept or dismiss. An offer is not an applied edit. Do not repeat the offer in chat.", parameters: json!({"type":"object","properties":{
+            "kind":{"type":"string","enum":["rewrite","question","evidence","move"]},
+            "quote":{"type":"string"},"explanation":{"type":"string"},
+            "replacement":{"type":["string","null"]},"question":{"type":["string","null"]},"destination":{"type":["string","null"]},
+            "trace":{"type":"array","maxItems":3,"items":{"type":"string"}},
+            "sources":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"title":{"type":"string"},"url":{"type":"string"},"excerpt":{"type":"string"}},"required":["title","url","excerpt"],"additionalProperties":false}}
+        },"required":["kind","quote","explanation","replacement","question","destination","trace","sources"],"additionalProperties":false}) },
         ToolSpec { name: "edit_document", description: "Apply 1 to 20 precise replacements atomically, in order. Each old_text must be nonempty and match exactly once in the markdown from read_document; include surrounding text to make it unique. Preserve unchanged markdown.", parameters: json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["edits"],"additionalProperties":false}) },
         ToolSpec { name: "replace_selection", description: "Replace the selection captured when the user sent their message.", parameters: json!({"type":"object","properties":{"new_text":{"type":"string"}},"required":["new_text"],"additionalProperties":false}) },
         ToolSpec { name: "ask_user", description: "Ask the user one short clarifying question and wait for the answer. Use it when the request is ambiguous in a way that changes what you would write and the answer isn't in this note or other notes. Give 2 to 4 short options when the choices are discrete, or an empty options array for a free-text answer. For a question with several parts or that needs context alongside it, also pass form: a Scratch UI spec {root, elements, state} with inputs bound to /answers/<key>; otherwise form is null.", parameters: json!({"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"form":{"type":["object","null"]}},"required":["question","options","form"],"additionalProperties":false}) },
@@ -41,7 +51,14 @@ pub fn catalog(web_access: bool) -> Vec<ToolSpec> {
             ToolSpec { name: "offer_skill", description: "Show the user a card offering to save a skill from the web, given the URL of its SKILL.md. research lists the skills published by the sites it consulted. Offer a skill only when it fits what the user is working on, and only once. The user decides on the card; this returns right away.", parameters: json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}) },
         ]);
     }
+    if read_only { tools.retain(|tool| companion_tool(tool.name)); }
     tools
+}
+
+/// Suggestions can offer help and research within the run's internet setting.
+/// They cannot edit, ask blocking questions, or access other notes/apps.
+fn companion_tool(name: &str) -> bool {
+    matches!(name, "read_document" | "set_expression" | "offer_writing_help" | "research")
 }
 pub struct ToolOutput {
     pub ok: bool,
@@ -67,6 +84,9 @@ pub async fn execute(app: &tauri::AppHandle, run_id: &str, name: &str, args: Val
     let Some(ctx) = state.context(run_id) else {
         return ToolOutput::error("This agent run has ended");
     };
+    if ctx.read_only && !companion_tool(name) {
+        return ToolOutput::error("Writing check-ins can only read the current note, research when enabled, and offer a suggestion.");
+    }
     let range = (line_arg(&args, "start_line"), line_arg(&args, "end_line"));
     match name {
         "read_document" => match live_note(app, run_id).await {
@@ -77,7 +97,7 @@ pub async fn execute(app: &tauri::AppHandle, run_id: &str, name: &str, args: Val
             )),
             Err(error) => error,
         },
-        "edit_document" | "replace_selection" => {
+        "edit_document" | "replace_selection" | "offer_writing_help" => {
             state
                 .bridge
                 .execute(app, run_id, name, args, Some(EDITOR_TOOL_TIMEOUT))
@@ -421,7 +441,23 @@ async fn is_run_folder(configured: Option<String>, run_root: &std::path::Path) -
 
 #[cfg(test)]
 mod tests {
-    use super::is_run_folder;
+    use super::{catalog, companion_tool, is_run_folder};
+
+    #[test]
+    fn companion_runs_expose_only_current_note_observation() {
+        let regular = catalog(true, false);
+        let offline = catalog(false, true);
+        assert!(!offline.iter().any(|tool| tool.name == "research"));
+        assert!(offline.iter().any(|tool| tool.name == "offer_writing_help"));
+        let companion = catalog(true, true);
+        assert_eq!(companion.iter().map(|tool| tool.name).collect::<Vec<_>>(), ["set_expression", "read_document", "offer_writing_help", "research"]);
+        for tool in regular {
+            assert_eq!(companion_tool(tool.name), matches!(tool.name, "read_document" | "set_expression" | "offer_writing_help" | "research"));
+        }
+        for name in ["edit_document", "replace_selection", "edit_note", "ask_user", "read_notes", "cua_click", "unknown"] {
+            assert!(!companion_tool(name), "{name} must not run during an unsolicited check-in");
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

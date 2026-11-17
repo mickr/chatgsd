@@ -3,15 +3,14 @@ import type { Editor } from "@tiptap/react";
 import type { Transaction } from "@tiptap/pm/state";
 import { agentChangesKey } from "../../components/editor/AgentChanges";
 
-const IDLE_MS = 2000;
-const MIN_CHECK_IN_MS = 10000;
-
 /** Observe local editing, not agent transactions, sync, selection moves or loads. */
 export function useCoeditingObserver(
   editor: Editor | null,
   enabled: boolean,
   busy: boolean,
   onCheckIn: () => void,
+  idleMs = 2000,
+  minCheckInMs = 10000,
 ): void {
   const latest = useRef({ enabled, busy, onCheckIn });
   latest.current = { enabled, busy, onCheckIn };
@@ -35,7 +34,7 @@ export function useCoeditingObserver(
         return;
       }
       if (!dirty || latest.current.busy) return;
-      const delay = Math.max(0, editedAt + IDLE_MS - Date.now(), checkedAt + MIN_CHECK_IN_MS - Date.now());
+      const delay = Math.max(0, editedAt + idleMs - Date.now(), checkedAt + minCheckInMs - Date.now());
       timer = setTimeout(() => {
         if (!latest.current.enabled || editor.isDestroyed || session !== editor.storage.scratchDocument.session) {
           dirty = false;
@@ -75,7 +74,7 @@ export function useCoeditingObserver(
       reschedule.current = null;
       editor.off("transaction", changed);
     };
-  }, [editor]);
+  }, [editor, idleMs, minCheckInMs]);
 
   useEffect(() => { reschedule.current?.(); }, [enabled, busy]);
 }
