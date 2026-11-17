@@ -25,6 +25,7 @@ import {
   check as checkForUpdate,
   type Update,
 } from "@tauri-apps/plugin-updater";
+import { useUpdateMenu } from "./lib/useUpdateMenu";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isMac, isWindows } from "./lib/platform";
 
@@ -501,15 +502,6 @@ async function showUpdateToast(): Promise<"update" | "no-update" | "error"> {
     }
     return "no-update";
   } catch (err) {
-    // Network errors and 404s (no release published yet) are not real failures
-    const msg = String(err);
-    if (
-      msg.includes("404") ||
-      msg.includes("network") ||
-      msg.includes("Could not fetch")
-    ) {
-      return "no-update";
-    }
     console.error("Update check failed:", err);
     return "error";
   }
@@ -565,6 +557,7 @@ function UpdateToast({
 
 function App() {
   const { isPreview, previewFile } = useMemo(getWindowMode, []);
+  useUpdateMenu(showUpdateToast);
 
   // Cmd/Ctrl+W — close window (works in both preview and folder mode)
   useEffect(() => {

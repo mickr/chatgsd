@@ -19,6 +19,7 @@ use tokio::io::AsyncWriteExt;
 mod git;
 mod agent;
 mod legacy_data;
+mod menu;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3191,6 +3192,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .menu(menu::build)
+        .on_menu_event(menu::handle_event)
         .setup(|app| {
             // Before anything reads app data: bring over what the app saved as
             // Scratch, under its old bundle ID. A failed copy stops startup:

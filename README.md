@@ -51,6 +51,11 @@ That installs or updates ChatGSD and opens it. Or download it yourself:
 2. Open the DMG and drag ChatGSD to Applications
 3. Open ChatGSD from Applications. It updates itself from then on
 
+Choose **ChatGSD → Check for Updates…** in the macOS menu bar to check manually,
+including from a standalone note window. The result offers an available update,
+confirms you're up to date, or reports that the check failed. Only the active
+window checks and shows the result.
+
 ### From Source
 
 **Prerequisites:** Node.js 18+, Rust 1.70+
