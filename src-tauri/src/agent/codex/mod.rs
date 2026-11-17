@@ -94,7 +94,14 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
     conversations::begin(app, &ctx.notes_folder, &ctx.note_id, &session_id, user_prompt).await.map_err(other)?;
     if fresh { conversations::initialize_codex(app, &ctx.notes_folder, &session_id, &account).await.map_err(other)?; }
     let saved = conversations::load_codex(app, &ctx.notes_folder, &session_id, &account, None).await.map_err(other)?;
-    if ctx.computer_access { *computer = Some(ComputerSession::start(&app.config().identifier).await.map_err(other)?); }
+    if ctx.computer_access {
+        match ComputerSession::start(&app.config().identifier).await {
+            Ok(session) => *computer = Some(session),
+            Err(issue) => events::emit(app, &ctx.run_id, AgentEvent::ComputerUnavailable {
+                message: issue.message, permissions: issue.permissions,
+            }),
+        }
+    }
     events::emit(app, &ctx.run_id, AgentEvent::Session { session_id: session_id.clone() });
     native_skills(app, &mut server).await.map_err(other)?;
     let mut functions: Vec<_> = tools::catalog(true).into_iter().map(|tool| dynamic_tool(tool.name, tool.description, tool.parameters)).collect();
@@ -102,7 +109,7 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
         functions.extend(computer.tools().into_iter().map(|tool| dynamic_tool(tool["name"].as_str().unwrap_or_default(), tool["description"].as_str().unwrap_or_default(), tool["parameters"].clone())));
     }
     let permitted: HashSet<String> = functions.iter().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect();
-    let instructions = prompt::instructions(ctx, &skills::enabled(app).await);
+    let instructions = prompt::instructions(ctx, &skills::enabled(app).await, computer.is_some());
     let mut params = json!({"cwd":server.cwd,"model":model,"sandbox":"read-only","approvalPolicy":"on-request","baseInstructions":instructions});
     let mut historical = String::new();
     if ctx.computer_access {

@@ -1,3 +1,6 @@
+use super::computer_permissions::ComputerUnavailable;
+#[cfg(any(target_os = "macos", test))]
+use super::computer_permissions::ComputerPermission;
 use serde_json::{json, Value};
 use std::{path::PathBuf, process::Stdio, time::Duration};
 use tokio::{
@@ -36,7 +39,7 @@ pub struct ComputerSession {
 }
 
 impl ComputerSession {
-    pub async fn start(host_bundle_id: &str) -> Result<Self, String> {
+    pub async fn start(host_bundle_id: &str) -> Result<Self, ComputerUnavailable> {
         let controller = CONTROLLER.try_lock()
             .map_err(|_| "Another ChatGSD agent is using the computer. Stop that run first.")?;
         let binary = resolve_binary()?;
@@ -96,11 +99,7 @@ impl ComputerSession {
         {
             let result = session.rpc("tools/call", json!({"name":"check_permissions","arguments":{}})).await?;
             let permissions = structured(&result);
-            if permissions.get("accessibility").and_then(Value::as_bool) != Some(true)
-                || permissions.get("screen_recording").and_then(Value::as_bool) != Some(true)
-            {
-                return Err("Cua needs ChatGSD's Accessibility and Screen Recording permissions. Use Set up Cua permissions, then fully quit and reopen ChatGSD.".into());
-            }
+            check_permissions(&permissions)?;
         }
         let mut cursor: Option<String> = None;
         loop {
@@ -268,6 +267,25 @@ fn structured(result: &Value) -> Value {
         .find_map(|text| serde_json::from_str(text).ok()).unwrap_or(Value::Null)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn check_permissions(permissions: &Value) -> Result<(), ComputerUnavailable> {
+    let missing: Vec<_> = [
+        ("accessibility", ComputerPermission::Accessibility),
+        ("screen_recording", ComputerPermission::ScreenRecording),
+    ].into_iter().filter_map(|(key, permission)| {
+        (permissions.get(key).and_then(Value::as_bool) != Some(true)).then_some(permission)
+    }).collect();
+    if missing.is_empty() { return Ok(()); }
+    let names = missing.iter().map(|permission| match permission {
+        ComputerPermission::Accessibility => "Accessibility",
+        ComputerPermission::ScreenRecording => "Screen Recording",
+    }).collect::<Vec<_>>().join(" and ");
+    Err(ComputerUnavailable {
+        message: format!("To interact with other apps, enable {names} for ChatGSD in System Settings. If macOS asks you to quit and reopen ChatGSD, do so to apply the change."),
+        permissions: missing,
+    })
+}
+
 fn narrow_schema(schema: &mut Value) {
     match schema {
         Value::Object(object) => {
@@ -336,6 +354,20 @@ fn validate_arguments(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_recovery_targets_only_missing_grants() {
+        assert!(check_permissions(&json!({"accessibility":true,"screen_recording":true})).is_ok());
+        let issue = check_permissions(&json!({"accessibility":true,"screen_recording":false})).unwrap_err();
+        assert_eq!(issue.permissions, vec![ComputerPermission::ScreenRecording]);
+        assert!(issue.message.contains("Screen Recording"));
+        assert!(!issue.message.contains("Accessibility"));
+        let issue = check_permissions(&json!({"accessibility":false,"screen_recording":true})).unwrap_err();
+        assert_eq!(issue.permissions, vec![ComputerPermission::Accessibility]);
+        // An incomplete driver response must never grant computer access.
+        let issue = check_permissions(&Value::Null).unwrap_err();
+        assert_eq!(issue.permissions, vec![ComputerPermission::Accessibility, ComputerPermission::ScreenRecording]);
+    }
 
     #[test]
     fn resolves_bundled_driver_and_honors_explicit_override() {

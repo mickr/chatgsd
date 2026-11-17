@@ -44,7 +44,10 @@ export interface AgentExpression {
   sentiment: number;
   intensity: number;
 }
+export type ComputerPermission = "accessibility" | "screen_recording";
+export interface ComputerUnavailable { message: string; permissions: ComputerPermission[] }
 export type AgentEvent =
+  | ({ type: "computer_unavailable" } & ComputerUnavailable)
   | { type: "session"; sessionId: string }
   | { type: "text_delta"; text: string }
   | ({ type: "expression" } & AgentExpression)
@@ -113,8 +116,8 @@ export const classifyInlineContext = (context: InlineContext) =>
   invoke<InlineDecision>("agent_classify_inline", { context });
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
-export const setupComputerPermissions = () =>
-  invoke<string>("agent_computer_permissions");
+export const setupComputerPermissions = (permission: ComputerPermission) =>
+  invoke<string>("agent_computer_permissions", { permission });
 export const listModels = () => invoke<ModelInfo[]>("agent_list_models");
 export const startRun = (request: StartRunRequest) =>
   invoke<{ runId: string }>("agent_start_run", { request });

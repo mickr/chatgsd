@@ -138,6 +138,30 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+it("keeps chat and document tools running after computer startup fails, then clears the notice on the next turn", async () => {
+  act(() => current.toggle());
+  await settle();
+  await act(async () => { await current.send("Hello"); });
+  act(() => mocks.eventHandler?.({ runId: "run-1", event: {
+    type: "computer_unavailable", message: "Enable Screen Recording.", permissions: ["screen_recording"],
+  } }));
+  expect(current.conversation.runId).toBe("run-1");
+  expect(current.conversation.error).toBeNull();
+  expect(current.conversation.computerUnavailable?.permissions).toEqual(["screen_recording"]);
+  vi.mocked(executeDocumentTool).mockResolvedValue({ ok: true, output: "Live note" });
+  await act(async () => { await mocks.toolHandler?.({ requestId: "read-1", runId: "run-1", name: "read_document", args: {} }); });
+  expect(agent.toolRespond).toHaveBeenCalledWith("read-1", true, "Live note");
+  act(() => {
+    mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text: "Hello!" } });
+    mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+  });
+  expect(current.conversation.items.some(item => item.type === "text" && item.text === "Hello!")).toBe(true);
+  expect(current.conversation.error).toBeNull();
+  expect(current.coediting).toBe(true);
+  await act(async () => { await current.send("Keep editing"); });
+  expect(current.conversation.computerUnavailable).toBeUndefined();
+});
+
 it.each(["toggle", "close"] as const)("returns focus to the note through %s without moving its cursor", async (action) => {
   const note = editor.view.dom.parentElement!;
   const composer = document.createElement("textarea");

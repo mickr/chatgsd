@@ -83,6 +83,26 @@ function nextFrame() {
   act(() => vi.advanceTimersByTime(20));
 }
 
+it("shows computer setup as a notice while leaving chat available", () => {
+  state.agent.conversation = {
+    items: [], runId: null,
+    computerUnavailable: { message: "Enable Screen Recording.", permissions: ["screen_recording"] },
+  };
+  act(() => root.render(<Workspace />));
+  expect(container.textContent).toContain("Computer access unavailable");
+  expect(container.textContent).toContain("Chat and note editing are still available.");
+  expect(container.textContent).not.toContain("Check account again");
+  expect(container.querySelector("textarea")!.disabled).toBe(false);
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+it("does not suggest account recovery for unrelated errors", () => {
+  state.agent.conversation = { items: [], runId: null, error: { kind: "other", message: "Connection interrupted" } };
+  act(() => root.render(<Workspace />));
+  expect(container.textContent).toContain("Send another message to try again.");
+  expect(container.textContent).not.toContain("Check account again");
+});
+
 it.each(["metaKey", "ctrlKey"] as const)("opens from the editor with %s and focuses chat without changing the note", (modifier) => {
   act(() => {
     editor.view.focus();

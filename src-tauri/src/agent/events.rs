@@ -13,6 +13,10 @@ pub enum AgentEvent {
     Session {
         session_id: String,
     },
+    ComputerUnavailable {
+        message: String,
+        permissions: Vec<super::computer_permissions::ComputerPermission>,
+    },
     TextDelta {
         text: String,
     },

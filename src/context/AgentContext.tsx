@@ -102,6 +102,7 @@ export interface Conversation {
   context: agent.RunContext | null;
   error: { kind: agent.AgentErrorKind; message: string } | null;
   cancelled: boolean;
+  computerUnavailable?: agent.ComputerUnavailable;
   /** Ephemeral model-authored presentation; never part of the saved transcript. */
   expression?: agent.AgentExpression;
 }
@@ -458,6 +459,8 @@ export function AgentProvider({
       }
       if (event.type === "tool_call" && event.name === "set_expression") return;
       updateConversation(run.noteId, (conversation) => {
+        if (event.type === "computer_unavailable")
+          return { ...conversation, computerUnavailable: { message: event.message, permissions: event.permissions } };
         if (event.type === "session")
           return { ...conversation, sessionId: event.sessionId };
         if (event.type === "text_delta") {
@@ -682,6 +685,7 @@ export function AgentProvider({
         context,
         runId: temporaryId,
         error: null,
+        computerUnavailable: undefined,
         cancelled: false,
         expression: undefined,
         items: [

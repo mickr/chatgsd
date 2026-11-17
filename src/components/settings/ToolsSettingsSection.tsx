@@ -5,10 +5,11 @@ import { Button, Select } from "../ui";
 import { SpinnerIcon, ChatGPTIcon } from "../icons";
 import { useAgent } from "../../context/AgentContext";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "../agent/ChatGPTAccount";
+import { ComputerPermissions } from "../agent/ComputerPermissions";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
-import { errorMessage, researchBriefDefault, setupComputerPermissions } from "../../services/agent";
+import { errorMessage, researchBriefDefault } from "../../services/agent";
 
 type CliState = {
   status: CliStatus | null;
@@ -169,7 +170,6 @@ function InternetAccessSettings() {
 export function ToolsSettingsSection() {
   const [cli, dispatchCli] = useReducer(cliReducer, cliInitialState);
   const agent = useAgent();
-  const [computerSetup, setComputerSetup] = useState<string | null>(null);
 
   useEffect(() => {
     cliService
@@ -257,19 +257,7 @@ export function ToolsSettingsSection() {
             During active coediting, a pause in your typing can start a check-in using your ChatGPT plan.
             Pause in the agent panel stops check-ins and computer access.
           </p>
-          <Button
-            variant="outline"
-            size="md"
-            onClick={() => {
-              void setupComputerPermissions().then(
-                setComputerSetup,
-                (error) => setComputerSetup(errorMessage(error)),
-              );
-            }}
-          >
-            Set up Cua permissions
-          </Button>
-          {computerSetup && <p role="status" className="text-xs text-text-muted">{computerSetup}</p>}
+          <ComputerPermissions />
         </div>
         <InternetAccessSettings />
       </section>

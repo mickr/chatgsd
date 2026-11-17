@@ -46,6 +46,7 @@ import { AgentMessage } from "./AgentMessage";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "./ChatGPTAccount";
 import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
 import { OpenNoteContext } from "./ui/registry";
+import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 function ResizeHandle() {
   const { width, setWidth } = useAgent();
@@ -471,6 +472,15 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               Paused. Edits already made are saved; use Undo in the note to undo an editor change.
             </p>
           )}
+          {conversation.computerUnavailable && (
+            <section role="status" className="agent-panel-error">
+              <h3 className="text-sm font-medium">Computer access unavailable</h3>
+              <p className="text-xs text-text-muted leading-relaxed">
+                Chat and note editing are still available. {conversation.computerUnavailable.message}
+              </p>
+              <ComputerPermissions permissions={conversation.computerUnavailable.permissions} />
+            </section>
+          )}
           {conversation.error && (
             <section role="alert" className="agent-panel-error">
               <div className="flex items-center gap-2 text-xs font-medium">
@@ -494,16 +504,12 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                 <ManageUsage primary />
               ) : conversation.error.kind === "auth" ? (
                 <ContinueWithChatGPT />
-              ) : (
-                <button
-                  type="button"
-                  className="agent-panel-link"
-                  onClick={() => {
-                    void agent.refreshStatus();
-                  }}
-                >
+              ) : conversation.error.kind === "not_eligible" ? (
+                <button type="button" className="agent-panel-link" onClick={() => { void agent.refreshStatus(); }}>
                   Check account again
                 </button>
+              ) : (
+                <p className="text-xs text-text-muted">Send another message to try again.</p>
               )}
             </section>
           )}
