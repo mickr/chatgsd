@@ -6,6 +6,7 @@ import { useAgent, type QuestionAnswer } from "../../context/AgentContext";
 import { attachedRange } from "../editor/AgentChanges";
 import { classifyInline, intentGuidance, intentSuggestions } from "../../lib/agent/inlineDecision";
 import type { InlineDecision, InlineIntent } from "../../services/agent";
+import { alt, mod, shortcut } from "../../lib/platform";
 import { ArrowUpIcon, XIcon } from "../icons";
 import { inlineActivity, inlineTurnPreview } from "./InlineAgentActivity";
 import { InlineAgentFace } from "./InlineAgentFace";
@@ -34,15 +35,15 @@ export function inlineAgentPrompt(editor: Editor, instruction: string, intent?: 
   ].join("\n\n");
 }
 
-type Presentation = "closed" | "composer" | "docked" | "turns";
+type Presentation = "closed" | "docked" | "turns";
 
 /* ANIMATION STORYBOARD
- *   0ms  send: the composer becomes a face and status capsule
- * 440ms  capsule settles at the bottom center of the editor
- * click  turns unfold above the capsule; Escape folds them away
+ * click  the launcher opens the conversation above the companion
+ * send   the conversation stays open while the agent works
+ * Escape folds the conversation away; close restores the launcher
  * Reduced motion skips travel and all repeating face animations.
  */
-const LAYOUT = { composerWidth: 400, dockWidth: 360, turnsWidth: 440, dockHeight: 68, edge: 16, bottom: 24 };
+const LAYOUT = { launcherWidth: 176, dockWidth: 360, turnsWidth: 440, dockHeight: 68, edge: 16, bottom: 24 };
 
 export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
   const agent = useAgent();
@@ -63,7 +64,6 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
   const target = useRef<{ from: number; to: number } | null>(null);
   const turnsId = useId();
   const open = presentation !== "closed";
-  const docked = presentation === "docked" || presentation === "turns";
   const expanded = presentation === "turns";
   const running = agent.conversation.runId !== null;
   const waiting = !!agent.pendingQuestion;
@@ -72,8 +72,9 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
   const activity = inlineActivity(agent.conversation, waiting, sending, !!sendError);
   const preview = inlineTurnPreview(agent.conversation.items);
   const turnText = sendError ?? agent.conversation.error?.message ?? agent.pendingQuestion?.question ??
-    (preview.text || draft || "Starting your request");
-  const turnDetail = `Turn ${Math.max(1, preview.turn)} · ${activity.label}`;
+    (preview.text || draft || "Ask about this note");
+  const turnDetail = preview.turn || running || sending || waiting || sendError || agent.conversation.error
+    ? `Turn ${Math.max(1, preview.turn)} · ${activity.label}` : "Ready when you are";
   const { refreshStatus } = agent;
   useEffect(() => {
     if (open) void refreshStatus();
@@ -113,8 +114,20 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
     submitting.current = false;
     setSending(false);
     setPresentation("closed");
-    target.current = null;
     if (restoreFocus) editor?.commands.focus(undefined, { scrollIntoView: false });
+  }, [editor]);
+
+  const showConversation = useCallback((captureSelection: boolean) => {
+    if (!editor) return;
+    requestVersion.current++;
+    submitting.current = false;
+    setSending(false);
+    setInvocation((value) => value + 1);
+    if (captureSelection || !target.current) {
+      const range = attachedRange(editor) ?? editor.state.selection;
+      target.current = { from: range.from, to: range.to };
+    }
+    setPresentation("turns");
   }, [editor]);
 
   useEffect(() => {
@@ -126,47 +139,34 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
       if (!inEditor && !popup.current?.contains(document.activeElement)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (inEditor) {
-        requestVersion.current++;
-        submitting.current = false;
-        setSending(false);
-        setInvocation((value) => value + 1);
-        const range = attachedRange(editor) ?? editor.state.selection;
-        target.current = { from: range.from, to: range.to };
-        setSendError(null);
-        setPresentation("composer");
-      } else input.current?.focus();
+      if (inEditor || !open) showConversation(inEditor);
+      else {
+        setPresentation("turns");
+        input.current?.focus();
+      }
     };
     window.addEventListener("keydown", keydown, true);
     return () => window.removeEventListener("keydown", keydown, true);
-  }, [editor]);
+  }, [editor, open, showConversation]);
 
   useLayoutEffect(() => {
-    if (!open || !editor || !popup.current) return;
+    if (!editor || !popup.current) return;
     const position = () => {
       const element = popup.current;
       if (!element || editor.isDestroyed) return;
       const zoom = Number.parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
       const viewportWidth = window.innerWidth / zoom;
       const viewportHeight = window.innerHeight / zoom;
-      const width = Math.min(docked ? LAYOUT.dockWidth : LAYOUT.composerWidth, viewportWidth - LAYOUT.edge * 2);
+      const width = Math.min(open ? LAYOUT.dockWidth : LAYOUT.launcherWidth, viewportWidth - LAYOUT.edge * 2);
       element.style.width = `${width}px`;
-      if (docked) {
-        const bounds = editor.view.dom.getBoundingClientRect();
-        const panelWidth = Math.min(LAYOUT.turnsWidth, viewportWidth - LAYOUT.edge * 2);
-        const halfWidth = (expanded ? panelWidth : width) / 2;
-        const center = Math.max(halfWidth + LAYOUT.edge, Math.min((bounds.left + bounds.right) / (2 * zoom), viewportWidth - halfWidth - LAYOUT.edge));
-        element.style.left = `${center - width / 2}px`;
-        element.style.top = `${Math.max(LAYOUT.edge, viewportHeight - LAYOUT.bottom - LAYOUT.dockHeight)}px`;
-        element.style.setProperty("--inline-turns-width", `${panelWidth}px`);
-        element.style.setProperty("--inline-turns-height", `${Math.max(120, viewportHeight - LAYOUT.bottom - LAYOUT.dockHeight - LAYOUT.edge * 2)}px`);
-      } else {
-        const range = target.current ?? editor.state.selection;
-        const anchor = editor.view.coordsAtPos(range.to);
-        const height = element.getBoundingClientRect().height / zoom;
-        element.style.left = `${Math.max(LAYOUT.edge, Math.min(anchor.left / zoom, viewportWidth - width - LAYOUT.edge))}px`;
-        element.style.top = `${Math.max(LAYOUT.edge, Math.min(anchor.bottom / zoom + 8, viewportHeight - height - LAYOUT.edge))}px`;
-      }
+      const bounds = editor.view.dom.getBoundingClientRect();
+      const panelWidth = Math.min(LAYOUT.turnsWidth, viewportWidth - LAYOUT.edge * 2);
+      const halfWidth = (expanded ? panelWidth : width) / 2;
+      const center = Math.max(halfWidth + LAYOUT.edge, Math.min((bounds.left + bounds.right) / (2 * zoom), viewportWidth - halfWidth - LAYOUT.edge));
+      element.style.left = `${center - width / 2}px`;
+      element.style.top = `${Math.max(LAYOUT.edge, viewportHeight - LAYOUT.bottom - LAYOUT.dockHeight)}px`;
+      element.style.setProperty("--inline-turns-width", `${panelWidth}px`);
+      element.style.setProperty("--inline-turns-height", `${Math.max(120, viewportHeight - LAYOUT.bottom - LAYOUT.dockHeight - LAYOUT.edge * 2)}px`);
     };
     const update = ({ transaction }: { transaction: Transaction }) => {
       const range = target.current;
@@ -179,7 +179,6 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
       position();
     };
     position();
-    if (presentation !== "docked") input.current?.focus({ preventScroll: true });
     const observer = new ResizeObserver(position);
     observer.observe(popup.current);
     observer.observe(editor.view.dom);
@@ -192,18 +191,11 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
       window.removeEventListener("scroll", position, true);
       editor.off("transaction", update);
     };
-  }, [open, presentation, docked, expanded, editor]);
+  }, [open, expanded, editor]);
 
-  useEffect(() => {
-    if (!open) return;
-    const outside = (event: PointerEvent) => {
-      if (!(event.target instanceof Node) || popup.current?.contains(event.target)) return;
-      if (presentation === "composer") dismiss(false);
-      else if (expanded) setPresentation("docked");
-    };
-    document.addEventListener("pointerdown", outside, true);
-    return () => document.removeEventListener("pointerdown", outside, true);
-  }, [open, presentation, expanded, dismiss]);
+  useLayoutEffect(() => {
+    if (expanded) input.current?.focus({ preventScroll: true });
+  }, [expanded, invocation]);
 
   const answer = useCallback((value: QuestionAnswer) => {
     setSendError(null);
@@ -224,7 +216,6 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
     setClassifying(false);
     setClassificationError(null);
     setSendError(null);
-    setPresentation("docked");
     try {
       const classified = await classifyInline(editor, target.current ?? editor.state.selection, draft, agent.conversation.items);
       if (editor.isDestroyed || editor.storage.scratchDocument.session !== session || requestVersion.current !== version) return;
@@ -232,11 +223,12 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
       const range = target.current ?? editor.state.selection;
       editor.commands.setTextSelection({ from: range.from, to: range.to });
       const started = agent.send(inlineAgentPrompt(editor, draft, classified.intent), false);
-      editor.commands.focus(undefined, { scrollIntoView: false });
       const sent = await started;
+      // Closing only hides a request that has already reached the shared agent.
+      if (sent && !editor.isDestroyed && editor.storage.scratchDocument.session === session)
+        setDraft((current) => current === draft ? "" : current);
       if (requestVersion.current !== version) return;
-      if (sent) setDraft("");
-      else {
+      if (!sent) {
         setSendError("Couldn't send your message. It's still here; try again or continue in the sidebar.");
         setPresentation((current) => current === "closed" ? current : "turns");
       }
@@ -252,7 +244,7 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
     }
   };
 
-  if (!open || !editor) return null;
+  if (!editor) return null;
   const composer = (
     <div className="inline-agent-composer">
       {!waiting && !draft && decision && <div className="inline-agent-suggestions" aria-label="Suggested requests">
@@ -262,8 +254,8 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
       </div>}
       <div className="agent-panel-input-wrap">
         <textarea ref={input} rows={2} aria-label="Message inline agent"
-          placeholder={waiting ? "Your answer…" : docked ? "Continue the conversation…" : "Ask a question or request a change…"}
-          value={draft} disabled={sending} onChange={(event) => setDraft(event.target.value)}
+          placeholder={waiting ? "Your answer…" : preview.turn ? "Continue the conversation…" : "Ask a question or request a change…"}
+          value={draft} readOnly={sending} aria-busy={sending} onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -297,28 +289,26 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
         if (expanded) {
           setPresentation("docked");
           dockButton.current?.focus({ preventScroll: true });
-        } else if (!docked) dismiss(true);
-        else editor.commands.focus(undefined, { scrollIntoView: false });
+        } else if (open) dismiss(true);
       }}>
-      {!docked && <div className="inline-agent-card" role="dialog" aria-label="Inline agent">
-        <div className="inline-agent-heading">
-          <span>Ask agent</span>
-          <button type="button" aria-label="Close inline agent" onClick={() => dismiss(true)}><XIcon className="w-3.5 h-3.5" /></button>
-        </div>
-        {composer}
-      </div>}
+      {!open && <button type="button" className="inline-agent-launcher" aria-label="Open inline agent"
+        title={`Open inline agent (${shortcut(mod, alt, "Enter")})`} aria-expanded={false}
+        onClick={() => showConversation(false)}>
+        <InlineAgentFace state={activity.state} expression={agent.conversation.expression} />
+        <span><span>Ask agent</span><span>{running || waiting || sendError || agent.conversation.error ? activity.label : shortcut(mod, alt, "Enter")}</span></span>
+      </button>}
       {expanded && <div id={turnsId} className="inline-agent-history" role="dialog" aria-label="Inline conversation">
         <div className="inline-agent-heading">
-          <span>Conversation</span>
+          <span>Agent</span>
           <button type="button" aria-label="Collapse conversation turns" onClick={() => {
             setPresentation("docked");
             dockButton.current?.focus({ preventScroll: true });
-          }}><XIcon className="w-3.5 h-3.5" /></button>
+          }}><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 8h8" stroke="currentColor" strokeWidth="1.5" /></svg></button>
         </div>
         <InlineAgentTurns onAnswer={answer} />
         {composer}
       </div>}
-      {docked && <div className="inline-agent-dock" data-state={activity.state}>
+      {open && <div className="inline-agent-dock" data-state={activity.state}>
         <button ref={dockButton} type="button" className="inline-agent-dock-toggle"
           aria-label={`${turnText}. ${turnDetail}. ${expanded ? "Hide" : "Show"} conversation turns`}
           aria-expanded={expanded} aria-controls={expanded ? turnsId : undefined}
@@ -333,18 +323,18 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
           onClick={() => { dismiss(false); onContinue(); }}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h9M7 4l4 4-4 4M14 3v10" /></svg>
         </button>}
-        {(running || sending || agent.coediting)
-          ? <button type="button" className="inline-agent-dock-action" aria-label="Pause agent" title="Pause agent" onClick={() => {
-              requestVersion.current++;
-              submitting.current = false;
-              setSending(false);
-              void agent.stop();
-            }}>
-              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 4v8M11 4v8" /></svg>
-            </button>
-          : <button type="button" className="inline-agent-dock-action" aria-label="Dismiss inline activity" title="Dismiss inline activity" onClick={() => dismiss(true)}>
-              <XIcon className="w-3.5 h-3.5" />
-            </button>}
+        {(running || sending || agent.coediting) &&
+          <button type="button" className="inline-agent-dock-action" aria-label="Pause agent" title="Pause agent" onClick={() => {
+            requestVersion.current++;
+            submitting.current = false;
+            setSending(false);
+            void agent.stop();
+          }}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 4v8M11 4v8" /></svg>
+          </button>}
+        <button type="button" className="inline-agent-dock-action" aria-label="Close inline agent" title="Close inline agent" onClick={() => dismiss(true)}>
+          <XIcon className="w-3.5 h-3.5" />
+        </button>
       </div>}
     </div>, document.body,
   );

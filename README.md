@@ -124,11 +124,13 @@ Keyboard focus only crosses between the note and the sidebar when you move it:
 `Cmd+Option+←` returns to the note where you left your cursor. Account checks,
 coediting check-ins, and agent edits never move focus.
 
-In the formatted editor, `Cmd+Option+Enter` opens the inline agent at the selection
-or cursor without opening the sidebar. Ask questions, discuss ideas, research,
-or request edits. Enter sends; Shift+Enter adds a newline; Escape returns to the
-note. Selected text and nearby prose are context, not permission to edit.
-The passage follows document edits for retries and follow-up messages.
+In the formatted editor, **Ask agent** opens a compact agent conversation above
+the companion at the bottom of the editor. `Cmd+Option+Enter` opens it with the
+current selection or cursor as context. Ask questions, discuss ideas, research,
+or request edits. Enter sends; Shift+Enter adds a newline; Escape minimizes the
+conversation. Selected text and nearby prose are context, not permission to edit.
+Closing restores the **Ask agent** trigger. Reopening it keeps the conversation,
+draft, and passage, which follows document edits even while closed.
 
 The inline classifier calls OpenAI's Decisions API (`gpt-6-luna`) directly,
 separately from Codex app-server's coediting turns. It uses the app's refreshed
@@ -144,17 +146,16 @@ classifier reads the entire request. API failures leave the draft available
 for retry rather than silently switching classifiers. Computer access remains
 disabled for inline requests.
 
-After sending, the prompt moves to a small companion at the bottom center of
-the editor. It previews the current turn's latest prose, or your instruction
+The conversation stays open after sending and while you write in the note.
+The companion previews the current turn's latest prose, or your instruction
 until the agent replies with prose. Structured UI specs stay out of the preview.
 The line below shows the turn number and actual
 activity: reading, editing, researching, replying, waiting, done, paused, or an
-error. Click it to see the
-conversation turns, changes, and questions, or send a follow-up. Clicking back
-into the note collapses the conversation without dismissing the companion.
+error. Click it to minimize or restore the
+conversation turns, changes, and questions, or send a follow-up.
 The collapsed companion's right arrow opens the conversation in the sidebar
 without stopping the agent. **Open sidebar** in the expanded view does the same;
-**Pause** stops the session.
+**Pause** stops the session. Closing the interface leaves a running agent working.
 Inline edits use the sidebar's direct editing tools, with computer access
 disabled for the inline request.
 
@@ -236,7 +237,7 @@ ChatGSD is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Option+B`    | Toggle agent panel     |
 | `Cmd+Option+→`    | Focus agent sidebar    |
 | `Cmd+Option+←`    | Focus note             |
-| `Cmd+Option+Enter` | Inline AI edit        |
+| `Cmd+Option+Enter` | Open inline agent     |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |
 | `Cmd+\`           | Toggle sidebar         |

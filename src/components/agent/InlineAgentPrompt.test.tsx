@@ -58,6 +58,86 @@ function composerInput() {
   return document.querySelector("textarea")!;
 }
 
+it("offers a visible trigger before opening without requesting account or model access", () => {
+  expect(document.querySelector('[aria-label="Open inline agent"]')?.textContent).toContain("Ask agent");
+  expect(state.agent.refreshStatus).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Open inline agent"]')!.click());
+  expect(document.querySelector('[aria-label="Inline conversation turns"]')).not.toBeNull();
+  expect(document.activeElement).toBe(composerInput());
+  expect(state.agent.send).not.toHaveBeenCalled();
+});
+
+it("restores the draft and transcript without stopping a running agent", async () => {
+  state.agent.conversation = { runId: "run", error: null, items: [
+    { id: "user", type: "user", text: "Explain this" },
+    { id: "reply", type: "text", text: "Here is the explanation" },
+  ], cancelled: false };
+  open();
+  const input = composerInput();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "A follow-up");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Close inline agent"]')!.click());
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(state.agent.stop).not.toHaveBeenCalled();
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Open inline agent"]')!.click());
+  expect(composerInput().value).toBe("A follow-up");
+  expect(document.querySelector('[role="log"]')?.textContent).toContain("Here is the explanation");
+  expect(document.activeElement).toBe(composerInput());
+  expect(state.agent.send).not.toHaveBeenCalled();
+  await act(async () => {});
+});
+
+it("maps the retained passage while closed and restores it through the trigger", async () => {
+  const selections: Array<string | null> = [];
+  state.agent.send = vi.fn(async () => {
+    const binding = captureRunBinding(editor, "run")!;
+    selections.push(binding.selectionMarkdown);
+    releaseRunBinding(editor, binding);
+    return true;
+  });
+  editor.commands.setTextSelection({ from: 20, to: 26 });
+  open();
+  const submit = async () => {
+    const input = composerInput();
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Explain this passage");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  };
+  await submit();
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Close inline agent"]')!.click());
+  act(() => {
+    editor.commands.insertContentAt({ from: 20, to: 26 }, "Revised");
+    editor.commands.insertContentAt(1, "Earlier ");
+    editor.commands.setTextSelection(1);
+  });
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Open inline agent"]')!.click());
+  await submit();
+  expect(selections).toEqual(["Target", "Revised"]);
+});
+
+it("clears an accepted message if the interface closes while sending", async () => {
+  let accept!: (sent: boolean) => void;
+  state.agent.send = vi.fn(() => new Promise<boolean>((resolve) => { accept = resolve; }));
+  open();
+  const input = composerInput();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Explain this");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  expect(state.agent.send).toHaveBeenCalledOnce();
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Close inline agent"]')!.click());
+  await act(async () => { accept(true); });
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Open inline agent"]')!.click());
+  expect(composerInput().value).toBe("");
+  expect(state.agent.stop).not.toHaveBeenCalled();
+});
+
 it("opens on Cmd+Option+Enter without inserting a newline or losing the target", () => {
   editor.commands.setTextSelection({ from: 20, to: 26 });
   const before = editor.getJSON();
@@ -84,7 +164,7 @@ it("sends surrounding prose with the selected target through the shared agent", 
   expect(prompt).toContain("After paragraph.");
   expect(prompt).toContain("attached selection");
   expect(prompt).toContain("Make it shorter");
-  expect(document.querySelector("textarea")).toBeNull();
+  expect(document.activeElement).toBe(input);
   expect(composerInput().value).toBe("");
 });
 
@@ -174,7 +254,7 @@ it("checks an initially unknown account on inline open and enables sending when 
   expect(state.agent.refreshStatus).toHaveBeenCalledOnce();
 });
 
-it("docks while working, reveals real turns, and keeps activity visible when writing resumes", async () => {
+it("keeps the conversation open while working and writing, with explicit minimize and sidebar controls", async () => {
   const onContinue = vi.fn();
   act(() => root.render(<InlineAgentPrompt onContinue={onContinue} />));
   let conversation: Conversation = { items: [], runId: null, sessionId: null, context: null, error: null, cancelled: false };
@@ -193,7 +273,7 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
   expect(document.querySelector('.inline-agent-dock[data-state="thinking"]')).not.toBeNull();
   expect(document.querySelector(".inline-agent-dock-copy > :first-child")?.textContent).toBe("Make it shorter");
   expect(document.querySelector(".inline-agent-dock-copy")?.textContent).not.toContain("surrounding prose");
-  expect(document.querySelector("textarea")).toBeNull();
+  expect(document.activeElement).toBe(input);
 
   conversation = { ...conversation, items: [...conversation.items,
     { id: "tool", type: "tool", name: "read_document", input: {} }] };
@@ -206,6 +286,8 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
   expect(log.textContent).toContain("Read note");
   expect(log.textContent).not.toContain("Surrounding prose (up to");
   act(() => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+  expect(document.querySelector('[aria-label="Inline conversation turns"]')).toBe(log);
+  act(() => document.querySelector<HTMLButtonElement>('[aria-label="Collapse conversation turns"]')!.click());
   expect(document.querySelector('[aria-label="Inline conversation turns"]')).toBeNull();
   expect(document.querySelector(".inline-agent-dock-toggle")?.getAttribute("aria-expanded")).toBe("false");
   act(() => document.querySelector<HTMLButtonElement>('[aria-label="Pause agent"]')!.click());
@@ -225,7 +307,8 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
   expect(document.activeElement?.getAttribute("aria-expanded")).toBe("false");
   act(() => document.querySelector<HTMLButtonElement>('[aria-label="Open in sidebar"]')!.click());
   expect(onContinue).toHaveBeenCalledOnce();
-  expect(document.querySelector(".inline-agent-prompt")).toBeNull();
+  expect(document.querySelector('[aria-label="Open inline agent"]')).not.toBeNull();
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
   expect(state.agent.stop).toHaveBeenCalledOnce();
 });
 
@@ -246,7 +329,7 @@ it("does not send or change notes when classification fails and keeps the messag
   expect(document.querySelector('[role="alert"]')?.textContent).toContain("Decisions unavailable");
 });
 
-it.each(["Open in sidebar", "Pause agent"])("ignores a pending classification after %s", async (action) => {
+it.each(["Open sidebar", "Pause agent", "Close inline agent"])("ignores a pending classification after %s", async (action) => {
   open();
   await act(async () => {});
   let resolve!: (value: unknown) => void;
@@ -257,7 +340,8 @@ it.each(["Open in sidebar", "Pause agent"])("ignores a pending classification af
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
-  act(() => document.querySelector<HTMLButtonElement>(`[aria-label="${action}"]`)!.click());
+  act(() => [...document.querySelectorAll("button")].find((button) =>
+    button.getAttribute("aria-label") === action || button.textContent === action)!.click());
   await act(async () => { resolve({ intent: "discuss", confidence: 0.9 }); });
   expect(state.agent.send).not.toHaveBeenCalled();
   if (action === "Pause agent") {
