@@ -4,7 +4,7 @@ pub fn agent_computer_permissions() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         macos::request()?;
-        Ok("Allow ChatGSD in System Settings → Privacy & Security → Accessibility and Screen Recording, then fully quit and reopen ChatGSD. Cua Driver 0.38 or later must be installed.".into())
+        Ok("Allow ChatGSD in System Settings → Privacy & Security → Accessibility and Screen Recording, then fully quit and reopen ChatGSD. Cua Driver is included with the app.".into())
     }
     #[cfg(not(target_os = "macos"))]
     {
