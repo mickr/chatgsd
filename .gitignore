@@ -27,6 +27,10 @@ dist-ssr
 src-tauri/target/
 src-tauri/gen/
 
+# Compiled by Xcode from the shared robot artwork and Icon Composer descriptor.
+src-tauri/resources/appearance-icon/
+src-tauri/resources/.appearance-icon-*/
+
 # Downloaded, checksum-verified Cua Driver sidecar and bundled licenses
 src-tauri/binaries/cua-driver-aarch64-apple-darwin
 src-tauri/binaries/.cua-driver-*/

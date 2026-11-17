@@ -45,9 +45,9 @@
 .inline-agent-dock-action:hover { color: var(--color-text); background: var(--color-bg-muted); }
 .inline-agent-dock-action svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .inline-agent-prompt button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
-.inline-agent-face { width: 40px; height: 40px; flex-shrink: 0; overflow: visible; color: #e3faff; }
-.inline-agent-eye { fill: currentColor; filter: drop-shadow(0 0 .7px #86dcff); transform-box: fill-box; transform-origin: center; transition: transform var(--inline-expression); }
-.inline-agent-signal { fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: round; opacity: .45; transform-box: fill-box; transform-origin: center; }
+.inline-agent-face { width: 40px; height: 40px; flex-shrink: 0; overflow: visible; color: var(--color-text); }
+.inline-agent-eye { fill: currentColor; transform-box: fill-box; transform-origin: center; transition: transform var(--inline-expression); }
+.inline-agent-signal { fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: round; transform-box: fill-box; transform-origin: center; }
 .inline-agent-gaze { transition: transform var(--inline-expression); }
 .inline-agent-attention { transition: transform 140ms ease-out; }
 .inline-agent-emotion { transform-box: fill-box; transform-origin: center; transition: transform var(--inline-expression); }

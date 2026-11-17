@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { AgentExpression } from "../../services/agent";
 import faceShell from "../../assets/agent-face.png";
 import type { InlineActivityState } from "./InlineAgentActivity";
@@ -13,6 +13,7 @@ function expressionFor(state: InlineActivityState, expression?: AgentExpression)
 }
 
 export function InlineAgentFace({ state, expression }: { state: InlineActivityState; expression?: AgentExpression }) {
+  const shellMask = useId();
   const face = useRef<SVGSVGElement>(null);
   const attention = useRef<SVGGElement>(null);
   const emotion = expressionFor(state, expression);
@@ -22,9 +23,9 @@ export function InlineAgentFace({ state, expression }: { state: InlineActivitySt
   const uncertainty = emotion.expression === "uncertain" ? intensity : 0;
   const concern = emotion.expression === "concerned" ? intensity : 0;
   const pleasure = emotion.expression === "pleased" ? intensity : 0;
-  const eyeHeight = 5.5 - focus * 2.5 + curiosity;
+  const eyeHeight = 3.2 - focus * 1.4 + curiosity * 0.6;
   const tilt = concern * 16 + uncertainty * 10;
-  const radius = 1.1 + sentiment * 0.5;
+  const radius = 1.6 + sentiment * 0.3;
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -66,14 +67,19 @@ export function InlineAgentFace({ state, expression }: { state: InlineActivitySt
 
   return (
     <svg ref={face} className="inline-agent-face" data-state={state} data-expression={emotion.expression} viewBox="0 0 40 40" aria-hidden="true">
-      <image href={faceShell} width="40" height="40" />
+      <defs>
+        <mask id={shellMask} style={{ maskType: "alpha" }}>
+          <image href={faceShell} width="40" height="40" />
+        </mask>
+      </defs>
+      <path d="M0 0H40V40H0Z" fill="currentColor" mask={`url(#${shellMask})`} />
       <g ref={attention} className="inline-agent-attention">
         <g className="inline-agent-gaze">
-          {[12, 24].map((x, index) => (
+          {[12.4, 24.4].map((x, index) => (
             <g key={x} className="inline-agent-emotion" style={{ transform: `rotate(${index === 0 ? -tilt : tilt}deg)` }}>
               {pleasure > 0.25 ?
-                <path className="inline-agent-eye" d={`M${x} 23 Q${x + 2} ${20 - pleasure * 3} ${x + 4} 23 L${x + 4} 24 Q${x + 2} ${23 - pleasure * 2} ${x} 24 Z`} /> :
-                <rect className="inline-agent-eye" x={x} y={22 - eyeHeight / 2} width="4" height={eyeHeight - (index === 1 ? uncertainty * 2 : 0)} rx={radius} />}
+                <path className="inline-agent-eye" d={`M${x} 25 Q${x + 1.6} ${24 - pleasure * 2} ${x + 3.2} 25 L${x + 3.2} 26 Q${x + 1.6} ${26 - pleasure * 2} ${x} 26 Z`} /> :
+                <rect className="inline-agent-eye" x={x} y={25 - eyeHeight / 2} width="3.2" height={eyeHeight - (index === 1 ? uncertainty : 0)} rx={radius} />}
             </g>
           ))}
         </g>

@@ -172,6 +172,8 @@ jobs:
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(plutil -extract CFBundleIconName raw -o - "$app/Contents/Info.plist")" = "AppIcon"
+          node scripts/prepare-macos-icon.mjs --verify "$app/Contents/Resources/Assets.car"
           # Installed copies must only ever update from this fork: the built app
           # has to carry exactly this repo's update feed and the fork's key.
           bin="$app/Contents/MacOS/ChatGSD"
