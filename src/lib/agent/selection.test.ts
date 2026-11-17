@@ -173,7 +173,7 @@ describe("attached selection", () => {
     expect(attachedRange(editor)).toBeNull();
   });
 
-  it.each(["click", "Escape", "sidebar Escape", "cursor", "typing"])(
+  it.each(["click", "Escape", "outside click", "outside Escape", "cursor", "typing"])(
     "dismisses agent highlights after an edit with %s without losing the run target",
     async (action) => {
       const editor = openNote(NOTE);
@@ -190,9 +190,15 @@ describe("attached selection", () => {
         const event = new MouseEvent("mousedown", { button: 0 });
         editor.view.someProp("handleDOMEvents", (handlers) =>
           handlers.mousedown?.(editor.view, event));
-      } else if (action === "sidebar Escape") {
-        expect(editor.state.selection.empty).toBe(true);
-        detachSelection(editor);
+      } else if (action.startsWith("outside")) {
+        const composer = document.body.appendChild(document.createElement("textarea"));
+        composer.focus();
+        const event = action === "outside click"
+          ? new MouseEvent("click", { button: 0, bubbles: true, cancelable: true })
+          : new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+        expect(composer.dispatchEvent(event)).toBe(true);
+        expect(document.activeElement).toBe(composer);
+        composer.remove();
       } else if (action === "Escape")
         editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       else if (action === "cursor")
@@ -210,19 +216,22 @@ describe("attached selection", () => {
       expect(followup.ok, followup.output).toBe(true);
       expect(editor.state.doc.textContent).toContain("winter coat");
       expect(highlight(editor)).toBeNull();
+      expect(editor.view.dom.querySelector(".agent-working-range")).toBeNull();
     },
   );
 
-  it("dismisses the retained working range after a completed turn", async () => {
+  it.each([true, false])("clears the working highlight at turn completion with a selected passage = %s", async (selected) => {
     const editor = openNote(NOTE);
     Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip", session: 1 });
-    editor.commands.setTextSelection(find(editor, "rain jacket"));
+    if (selected) editor.commands.setTextSelection(find(editor, "rain jacket"));
     const binding = captureRunBinding(editor, "run")!;
-    const result = await executeDocumentTool(editor, binding, "replace_selection", { new_text: "warm coat" });
+    const result = await executeDocumentTool(editor, binding, "edit_document", { edits: [{ old_text: "rain jacket", new_text: "warm coat" }] });
     expect(result.ok, result.output).toBe(true);
-    releaseRunBinding(editor, binding, true);
     expect(editor.view.dom.querySelector(".agent-working-range")).not.toBeNull();
-    editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const selection = editor.state.selection.toJSON();
+    releaseRunBinding(editor, binding, true);
+    expect(editor.state.selection.toJSON()).toEqual(selection);
+    expect(highlight(editor)).toBeNull();
     expect(editor.view.dom.querySelector(".agent-working-range")).toBeNull();
     expect(editor.view.dom.querySelector(".agent-presence-caret")).not.toBeNull();
   });

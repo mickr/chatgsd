@@ -1,5 +1,10 @@
 import type { Editor } from "@tiptap/core";
 
+/** Keep UTF-16 truncation from sending half an emoji across the native JSON bridge. */
+export function boundedReviewText(text: string, limit: number): string {
+  return text.slice(0, limit).replace(/[\uD800-\uDFFF]/gu, "");
+}
+
 /** Label bounded, nearby paragraphs so a classifier can point at real text. */
 export function writingPassage(editor: Editor) {
   const { doc, selection } = editor.state;
@@ -14,7 +19,9 @@ export function writingPassage(editor: Editor) {
     const text = node.textBetween(offset, Math.min(node.content.size, offset + 6000), " ").trim();
     if (!text) return false;
     const prefix = `${passage ? "\n\n" : ""}[p${ranges.length}] `;
-    passage += prefix + text.slice(0, 6000 - passage.length - prefix.length);
+    const excerpt = boundedReviewText(text, 6000 - passage.length - prefix.length);
+    if (!excerpt) return false;
+    passage += prefix + excerpt;
     ranges.push({ from: pos, to: pos + node.nodeSize });
     return false;
   });

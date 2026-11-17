@@ -15,19 +15,14 @@ export function InlineAgentTurns({ onAnswer, children }: { onAnswer: (answer: Qu
     items: turn.items.map((item) => item.type === "user" ? { ...item, text: displayInstruction(item.text) } : item),
   })), [conversation.items]);
   const scroll = useRef<HTMLDivElement>(null);
-  const follow = useRef(true);
   const running = conversation.runId !== null;
   const openNote = useCallback((id: string) => { void selectNote(id); }, [selectNote]);
   useLayoutEffect(() => {
-    if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [conversation.items, agent.writingSuggestion]);
+    if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+  }, [conversation.items, conversation.error, running, agent.writingSuggestion, agent.writingOffer?.id]);
 
   return <OpenNoteContext.Provider value={openNote}>
-    <div ref={scroll} className="inline-agent-turns" role="log" aria-label="Inline conversation turns" aria-live="off" aria-busy={running}
-      onScroll={(event) => {
-        const element = event.currentTarget;
-        follow.current = element.scrollHeight - element.scrollTop - element.clientHeight < 60;
-      }}>
+    <div ref={scroll} className="inline-agent-turns" role="log" aria-label="Inline conversation turns" aria-live="off" aria-busy={running}>
       {!turns.length && !agent.writingSuggestion && <p className="inline-agent-empty">A second pair of eyes while you write. We can work through a rough sentence, check an argument, or find your next idea.</p>}
       {turns.map((turn, turnIndex) => <section key={turn.id} className="inline-agent-turn" aria-label={`Turn ${turnIndex + 1}`}>
         {turn.items.map((item, index) => <AgentMessage key={item.id} item={item}

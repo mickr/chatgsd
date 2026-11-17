@@ -134,7 +134,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const [sending, setSending] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
-  const follow = useRef(true);
   const status = agent.status;
   const conversation = agent.conversation;
   const turns = useMemo(() => conversationTurns(conversation.items), [conversation.items]);
@@ -230,11 +229,10 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     return () => cancelAnimationFrame(frame);
   }, [composerFocusRequest, takeComposerFocus]);
   useLayoutEffect(() => {
-    if (follow.current && scroll.current)
+    if (visible && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [conversation.items, conversation.error, running]);
+  }, [visible, conversation.items, conversation.error, conversation.computerUnavailable, conversation.cancelled, running, agent.writingOffer?.id]);
   useEffect(() => {
-    follow.current = true;
     setReviewIndex(-1);
   }, [currentNote?.id]);
   const { pendingQuestion, answerQuestion } = agent;
@@ -242,7 +240,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const sendLabel = pendingQuestion ? "Send answer" : "Send message";
   const answer = useCallback(
     (value: QuestionAnswer) => {
-      follow.current = true;
       void answerQuestion(value);
     },
     [answerQuestion],
@@ -259,7 +256,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     if (pendingQuestion) {
       const text = draft.trim();
       setDrafts((previous) => ({ ...previous, [id]: "" }));
-      follow.current = true;
       await answerQuestion(text);
       return;
     }
@@ -267,7 +263,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
     const text = draft;
     setSending(true);
     setDrafts((previous) => ({ ...previous, [id]: "" }));
-    follow.current = true;
     try {
       if (!(await agent.send(text)))
         setDrafts((previous) => ({ ...previous, [id]: previous[id] || text }));
@@ -439,15 +434,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             role="log"
             aria-label="Conversation"
             aria-busy={running}
-            onScroll={() => {
-              const element = scroll.current;
-              if (element)
-                follow.current =
-                  element.scrollHeight -
-                    element.scrollTop -
-                    element.clientHeight <
-                  60;
-            }}
           >
             {!conversation.items.length && !offer && (
               <div className="agent-panel-empty">
@@ -516,6 +502,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                     auth: "Sign in again to continue",
                     usage_limit: "Usage limit reached",
                     not_eligible: "ChatGPT plan not eligible",
+                    writing_review: "Writing check interrupted",
                     other: "Something went wrong",
                   }[conversation.error.kind]
                 }
@@ -523,7 +510,11 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               <p className="text-xs text-text-muted leading-relaxed">
                 {conversation.error.message}
               </p>
-              {conversation.error.kind === "usage_limit" ? (
+              {conversation.error.kind === "writing_review" ? (
+                <button type="button" className="agent-panel-link" disabled={!!reason || running || agent.companionChecking} onClick={() => void agent.startCompanion()}>
+                  Retry writing check
+                </button>
+              ) : conversation.error.kind === "usage_limit" ? (
                 <ManageUsage primary />
               ) : conversation.error.kind === "auth" ? (
                 <ContinueWithChatGPT />

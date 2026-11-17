@@ -398,10 +398,17 @@ it("keeps the conversation open while working and writing, with explicit minimiz
   act(() => root.render(<InlineAgentPrompt onContinue={onContinue} />));
   expect(document.querySelector('.inline-agent-surface[data-state="reading"]')).not.toBeNull();
   composerInput();
-  const log = document.querySelector('[aria-label="Inline conversation turns"]')!;
+  const log = document.querySelector<HTMLElement>('[aria-label="Inline conversation turns"]')!;
   expect(log.textContent).toContain("Make it shorter");
   expect(log.textContent).toContain("Read note");
   expect(log.textContent).not.toContain("Surrounding prose (up to");
+  Object.defineProperty(log, "scrollHeight", { value: 900 });
+  log.scrollTop = 10;
+  act(() => log.dispatchEvent(new Event("scroll")));
+  conversation = { ...conversation, items: [...conversation.items, { id: "reply", type: "text", text: "A shorter sentence." }] };
+  state.agent.conversation = conversation;
+  act(() => root.render(<InlineAgentPrompt onContinue={onContinue} />));
+  expect(log.scrollTop).toBe(900);
   act(() => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })));
   expect(document.querySelector('[aria-label="Inline conversation turns"]')).toBe(log);
   act(() => document.querySelector<HTMLButtonElement>('[aria-label="Minimize writing companion"]')!.click());

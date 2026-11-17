@@ -186,6 +186,7 @@ export function applyWritingOffer(editor: Editor, prepared: PreparedWritingOffer
   }
   // The document commits atomically; AgentChanges reveals its text at the agent
   // caret without changing the writer's selection or generating typing history.
-  editor.view.dispatch(setChangeMeta(tr, { source: "agent", presence: { agent: arrival }, arrival: [arrival] }));
+  const caret = { from: arrival.to, to: arrival.to };
+  editor.view.dispatch(setChangeMeta(tr, { source: "agent", presence: { agent: caret }, arrival: [arrival] }));
   editor.view.dispatch(closeHistory(editor.state.tr).setMeta("addToHistory", false));
 }

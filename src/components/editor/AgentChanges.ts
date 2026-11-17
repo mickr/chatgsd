@@ -625,7 +625,7 @@ export const AgentChanges = Extension.create({
               }
             }
             if (meta?.presence?.agent) presence.agent = meta.presence.agent;
-            if (dismissSelection && presence.agent)
+            if (presence.agent && (dismissSelection || focusRanges.some(range => range.dismissed)))
               presence.agent = { from: presence.agent.to, to: presence.agent.to };
             
             let arrival = meta?.clearArrival || meta?.clearPresence || dismissSelection || tr.docChanged
@@ -678,11 +678,26 @@ export const AgentChanges = Extension.create({
           };
           const onMotion = () => { if (motion?.matches) finish(); };
           const onVisibility = () => { if (document.hidden) finish(); };
+          // The companion, sidebar and toolbar handle their own clicks and Escape.
+          // Clear only the agent's paint before those controls handle the event.
+          const dismissOutsideEditor = (event: MouseEvent | KeyboardEvent) => {
+            if (event instanceof KeyboardEvent ? event.key !== "Escape" : event.button !== 0) return;
+            if (event.target instanceof Node && view.dom.contains(event.target)) return;
+            const changes = agentChangesKey.getState(view.state)!;
+            const range = changes.presence.agent;
+            if (!changes.focusRanges.some(focus => !focus.dismissed) && !(range && range.from < range.to)) return;
+            view.dispatch(setChangeMeta(view.state.tr, { dismissSelection: true }).setMeta("addToHistory", false));
+          };
+          const owner = view.dom.ownerDocument;
+          owner.addEventListener("click", dismissOutsideEditor, true);
+          owner.addEventListener("keydown", dismissOutsideEditor, true);
           motion?.addEventListener("change", onMotion);
           document.addEventListener("visibilitychange", onVisibility);
           update();
           return { update, destroy: () => {
             clearTimeout(timer);
+            owner.removeEventListener("click", dismissOutsideEditor, true);
+            owner.removeEventListener("keydown", dismissOutsideEditor, true);
             motion?.removeEventListener("change", onMotion);
             document.removeEventListener("visibilitychange", onVisibility);
           } };

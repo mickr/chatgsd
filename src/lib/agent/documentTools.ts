@@ -10,7 +10,6 @@ import {
   agentChangesKey,
   attachedRange,
   detachSelection,
-  clearAgentPresence,
   setChangeMeta,
   type AgentChange,
 } from "../../components/editor/AgentChanges";
@@ -589,13 +588,12 @@ export function releaseRunBinding(
   keepPresence = false,
 ): void {
   if (!editor || editor.isDestroyed || binding.documentSession !== editor.storage.scratchDocument.session) return;
-  if (!keepPresence) {
-    clearAgentPresence(editor);
-  }
-  if (!binding.focusRangeId) return;
+  const caret = agentChangesKey.getState(editor.state)?.presence.agent?.to;
   editor.view.dispatch(
     setChangeMeta(editor.state.tr, {
-      releaseFocus: binding.focusRangeId,
+      releaseFocus: binding.focusRangeId ?? undefined,
+      clearPresence: keepPresence ? undefined : "agent",
+      presence: keepPresence && caret !== undefined ? { agent: { from: caret, to: caret } } : undefined,
     }).setMeta("addToHistory", false),
   );
 }

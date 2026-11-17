@@ -333,6 +333,8 @@ export function InlineAgentPrompt({ onContinue }: { onContinue: () => void }) {
         </div>
       </div>
       {(sendError || agent.conversation.error) && <p role="alert" className="inline-agent-error">{sendError ?? agent.conversation.error?.message}</p>}
+      {!sendError && agent.conversation.error?.kind === "writing_review" && <button type="button" className="agent-panel-link"
+        disabled={!!unavailable || running || agent.companionChecking} onClick={() => void agent.startCompanion()}>Retry writing check</button>}
       <div className="inline-agent-footer">
         <span>{readinessMessage ?? (waiting ? "Your answer will help us continue." : "Your voice. Your call.")}</span>
         <button type="button" className="agent-panel-link" onClick={() => { dismiss(false); onContinue(); }}>Open sidebar</button>

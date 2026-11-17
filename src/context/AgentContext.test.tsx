@@ -1008,14 +1008,32 @@ describe("writing companion", () => {
     expect(current.writingFocus).toBeNull();
   });
 
+  it("keeps following the current draft when a check on older text fails", async () => {
+    await ready();
+    let fail!: (reason: Error) => void;
+    vi.mocked(agent.reviewWriting).mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    let pending!: Promise<void>;
+    act(() => { pending = current.startCompanion(); });
+    act(() => editor.commands.insertContent("Revised "));
+    await act(async () => { fail(new Error("Offline")); await pending; });
+    expect(current.conversation.error).toBeNull();
+    expect(current.companionActive).toBe(true);
+  });
+
   it("does not turn an API failure into criticism or an expensive fallback", async () => {
     await ready();
     vi.mocked(agent.reviewWriting).mockRejectedValueOnce(new Error("Offline"));
     await act(async () => { await current.startCompanion(); });
     expect(current.conversation.error?.message).toContain("Offline");
+    expect(current.conversation.error?.kind).toBe("writing_review");
     expect(current.companionActive).toBe(false);
     expect(current.writingFocus).toBeNull();
     expect(agent.startRun).not.toHaveBeenCalled();
+    await act(async () => { await current.startCompanion(); });
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+    expect(current.conversation.error).toBeNull();
+    expect(current.conversation.items).toEqual([]);
+    expect(current.companionActive).toBe(true);
   });
 
   it("keeps explicit requests on the normal agent path and guards background edits", async () => {

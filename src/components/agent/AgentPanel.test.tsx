@@ -153,6 +153,29 @@ it("does not suggest account recovery for unrelated errors", () => {
   expect(container.textContent).not.toContain("Check account again");
 });
 
+it("retries a writing check directly from its error", () => {
+  state.agent.startCompanion = vi.fn();
+  state.agent.conversation = { items: [], runId: null, error: { kind: "writing_review", message: "Decisions timed out." } };
+  act(() => root.render(<Workspace />));
+  act(() => container.querySelector<HTMLButtonElement>('[role="alert"] button')!.click());
+  expect(state.agent.startCompanion).toHaveBeenCalledOnce();
+  expect(state.agent.send).not.toHaveBeenCalled();
+  expect(container.textContent).not.toContain("Send another message");
+});
+
+it("scrolls to the latest streaming text after the writer has scrolled up", () => {
+  act(() => container.querySelector("button")!.click());
+  const log = container.querySelector<HTMLElement>('[role="log"]')!;
+  Object.defineProperty(log, "scrollHeight", { value: 900 });
+  for (const text of ["First", "First and second"]) {
+    log.scrollTop = 12;
+    act(() => log.dispatchEvent(new Event("scroll")));
+    state.agent.conversation = { runId: "run", items: [{ id: "reply", type: "text", text }] };
+    act(() => root.render(<Workspace />));
+    expect(log.scrollTop).toBe(900);
+  }
+});
+
 it.each(["metaKey", "ctrlKey"] as const)("opens from the editor with %s and focuses chat without changing the note", (modifier) => {
   act(() => {
     editor.view.focus();

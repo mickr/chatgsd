@@ -4,6 +4,12 @@ import StarterKit from "@tiptap/starter-kit";
 import { expect, it } from "vitest";
 import { writingPassage } from "./writingReview";
 
+it("sends valid Unicode when the passage budget lands inside an emoji", () => {
+  const editor = new Editor({ extensions: [StarterKit], content: `<p>${"A".repeat(5994)}😀</p>` });
+  expect(writingPassage(editor).passage).toBe("[p0] " + "A".repeat(5994));
+  editor.destroy();
+});
+
 it("maps classifier labels to real paragraph nodes, including nested paragraphs", () => {
   const editor = new Editor({ extensions: [StarterKit], content: "<h1>Heading</h1><p>A claim.</p><ul><li><p>A supporting detail.</p></li></ul>" });
   const { passage, ranges } = writingPassage(editor);

@@ -22,7 +22,7 @@ import { renderableSpec } from "../lib/agent/ui/content";
 import { clipPreview } from "../lib/agent/selection";
 import { useCoeditingObserver } from "../lib/agent/useCoeditingObserver";
 import { displayInstruction } from "../components/agent/InlineAgentActivity";
-import { writingPassage } from "../lib/agent/writingReview";
+import { boundedReviewText, writingPassage } from "../lib/agent/writingReview";
 import { prepareWritingOffer, refreshWritingOffer, applyWritingOffer, type PreparedWritingOffer, type WritingOffer } from "../lib/agent/writingOffers";
 import { clearAgentPresence, scrollPositionIntoView } from "../components/editor/AgentChanges";
 import { noteEditChange, type NoteChange } from "../lib/agent/turnChanges";
@@ -104,7 +104,7 @@ export interface Conversation {
   sessionId: string | null;
   runId: string | null;
   context: agent.RunContext | null;
-  error: { kind: agent.AgentErrorKind; message: string } | null;
+  error: { kind: agent.AgentErrorKind | "writing_review"; message: string } | null;
   cancelled: boolean;
   computerUnavailable?: agent.ComputerUnavailable;
   /** Ephemeral model-authored presentation; never part of the saved transcript. */
@@ -1203,13 +1203,13 @@ export function AgentProvider({
     if (reviewedPassages.current.session !== session) reviewedPassages.current = { session, passages: [] };
     if (reviewedPassages.current.passages.includes(passage)) return;
     const recent = conversation.items.filter((item) => item.type === "user" || item.type === "text").slice(-6)
-      .map((item) => displayInstruction(item.text).slice(0, 2000));
+      .map((item) => boundedReviewText(displayInstruction(item.text), 2000));
     const dismissed = dismissedSuggestions.current.session === session
-      ? dismissedSuggestions.current.texts : [];
+      ? dismissedSuggestions.current.texts.map(text => boundedReviewText(text, 1200)) : [];
     const version = ++reviewVersion.current;
     setAssessingWriting(true);
     try {
-      const assessment = await agent.reviewWriting({ title: editor.storage.scratchDocument.title.slice(0, 500), passage, paragraphCount: ranges.length, recent, dismissed });
+      const assessment = await agent.reviewWriting({ title: boundedReviewText(editor.storage.scratchDocument.title, 500), passage, paragraphCount: ranges.length, recent, dismissed });
       if (version !== reviewVersion.current || editor.isDestroyed || editor.storage.scratchDocument.session !== session || !editor.state.doc.eq(document)) return;
       reviewedPassages.current.passages = [...reviewedPassages.current.passages, passage].slice(-8);
       if (!assessment.focus || assessment.anchor === null || !ranges[assessment.anchor]) return;
@@ -1224,10 +1224,10 @@ export function AgentProvider({
         reviewedPassages.current.passages = reviewedPassages.current.passages.filter((cached) => cached !== passage);
       }
     } catch (error) {
-      if (version !== reviewVersion.current || editor.storage.scratchDocument.session !== session) return;
+      if (version !== reviewVersion.current || editor.isDestroyed || editor.storage.scratchDocument.session !== session || !editor.state.doc.eq(document)) return;
       setCoeditingSession(null);
       if (currentNote) updateConversation(currentNote.id, (conversation) => ({
-        ...conversation, error: { kind: "other", message: `Couldn't check your writing: ${agent.errorMessage(error)}` },
+        ...conversation, error: { kind: "writing_review", message: `Couldn't check your writing: ${agent.errorMessage(error)}` },
       }));
     } finally {
       if (version === reviewVersion.current) setAssessingWriting(false);

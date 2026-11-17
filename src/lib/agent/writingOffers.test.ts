@@ -242,7 +242,8 @@ it("streams an accepted version at the agent caret while committing the marked t
   const caret = () => editor.view.posAtDOM(editor.view.dom.querySelector(".agent-presence-caret")!, 0);
   expect(sources).toEqual(["agent"]);
   expect(editor.getHTML()).toContain(`<strong>${proposed}</strong>`);
-  expect(state().presence.agent).toEqual({ from: offer.source.from, to: offer.source.from + proposed.length });
+  expect(editor.view.dom.querySelector(".agent-working-range")).toBeNull();
+  expect(state().presence.agent.to).toBe(offer.source.from + proposed.length);
   expect(state().arrival?.revealed).toBe(0);
   expect(caret()).toBe(offer.source.from);
   expect(editor.view.dom.querySelector(".agent-text-pending")).not.toBeNull();
@@ -265,7 +266,7 @@ it("reveals only the moved paragraph at its destination and undoes an unfinished
   const before = editor.getJSON();
   applyWritingOffer(editor, offer);
   const state = () => agentChangesKey.getState(editor.state)!;
-  expect(state().presence.agent).toEqual({ from: 1, to: 13 });
+  expect(state().presence.agent).toEqual({ from: 13, to: 13 });
   expect(state().arrival?.ranges).toEqual([{ from: 1, to: 13 }]);
   expect(editor.view.dom.querySelector(".agent-text-pending")?.textContent).toBe("The example.");
   expect(editor.getHTML()).toBe("<p><strong>The example.</strong></p><p>The argument.</p><p>A bridge.</p>");
@@ -287,7 +288,7 @@ it("skips acceptance animation for reduced motion while retaining agent presence
   const state = agentChangesKey.getState(editor.state)!;
   expect(editor.getText()).toBe("A clearer sentence.");
   expect(state.arrival).toBeNull();
-  expect(state.presence.agent).toEqual({ from: 1, to: 20 });
+  expect(state.presence.agent).toEqual({ from: 20, to: 20 });
   expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
   expect(editor.view.dom.querySelector(".agent-presence-caret")).not.toBeNull();
   editor.commands.undo();

@@ -199,24 +199,56 @@ async fn decide(app: &tauri::AppHandle, context: Value, questions: Value) -> Res
         "input": [{"role": "user", "content": [{"type": "input_json", "data": context}]}],
         "questions": questions,
     });
-    let response = CLIENT.post("https://api.openai.com/v1/decisions")
-        .bearer_auth(token).timeout(Duration::from_secs(20)).json(&body).send().await
-        .map_err(|_| "Could not reach Decisions. Check your connection and try again.".to_owned())?;
+    request_decision("https://api.openai.com/v1/decisions", &token, &body).await
+}
+
+async fn request_decision(url: &str, token: &str, body: &Value) -> Result<Value, String> {
+    let send = || CLIENT.post(url).bearer_auth(token)
+        .timeout(Duration::from_secs(20)).json(body).send();
+    let first = send().await;
+    let retry = match &first {
+        Ok(response) => matches!(response.status().as_u16(), 502..=504)
+            && !response.headers().contains_key(reqwest::header::RETRY_AFTER),
+        Err(error) => error.is_connect() && !error.is_timeout(),
+    };
+    let response = if retry {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        send().await
+    } else { first }.map_err(|error| if error.is_timeout() {
+        "Decisions took too long to respond."
+    } else {
+        "Could not reach Decisions. Check your connection."
+    })?;
     let status = response.status();
-    let value: Value = response.json().await
-        .map_err(|_| "Decisions returned an invalid response.".to_owned())?;
     if !status.is_success() {
+        let value = response.json::<Value>().await.unwrap_or(Value::Null);
         let message = value.pointer("/error/message").and_then(Value::as_str)
-            .unwrap_or("The classification request failed");
-        let code = value.pointer("/error/code").and_then(Value::as_str).unwrap_or("unknown");
-        return Err(format!("Decisions: {message} ({code}, HTTP {})", status.as_u16()));
+            .or(status.canonical_reason()).unwrap_or("Request failed");
+        let code = value.pointer("/error/code").and_then(Value::as_str)
+            .map(|code| format!(", {code}")).unwrap_or_default();
+        return Err(format!("Decisions: {message} (HTTP {}{code})", status.as_u16()));
     }
-    Ok(value)
+    response.json().await.map_err(|_| "Decisions returned an invalid response.".to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retries_temporary_gateways_and_preserves_non_json_http_errors() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let worker = std::thread::spawn(move || {
+            for (status, body) in [(502, "Bad gateway"), (200, "{}"), (403, "Forbidden")] {
+                let req = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                req.respond(tiny_http::Response::from_string(body).with_status_code(status)).unwrap();
+            }
+        });
+        assert_eq!(request_decision(&url, "test", &json!({})).await.unwrap(), json!({}));
+        assert_eq!(request_decision(&url, "test", &json!({})).await.unwrap_err(), "Decisions: Forbidden (HTTP 403)");
+        worker.join().unwrap();
+    }
     fn answer(choice: &str, confidence: f64) -> Value {
         json!({"answers": [{"name": "inline_intent", "type": "choice", "choice": choice, "confidence": confidence},
             {"name":"model_route","type":"choice","choice":"fast","confidence":0.95}]})
