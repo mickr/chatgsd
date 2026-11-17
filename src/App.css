@@ -1491,17 +1491,6 @@ table.not-prose th {
 .agent-panel-primary:hover { opacity: .8; }
 .agent-panel-primary:disabled { opacity: .4; cursor: not-allowed; }
 
-.inline-agent-prompt {
-  position: fixed;
-  z-index: 60;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-bg-secondary);
-  color: var(--color-text);
-  box-shadow: 0 8px 32px color-mix(in srgb, var(--color-text) 12%, transparent);
-}
-.inline-agent-prompt .agent-panel-input-wrap textarea { min-height: 64px; }
 .agent-panel-chatgpt { display: flex; align-items: center; justify-content: center; gap: 9px; width: 100%; border-radius: 8px; padding: 11px 14px; background: #000; color: #fff; border: 1px solid #404040; font-size: 13px; font-weight: 500; cursor: pointer; }
 .agent-panel-chatgpt:disabled { opacity: .65; cursor: wait; }
 .agent-panel-chatgpt:focus-visible, .agent-panel-primary:focus-visible, .agent-panel-link:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }

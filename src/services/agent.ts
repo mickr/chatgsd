@@ -38,9 +38,16 @@ export interface StartRunRequest {
   context: RunContext;
 }
 export type AgentErrorKind = "auth" | "usage_limit" | "not_eligible" | "other";
+/** Model-authored UI metadata, independent of the run's activity or completion. */
+export interface AgentExpression {
+  expression: "neutral" | "curious" | "focused" | "uncertain" | "pleased" | "concerned";
+  sentiment: number;
+  intensity: number;
+}
 export type AgentEvent =
   | { type: "session"; sessionId: string }
   | { type: "text_delta"; text: string }
+  | ({ type: "expression" } & AgentExpression)
   | { type: "tool_call"; callId: string; name: string; input: unknown }
   | { type: "tool_result"; callId: string; ok: boolean; output: string }
   | ({ type: "skill_offer" } & SkillOffer)

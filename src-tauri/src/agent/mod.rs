@@ -4,6 +4,7 @@ mod computer;
 pub mod computer_permissions;
 pub mod conversations;
 pub mod events;
+pub mod expression;
 pub mod note_edits;
 pub mod prompt;
 mod reading;

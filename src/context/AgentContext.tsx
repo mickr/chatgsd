@@ -102,6 +102,8 @@ export interface Conversation {
   context: agent.RunContext | null;
   error: { kind: agent.AgentErrorKind; message: string } | null;
   cancelled: boolean;
+  /** Ephemeral model-authored presentation; never part of the saved transcript. */
+  expression?: agent.AgentExpression;
 }
 const emptyConversation = (): Conversation => ({
   items: [],
@@ -131,6 +133,7 @@ function parseTranscript(value: unknown): TranscriptItem[] {
       typeof item === "object" &&
       typeof item.id === "string" &&
       typeof item.type === "string" && TRANSCRIPT_TYPES[item.type] === true &&
+      (item.type !== "tool" || item.name !== "set_expression") &&
       (item.type !== "skill_offer" || isSkillOffer(item)),
   );
 }
@@ -343,11 +346,15 @@ export function AgentProvider({
     for (const [runId, run] of runs.current) {
       if (run.binding.documentSession === editor.storage.scratchDocument.session) continue;
       run.cancelRequested = true;
+      updateConversation(run.noteId, (conversation) => ({
+        ...conversation,
+        expression: undefined,
+      }));
       if (!runId.startsWith("pending:"))
         void agent.cancelRun(runId).catch((error) =>
           toast.error(`Couldn't stop the previous note's agent: ${agent.errorMessage(error)}`));
     }
-  }, [currentNote?.id, editor]);
+  }, [currentNote?.id, editor, updateConversation]);
   // Bumped to retry the model list: readiness alone doesn't change when only
   // the /models request failed, so a status refresh wouldn't refetch.
   const [modelsRequest, setModelsRequest] = useState(0);
@@ -429,6 +436,20 @@ export function AgentProvider({
         return;
       }
       const event = payload.event;
+      if (event.type === "expression") {
+        if (run.cancelRequested ||
+            conversationsRef.current[run.noteId]?.runId !== payload.runId) return;
+        updateConversation(run.noteId, (conversation) => ({
+          ...conversation,
+          expression: {
+            expression: event.expression,
+            sentiment: event.sentiment,
+            intensity: event.intensity,
+          },
+        }));
+        return;
+      }
+      if (event.type === "tool_call" && event.name === "set_expression") return;
       updateConversation(run.noteId, (conversation) => {
         if (event.type === "session")
           return { ...conversation, sessionId: event.sessionId };
@@ -462,13 +483,14 @@ export function AgentProvider({
         if (event.type === "tool_call") return conversation;
         if (event.type === "tool_result") {
           const toolId = `${payload.runId}:${event.callId}`;
+          const tool = conversation.items.find((item) => item.id === toolId);
+          if (tool?.type !== "tool") return conversation;
           const items = conversation.items.map((item) =>
             item.id === toolId && item.type === "tool"
               ? { ...item, ok: event.ok, output: event.output }
               : item,
           );
-          const tool = items.find((item) => item.id === toolId);
-          const change = event.ok && tool?.type === "tool" && tool.name === "edit_note"
+          const change = event.ok && tool.name === "edit_note"
             ? noteEditChange(tool.input) : null;
           if (change && !items.some((item) => item.id === `${toolId}:changes`))
             items.push({ id: `${toolId}:changes`, type: "changes", change });
@@ -490,11 +512,14 @@ export function AgentProvider({
           return {
             ...conversation,
             runId: null,
+            expression: undefined,
             error: { kind: event.kind, message: event.message },
           };
         return {
           ...conversation,
           runId: null,
+          expression: event.stopReason === "cancelled" || run.cancelRequested
+            ? undefined : conversation.expression,
           cancelled: event.stopReason === "cancelled",
         };
       });
@@ -651,6 +676,7 @@ export function AgentProvider({
         runId: temporaryId,
         error: null,
         cancelled: false,
+        expression: undefined,
         items: [
           ...conversation.items,
           {
@@ -711,6 +737,7 @@ export function AgentProvider({
         updateConversation(run.noteId, (conversation) => ({
           ...conversation,
           runId: null,
+          expression: undefined,
           error: { kind: "other", message: agent.errorMessage(error) },
         }));
         if (!runs.current.size) buffered.current = [];
@@ -738,6 +765,10 @@ export function AgentProvider({
     if (!id) return;
     const run = runs.current.get(id);
     if (run) run.cancelRequested = true;
+    updateConversation(currentNote!.id, (conversation) => ({
+      ...conversation,
+      expression: undefined,
+    }));
     if (id.startsWith("pending:")) return;
     try {
       await agent.cancelRun(id);
@@ -745,7 +776,7 @@ export function AgentProvider({
       if (run) run.cancelRequested = false;
       toast.error(`Couldn't stop the agent: ${agent.errorMessage(error)}`);
     }
-  }, [currentNote, editorRef]);
+  }, [currentNote, editorRef, updateConversation]);
   const setComputerAccess = useCallback((enabled: boolean) => {
     updateComputerAccess(enabled);
     persist({ agentComputerAccess: enabled });

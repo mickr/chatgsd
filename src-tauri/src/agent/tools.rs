@@ -25,6 +25,7 @@ pub struct ToolSpec {
 /// message was sent with internet access on.
 pub fn catalog(web_access: bool) -> Vec<ToolSpec> {
     let mut tools = vec![
+        ToolSpec { name: "set_expression", description: "Set the agent face's expressive UI metadata from conversation and task context, not the user's psychological state or task completion. expression is neutral, curious, focused, uncertain, pleased or concerned; sentiment is a number from -1 to 1; intensity is a number from 0 to 1. Use at the start and meaningful shifts alongside useful work, never repetitive animation calls.", parameters: json!({"type":"object","properties":{"expression":{"type":"string","enum":["neutral","curious","focused","uncertain","pleased","concerned"]},"sentiment":{"type":"number"},"intensity":{"type":"number"}},"required":["expression","sentiment","intensity"],"additionalProperties":false}), strict: true },
         ToolSpec { name: "read_document", description: "Read the current live note, including unsaved typing, and the user's selection. Always call before editing. Short notes come back whole; a long note comes back as an outline with line numbers and its opening, so pass start_line and end_line (1-based, inclusive, up to 400 lines) to read further. Pass null for both to start.", parameters: json!({"type":"object","properties":{"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["start_line","end_line"],"additionalProperties":false}), strict: true },
         // Bounds live in the description and the executor: Responses strict mode rejects
         // some JSON Schema validation keywords (minLength and friends).
@@ -102,6 +103,13 @@ pub async fn execute(app: &tauri::AppHandle, run_id: &str, name: &str, args: Val
                 _ => note_links(app, run_id, &ctx, &args).await,
             }
         }
+        "set_expression" => match super::expression::ExpressionUpdate::from_args(args) {
+            Ok(update) => {
+                emit(app, run_id, AgentEvent::Expression(update));
+                ToolOutput::ok("Expression updated.")
+            }
+            Err(error) => ToolOutput::error(error),
+        },
         "read_skill" => match args.get("name").and_then(Value::as_str) {
             Some(skill) => match skills::read(app, skill, args.get("file").and_then(Value::as_str)).await {
                 Ok(text) => ToolOutput::ok(text),

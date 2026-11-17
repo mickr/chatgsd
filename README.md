@@ -95,12 +95,28 @@ sidebar first. Enter sends; Shift+Enter adds a newline; Escape returns
 to the note. Requests include up to 2,000 document positions of surrounding prose
 on each side and tell the agent to read the rest of the note when it needs more
 context. The selection is the default edit target; without one, the cursor is
-the insertion point. While the prompt stays open, its target follows document
-edits and remains available for retries and follow-up instructions.
-Inline edits use the same conversation and direct editing
-tools as the sidebar, with computer access disabled for the inline request.
-**Continue in sidebar** opens the full conversation, including questions and
-change records. **Pause** stops the active coediting session.
+the insertion point. Its target follows document edits and remains available
+for retries and follow-up instructions.
+
+After sending, the prompt moves to a small companion at the bottom center of
+the editor. It previews the current turn's latest prose, or your instruction
+until the agent replies with prose. Structured UI specs stay out of the preview.
+The line below shows the turn number and actual
+activity: reading, editing, researching, replying, waiting, done, paused, or an
+error. Click it to see the
+conversation turns, changes, and questions, or send a follow-up. Clicking back
+into the note collapses the conversation without dismissing the companion.
+**Open sidebar** continues the same conversation there; **Pause** stops the session.
+Inline edits use the sidebar's direct editing tools, with computer access
+disabled for the inline request.
+
+The face combines an image-generated shell with animated LED eyes. The editing
+model chooses expressions, sentiment, and intensity through a bounded
+`set_expression` tool, based on the conversation rather than keyword matching.
+These updates are expressive UI metadata, not claims of feelings or completion,
+and never override errors, pauses, or waiting for your answer. Cursor-following
+gaze stays local and is never sent to the model. Reduced-motion preferences
+disable both gaze tracking and animation.
 
 Small gutter markers identify passages changed in the latest editing turn.
 Hover, click, or focus a marker to inspect a read-only, word-level before/after

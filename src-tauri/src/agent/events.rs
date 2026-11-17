@@ -1,4 +1,4 @@
-use super::{skills::SkillOffer, AgentErrorKind};
+use super::{expression::ExpressionUpdate, skills::SkillOffer, AgentErrorKind};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::Emitter;
@@ -26,6 +26,7 @@ pub enum AgentEvent {
         ok: bool,
         output: String,
     },
+    Expression(ExpressionUpdate),
     /// A skill found on the web, for the user to review and save from a card.
     SkillOffer(SkillOffer),
     Done {
@@ -49,4 +50,36 @@ pub fn emit(app: &tauri::AppHandle, run_id: &str, event: AgentEvent) {
 /// Responses may qualify a namespaced function as `scratch.<tool>`.
 pub fn canonical_tool_name(raw: &str) -> &str {
     raw.strip_prefix("scratch.").unwrap_or(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentEvent, EventEnvelope};
+    use crate::agent::expression::{Expression, ExpressionUpdate};
+    use serde_json::json;
+
+    #[test]
+    fn expression_event_preserves_run_scope_and_wire_fields() {
+        let envelope = EventEnvelope {
+            run_id: "current-run",
+            event: AgentEvent::Expression(ExpressionUpdate {
+                expression: Expression::Curious,
+                sentiment: 0.25,
+                intensity: 0.75,
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            json!({
+                "runId": "current-run",
+                "event": {
+                    "type": "expression",
+                    "expression": "curious",
+                    "sentiment": 0.25,
+                    "intensity": 0.75
+                }
+            })
+        );
+    }
 }

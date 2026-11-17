@@ -323,6 +323,162 @@ describe("AgentProvider ask_user", () => {
   });
 });
 
+describe("AgentProvider expressions", () => {
+  const focused: agent.AgentExpression = {
+    expression: "focused", sentiment: 0.2, intensity: 0.7,
+  };
+  const pleased: agent.AgentExpression = {
+    expression: "pleased", sentiment: 0.8, intensity: 0.5,
+  };
+  const emit = (event: agent.AgentEvent, runId = "run-1") => {
+    act(() => mocks.eventHandler?.({ runId, event }));
+  };
+  async function begin() {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("Plan the trip"); });
+  }
+
+  it("updates live metadata without completing the run, changing its transcript, or answering a question", async () => {
+    await startRunAndAsk({ question: "Which day?", options: [], form: null });
+    emit({ type: "session", sessionId: "expression-session" });
+    const items = current.conversation.items;
+    const question = current.pendingQuestion;
+
+    emit({ type: "expression", ...focused });
+
+    expect(current.conversation.expression).toEqual(focused);
+    expect(current.conversation.runId).toBe("run-1");
+    expect(current.conversation.items).toBe(items);
+    expect(current.pendingQuestion).toBe(question);
+    expect(agent.toolRespond).not.toHaveBeenCalled();
+    expect(agent.saveConversation).not.toHaveBeenCalled();
+  });
+
+  it("keeps the final successful expression in memory but never saves or restores it", async () => {
+    await begin();
+    emit({ type: "session", sessionId: "expression-session" });
+    emit({ type: "expression", ...pleased });
+    const items = current.conversation.items;
+    emit({ type: "done", stopReason: "completed" });
+    await settle();
+
+    expect(current.conversation.expression).toEqual(pleased);
+    expect(current.conversation.runId).toBeNull();
+    expect(agent.saveConversation).toHaveBeenLastCalledWith("expression-session", items);
+
+    vi.mocked(agent.loadConversation).mockResolvedValueOnce([
+      ...items,
+      { id: "old-expression", type: "expression", ...pleased },
+      { id: "old-face-tool", type: "tool", name: "set_expression", input: pleased, ok: true, output: "Updated." },
+    ]);
+    await act(async () => { await current.openConversation("expression-session"); });
+    expect(current.conversation.expression).toBeUndefined();
+    expect(current.conversation.items).toEqual(items);
+  });
+
+  it("resets on a new run and ignores old expressions both during startup and after it", async () => {
+    await begin();
+    emit({ type: "expression", ...pleased });
+    emit({ type: "done", stopReason: "completed" });
+    vi.mocked(agent.startRun).mockImplementationOnce(async () => {
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "expression", ...pleased } });
+      return { runId: "run-2" };
+    });
+    await act(async () => { await current.send("Add a packing list"); });
+    expect(current.conversation.runId).toBe("run-2");
+    expect(current.conversation.expression).toBeUndefined();
+    emit({ type: "expression", ...focused }, "run-2");
+    emit({ type: "expression", ...pleased });
+    expect(current.conversation.expression).toEqual(focused);
+    expect(current.conversation.runId).toBe("run-2");
+  });
+
+  it("clears immediately on Stop and ignores expressions until cancellation finishes", async () => {
+    await begin();
+    emit({ type: "expression", ...focused });
+
+    await act(async () => { await current.stop(); });
+    expect(current.conversation.expression).toBeUndefined();
+    expect(current.conversation.runId).toBe("run-1");
+    emit({ type: "expression", ...pleased });
+    expect(current.conversation.expression).toBeUndefined();
+
+    // A completion already in flight must not revive a stopped expression.
+    emit({ type: "done", stopReason: "completed" });
+    emit({ type: "expression", ...pleased });
+    expect(current.conversation.expression).toBeUndefined();
+    expect(current.conversation.runId).toBeNull();
+  });
+
+  it("ignores buffered expressions when Stop was requested before startup finished", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => {
+      const sending = current.send("Plan the trip");
+      await current.stop();
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "expression", ...focused } });
+      await sending;
+    });
+    expect(agent.cancelRun).toHaveBeenCalledWith("run-1");
+    expect(current.conversation.expression).toBeUndefined();
+    expect(current.conversation.runId).toBe("run-1");
+    emit({ type: "done", stopReason: "cancelled" });
+    expect(current.conversation.runId).toBeNull();
+  });
+
+  it.each<agent.AgentEvent>([
+    { type: "done", stopReason: "cancelled" },
+    { type: "error", kind: "other", message: "Connection lost" },
+  ])("clears expressions on $type and ignores late expressions", async (terminal) => {
+    await begin();
+    emit({ type: "expression", ...focused });
+    emit(terminal);
+    emit({ type: "expression", ...pleased });
+
+    expect(current.conversation.expression).toBeUndefined();
+    expect(current.conversation.runId).toBeNull();
+    if (terminal.type === "error")
+      expect(current.conversation.error?.message).toBe("Connection lost");
+    else
+      expect(current.conversation.cancelled).toBe(true);
+  });
+
+  it("resets the previous expression when an automatic check-in starts", async () => {
+    await begin();
+    emit({ type: "expression", ...pleased });
+    emit({ type: "done", stopReason: "completed" });
+    await settle();
+    vi.mocked(agent.startRun).mockResolvedValueOnce({ runId: "check-in" });
+    vi.useFakeTimers();
+
+    act(() => editor.commands.insertContent("Saturday "));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+
+    expect(current.conversation.runId).toBe("check-in");
+    expect(current.conversation.expression).toBeUndefined();
+    expect(current.conversation.items[current.conversation.items.length - 1]).toMatchObject({ type: "activity" });
+  });
+
+  it("hides expression calls and results without hiding failed document tools", async () => {
+    await begin();
+    emit({ type: "tool_call", callId: "read", name: "read_document", input: {} });
+    const readingItems = current.conversation.items;
+    emit({ type: "tool_call", callId: "face", name: "set_expression", input: focused });
+    emit({ type: "tool_result", callId: "face", ok: true, output: "Updated." });
+    emit({ type: "tool_call", callId: "bad-face", name: "set_expression", input: {} });
+    emit({ type: "tool_result", callId: "bad-face", ok: false, output: "Invalid expression." });
+    expect(current.conversation.items).toBe(readingItems);
+    expect(current.conversation.runId).toBe("run-1");
+
+    emit({ type: "tool_result", callId: "read", ok: false, output: "The document changed." });
+    expect(current.conversation.items).toContainEqual(expect.objectContaining({
+      type: "tool", name: "read_document", ok: false, output: "The document changed.",
+    }));
+    expect(current.conversation.items.some((item) => item.type === "tool" && item.name === "set_expression")).toBe(false);
+  });
+});
+
 describe("AgentProvider conversation history", () => {
   it("drains deferred saves after a heading rename without losing the final diff", async () => {
     act(() => current.toggle());
