@@ -1,6 +1,9 @@
 # ChatGSD
 
-<img src="docs/app-icon.png" alt="ChatGSD" width="128" height="128" style="border-radius: 22px; margin-bottom: 8px;">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/app-icon.png">
+  <img src="docs/app-icon-light.png" alt="ChatGSD" width="128" height="128">
+</picture>
 
 A markdown notes app you co-edit with Codex, signed in with ChatGPT. It's offline-first and keyboard-optimized, and your notes stay plain markdown files on your Mac.
 

@@ -2261,15 +2261,15 @@ export function Editor({
           <div className="text-center text-text-muted select-none">
             <div
               role="img"
-              aria-label="Note"
+              aria-label="Robot checking off a task list"
               className="w-42 aspect-square mx-auto mb-1"
               style={{
                 backgroundColor: "var(--color-text)",
-                WebkitMaskImage: "url(/note-dark.png)",
+                WebkitMaskImage: "url(/gsd-robot.png)",
                 WebkitMaskSize: "contain",
                 WebkitMaskRepeat: "no-repeat",
                 WebkitMaskPosition: "center",
-                maskImage: "url(/note-dark.png)",
+                maskImage: "url(/gsd-robot.png)",
                 maskSize: "contain",
                 maskRepeat: "no-repeat",
                 maskPosition: "center",
