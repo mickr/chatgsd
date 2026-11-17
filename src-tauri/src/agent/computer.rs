@@ -115,7 +115,7 @@ impl ComputerSession {
                 session.catalog.push(json!({
                     "type":"function","name":format!("cua_{name}"),
                     "description":tool.get("description").and_then(Value::as_str).unwrap_or(name),
-                    "parameters":schema,"strict":false
+                    "parameters":schema
                 }));
             }
             let next = page.get("nextCursor").and_then(Value::as_str).map(str::to_owned);

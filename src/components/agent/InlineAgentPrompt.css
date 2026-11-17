@@ -22,6 +22,10 @@
 .inline-agent-heading button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--color-text-muted); cursor: pointer; }
 .inline-agent-heading button:hover { color: var(--color-text); background: var(--color-bg-muted); }
 .inline-agent-composer { padding-top: 8px; }
+.inline-agent-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.inline-agent-suggestions button { padding: 5px 8px; border: 1px solid var(--color-border); border-radius: 7px; font-size: 11px; color: var(--color-text-muted); cursor: pointer; text-align: left; }
+.inline-agent-suggestions button:hover { color: var(--color-text); background: var(--color-bg-muted); }
+.inline-agent-suggestions button:disabled { opacity: .5; cursor: default; }
 .inline-agent-prompt .agent-panel-input-wrap textarea { min-height: 64px; max-height: 120px; }
 .inline-agent-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px 8px; }
 .inline-agent-composer-actions > span { font-size: 10px; color: var(--color-text-muted); }

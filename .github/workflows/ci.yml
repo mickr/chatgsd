@@ -32,6 +32,27 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git --log-opts="--all" --redact --no-banner .
 
+  codex-resources:
+    name: Prepare Codex (${{ matrix.target }})
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # Cross-prepare both official macOS assets without executing them.
+      # The macOS release job checks the native executable and its signature.
+      - name: Prepare checksum-pinned Codex resources
+        env:
+          TAURI_ENV_PLATFORM: macos
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+        run: node scripts/prepare-codex.mjs
+
   check:
     runs-on: ubuntu-22.04
 

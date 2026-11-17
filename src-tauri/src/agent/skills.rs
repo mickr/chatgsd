@@ -9,8 +9,8 @@
 //!   for the agent to read. Nothing in a skill is ever executed.
 //! - `.meta.json`: where it came from, when, and whether it's enabled.
 //!
-//! Only the name and description of enabled skills go into the agent's
-//! instructions; it loads a body with `read_skill` when a request calls for it.
+//! Enabled skills are mirrored as immutable, text-only snapshots for native
+//! Codex discovery. Disabled skills never enter that snapshot.
 //! A skill is saved only by the user: from an offer card or the settings page.
 use super::web;
 use serde::{Deserialize, Serialize};
@@ -355,16 +355,17 @@ async fn load(root: &Path, name: &str) -> Result<Skill, String> {
     };
     let parsed = parse(&content)?;
     let meta = match tokio::fs::read(folder.join(META_FILE)).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).ok(),
-        Err(_) => None,
-    }
-    // A skill folder copied in by hand has no meta; treat it as enabled.
-    .unwrap_or(Meta {
-        source: None,
-        installed_at: 0,
-        enabled: true,
-        digest: None,
-    });
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Couldn't read the skill's settings: {error}"))?,
+        // A skill folder copied in by hand has no meta; treat it as enabled.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Meta {
+            source: None,
+            installed_at: 0,
+            enabled: true,
+            digest: None,
+        },
+        Err(error) => return Err(format!("Couldn't read the skill's settings: {error}")),
+    };
     let files = tauri::async_runtime::spawn_blocking(move || bundled_files(&folder))
         .await
         .unwrap_or_default();
@@ -557,6 +558,101 @@ async fn set_enabled_in(root: &Path, name: &str, enabled: bool) -> Result<Skill,
     skill.enabled = enabled;
     save_meta(&root.join(name), &skill).await?;
     Ok(skill)
+}
+
+/// Publish one immutable generation, then atomically change the discovery
+/// symlink. Old generations remain readable by in-flight native skill reads.
+/// The destination must be a dedicated extra skill root, not Codex's own
+/// `skills` folder (which also contains its system skills).
+pub async fn mirror_codex(app: &tauri::AppHandle, destination: &Path) -> Result<(), String> {
+    mirror_codex_in(&root(app)?, destination).await
+}
+
+async fn mirror_codex_in(source: &Path, destination: &Path) -> Result<(), String> {
+    if !destination.is_absolute() || destination.file_name().is_none() {
+        return Err("The Codex skill mirror must have a dedicated absolute path.".into());
+    }
+    let _mutation = STORE_LOCK.lock().await;
+    let mut bundles = Vec::new();
+    let mut digest = Sha256::new();
+    for skill in list_in(source).await?.into_iter().filter(|skill| skill.enabled) {
+        let folder = source.join(&skill.name);
+        if tokio::fs::symlink_metadata(&folder).await.map_err(|error| error.to_string())?
+            .file_type().is_symlink()
+        {
+            return Err(format!("The skill {:?} is a link and can't be mirrored safely.", skill.name));
+        }
+        let canonical_folder = tokio::fs::canonicalize(&folder).await.map_err(|error| error.to_string())?;
+        let mut files = vec![("SKILL.md".to_owned(), skill.content)];
+        for path in skill.files {
+            let canonical = tokio::fs::canonicalize(folder.join(&path)).await
+                .map_err(|error| format!("Couldn't mirror skill file {path:?}: {error}"))?;
+            if !canonical.starts_with(&canonical_folder) {
+                return Err(format!("The skill file {path:?} leaves its installed folder."));
+            }
+            let bytes = tokio::fs::read(&canonical).await
+                .map_err(|error| format!("Couldn't mirror skill file {path:?}: {error}"))?;
+            if bytes.len() > MAX_BUNDLED_FILE_BYTES as usize {
+                return Err(format!("The skill file {path:?} is too large to mirror."));
+            }
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("The skill file {path:?} is not text."))?;
+            files.push((path, text));
+        }
+        let skill_file = tokio::fs::canonicalize(folder.join("SKILL.md")).await
+            .map_err(|error| error.to_string())?;
+        if !skill_file.starts_with(&canonical_folder) {
+            return Err(format!("The skill {:?} links outside its installed folder.", skill.name));
+        }
+        // Length prefixes make the digest independent of delimiters in text.
+        digest.update((files.len() as u64).to_le_bytes());
+        for value in std::iter::once(skill.name.as_bytes())
+            .chain(files.iter().flat_map(|(path, text)| [path.as_bytes(), text.as_bytes()]))
+        {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value);
+        }
+        bundles.push((skill.name, files));
+    }
+    let parent = destination.parent().ok_or("The Codex skill mirror has no parent folder.")?;
+    let snapshots = parent.join(".chatgsd-skills");
+    tokio::fs::create_dir_all(&snapshots).await.map_err(|error| error.to_string())?;
+    let snapshot = snapshots.join(format!("{:x}", digest.finalize()));
+    if !tokio::fs::try_exists(&snapshot).await.map_err(|error| error.to_string())? {
+        let staging = snapshots.join(format!(".{}", uuid::Uuid::new_v4()));
+        let staged = async {
+            tokio::fs::create_dir(&staging).await?;
+            for (name, files) in &bundles {
+                for (path, text) in files {
+                    let target = staging.join(name).join(path);
+                    if let Some(parent) = target.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    // Writing text never installs dependencies or executes scripts.
+                    tokio::fs::write(target, text).await?;
+                }
+            }
+            tokio::fs::rename(&staging, &snapshot).await
+        }.await;
+        if let Err(error) = staged {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(format!("Couldn't mirror your skills to Codex: {error}"));
+        }
+    }
+    match tokio::fs::symlink_metadata(destination).await {
+        Ok(metadata) if !metadata.file_type().is_symlink() => {
+            return Err("The Codex skill mirror path is already occupied by a non-link folder or file.".into());
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.to_string()),
+        _ => {}
+    }
+    let pointer = parent.join(format!(".chatgsd-skills-link-{}", uuid::Uuid::new_v4()));
+    tokio::fs::symlink(&snapshot, &pointer).await.map_err(|error| error.to_string())?;
+    if let Err(error) = tokio::fs::rename(&pointer, destination).await {
+        let _ = tokio::fs::remove_file(&pointer).await;
+        return Err(format!("Couldn't publish your Codex skills: {error}"));
+    }
+    Ok(())
 }
 
 /// Name and description of each enabled skill, for the agent's instructions.
@@ -805,6 +901,40 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[tokio::test]
+    async fn native_mirror_excludes_disabled_skills_and_keeps_prior_snapshot_readable() {
+        let store = Store::new();
+        let source = store.0.join("installed");
+        let destination = store.0.join("codex/chatgsd-skills");
+        install_in(&source, SKILL, None, &[
+            ("references/rail.md".into(), "Take the train.".into()),
+            ("scripts/read-only.sh".into(), "exit 99".into()),
+        ], None).await.unwrap();
+        mirror_codex_in(&source, &destination).await.unwrap();
+        let first = tokio::fs::canonicalize(&destination).await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(first.join("trip-planning/SKILL.md")).await.unwrap(), SKILL);
+        assert_eq!(tokio::fs::read_to_string(first.join("trip-planning/scripts/read-only.sh")).await.unwrap(), "exit 99");
+        set_enabled_in(&source, "trip-planning", false).await.unwrap();
+        mirror_codex_in(&source, &destination).await.unwrap();
+        assert!(!destination.join("trip-planning").exists());
+        assert!(first.join("trip-planning/SKILL.md").exists());
+        set_enabled_in(&source, "trip-planning", true).await.unwrap();
+        mirror_codex_in(&source, &destination).await.unwrap();
+        assert_eq!(tokio::fs::canonicalize(&destination).await.unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn corrupt_enabled_metadata_never_exposes_a_skill_to_codex() {
+        let store = Store::new();
+        let source = store.0.join("installed");
+        install_in(&source, SKILL, None, &[], None).await.unwrap();
+        tokio::fs::write(source.join("trip-planning/.meta.json"), b"{").await.unwrap();
+        assert!(load(&source, "trip-planning").await.is_err());
+        let destination = store.0.join("codex/chatgsd-skills");
+        mirror_codex_in(&source, &destination).await.unwrap();
+        assert!(!destination.join("trip-planning").exists());
     }
 
     enum Member<'a> {

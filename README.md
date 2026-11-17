@@ -2,7 +2,7 @@
 
 <img src="docs/app-icon.png" alt="ChatGSD" width="128" height="128" style="border-radius: 22px; margin-bottom: 8px;">
 
-A markdown notes app you co-edit with ChatGPT. It's offline-first and keyboard-optimized, and your notes stay plain markdown files on your Mac.
+A markdown notes app you co-edit with Codex, signed in with ChatGPT. It's offline-first and keyboard-optimized, and your notes stay plain markdown files on your Mac.
 
 ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 
@@ -23,8 +23,8 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 - **Wikilinks** - Type `[[` to link between notes with autocomplete
 - **Slash commands** - Type `/` to quickly insert headings, lists, code blocks, diagrams, and more
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
-- **Agent panel** - Co-edit with ChatGPT through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret and subtle working-range highlight show where it is working without taking your selection. Follow agent keeps its work in view until you scroll or type. During an active coediting session, it observes your edits and checks in after you pause typing. Each note keeps its conversation history
-- **Web research** - With internet access on, the agent hands questions your notes can't answer to a researcher: a separate agent role that searches the web, reads pages and reports back with sources. Its model (Luna by default) and brief are yours to change in Settings → Integrations
+- **Agent panel** - Co-edit with Codex through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret and subtle working-range highlight show where it is working without taking your selection. Follow agent keeps its work in view until you scroll or type. During an active coediting session, it observes your edits and checks in after you pause typing. Each note keeps its conversation history
+- **Web research** - With internet access on, the agent hands questions your notes can't answer to a researcher: a separate Codex role that searches the web, reads pages and reports back with sources. Its model and brief are yours to change in Settings → Integrations
 - **Skills** - Save [Agent Skills](https://agentskills.io) for the agent to follow. When a site the researcher reads publishes a skill that fits your work, the agent offers it on a card with its full instructions, and you decide whether to save it. Manage, switch off, remove or add skills by address in Settings → Skills
 - **Works with other AI agents** - Changes made to an open note on disk merge in live, and conflicting edits show up as changes to review
 - **Folders** - Opt-in collapsible folder tree with drag-and-drop to organize notes
@@ -72,6 +72,26 @@ npm run tauri build    # Production build
 
 ## Computer-assisted coediting
 
+Codex App Server runs the agent over a local stdio connection. ChatGSD still owns
+the editor tools, document-to-conversation mapping, and visible editing UI.
+Signing in uses Codex's ChatGPT flow; your plan's Codex usage limits apply.
+The previous direct-API sign-in is not reused, so existing users need to sign in
+again after upgrading.
+
+macOS builds bundle the checksum-verified Codex 0.169.0 executable and its
+license notices. Source builds prepare it automatically. For development,
+`CHATGSD_CODEX_PATH` selects an explicit executable; installed releases use the
+bundled runtime rather than a globally installed CLI.
+
+Existing transcripts stay available. Importing an older conversation requires
+the same account, verified against its saved ownership information. If that
+cannot be verified, start a new conversation rather than moving private history
+to a different account.
+
+Enabled skills are exposed through Codex's native skill discovery. ChatGSD keeps
+installation and enablement under your control; disabled skills are excluded,
+and skill scripts and dependency installers are not executed.
+
 Scratch keeps document editing on its direct TipTap transaction tools. The agent
 has a separate caret that follows its work while your selection stays yours.
 Edits land immediately, with a subtle highlight on the agent's current edit,
@@ -89,6 +109,10 @@ Selecting text attaches it to the agent sidebar. Moving into the composer keeps
 that selection ready to send. Clicking elsewhere in the note, collapsing the
 selection with the keyboard, or pressing Escape clears the attachment. You can
 also dismiss it with the selection card's close button.
+After an agent edit, clicking in the note, moving the cursor, typing, or pressing
+Escape also dismisses the run's selection highlight and the last working-range
+highlight. The agent keeps its separate caret and edit target, so it can finish
+the request without keeping your text visibly selected.
 Opening the agent panel with `Cmd+Option+B`, `Cmd+J`, or its toolbar button focuses
 the chat input right away. Closing it returns focus to the note without
 moving your cursor, in both formatted and Markdown source mode.
@@ -97,14 +121,25 @@ Keyboard focus only crosses between the note and the sidebar when you move it:
 `Cmd+Option+←` returns to the note where you left your cursor. Account checks,
 coediting check-ins, and agent edits never move focus.
 
-In the formatted editor, `Cmd+Option+Enter` opens a small inline edit prompt at
-the selection or cursor and checks your ChatGPT account without opening the
-sidebar first. Enter sends; Shift+Enter adds a newline; Escape returns
-to the note. Requests include up to 2,000 document positions of surrounding prose
-on each side and tell the agent to read the rest of the note when it needs more
-context. The selection is the default edit target; without one, the cursor is
-the insertion point. Its target follows document edits and remains available
-for retries and follow-up instructions.
+In the formatted editor, `Cmd+Option+Enter` opens the inline agent at the selection
+or cursor without opening the sidebar. Ask questions, discuss ideas, research,
+or request edits. Enter sends; Shift+Enter adds a newline; Escape returns to the
+note. Selected text and nearby prose are context, not permission to edit.
+The passage follows document edits for retries and follow-up messages.
+
+The inline classifier calls OpenAI's Decisions API (`gpt-6-luna`) directly,
+separately from Codex app-server's coediting turns. It uses the app's refreshed
+ChatGPT sign-in. Opening the interface classifies context to offer three
+suggestions; choosing one fills the composer without sending. Submitting a
+message classifies it as Discuss, Suggest, Edit, Research, or Clarify and adds
+that response guidance to the agent request. Confidence below 0.75 selects
+Discuss. These modes guide the model; they are not tool-permission boundaries.
+Context includes the note title, up to 4,000 document positions of selected text,
+2,000 positions on each side, and six recent user/assistant messages clipped to
+2,000 characters each. Inline messages are limited to 8,000 characters so the
+classifier reads the entire request. API failures leave the draft available
+for retry rather than silently switching classifiers. Computer access remains
+disabled for inline requests.
 
 After sending, the prompt moves to a small companion at the bottom center of
 the editor. It previews the current turn's latest prose, or your instruction

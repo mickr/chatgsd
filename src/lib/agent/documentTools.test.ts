@@ -390,7 +390,7 @@ describe("editedDocuments", () => {
 });
 
 describe("agent presence", () => {
-  it("follows agent edits and user typing without moving the user's caret", async () => {
+  it("keeps the agent caret mapped but dismisses its range when the user types", async () => {
     const editor = openNote("User paragraph.\n\nTarget: original.");
     editor.commands.setTextSelection(4);
     const binding = captureRunBinding(editor, "pending:run")!;
@@ -404,7 +404,7 @@ describe("agent presence", () => {
     expect(editor.state.doc.textBetween(before!.from, before!.to)).toContain("revised");
     editor.view.dispatch(editor.state.tr.insertText("abc", 1));
     const after = agentChangesKey.getState(editor.state)!.presence["agent"];
-    expect(after).toEqual({ from: before!.from + 3, to: before!.to + 3 });
+    expect(after).toEqual({ from: before!.to + 3, to: before!.to + 3 });
     releaseRunBinding(editor, binding, false);
     expect(agentChangesKey.getState(editor.state)!.presence["agent"]).toBeUndefined();
     expect(hunks(editor)).toHaveLength(0);

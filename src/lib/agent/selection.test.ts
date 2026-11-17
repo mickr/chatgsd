@@ -6,10 +6,11 @@ import { Markdown } from "@tiptap/markdown";
 import {
   AgentChanges,
   ScratchDocument,
+  activeFocusRange,
   attachedRange,
   detachSelection,
 } from "../../components/editor/AgentChanges";
-import { captureRunBinding } from "./documentTools";
+import { captureRunBinding, executeDocumentTool, releaseRunBinding } from "./documentTools";
 import { clipPreview, summarizeRange } from "./selection";
 
 const editors: Editor[] = [];
@@ -78,7 +79,7 @@ describe("clipPreview", () => {
 
 describe("attached selection", () => {
   const highlight = (editor: Editor) =>
-    editor.view.dom.querySelector(".agent-selection")?.textContent ?? null;
+    Array.from(editor.view.dom.querySelectorAll(".agent-selection"), (node) => node.textContent).join("") || null;
 
   it("stays attached when focus moves to the sidebar and maps through edits", () => {
     const editor = openNote(NOTE);
@@ -170,5 +171,59 @@ describe("attached selection", () => {
     const binding = captureRunBinding(editor, "run")!;
     expect(binding.selectionMarkdown?.trim()).toBe("rain jacket");
     expect(attachedRange(editor)).toBeNull();
+  });
+
+  it.each(["click", "Escape", "sidebar Escape", "cursor", "typing"])(
+    "dismisses agent highlights after an edit with %s without losing the run target",
+    async (action) => {
+      const editor = openNote(NOTE);
+      Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip", session: 1 });
+      editor.commands.setTextSelection(find(editor, "rain jacket"));
+      const binding = captureRunBinding(editor, "run")!;
+      const result = await executeDocumentTool(editor, binding, "replace_selection", { new_text: "warm coat" });
+      expect(result.ok, result.output).toBe(true);
+      expect(highlight(editor)).toBe("warm coat");
+      expect(editor.view.dom.querySelector(".agent-working-range")).not.toBeNull();
+
+      if (action === "click") {
+        // Exercise the handlers without jsdom's missing coordinate hit testing.
+        const event = new MouseEvent("mousedown", { button: 0 });
+        editor.view.someProp("handleDOMEvents", (handlers) =>
+          handlers.mousedown?.(editor.view, event));
+      } else if (action === "sidebar Escape") {
+        expect(editor.state.selection.empty).toBe(true);
+        detachSelection(editor);
+      } else if (action === "Escape")
+        editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      else if (action === "cursor")
+        editor.commands.setTextSelection(find(editor, "Charger").to);
+      else
+        editor.view.dispatch(editor.state.tr.insertText("My ", 1));
+
+      expect(highlight(editor)).toBeNull();
+      expect(editor.view.dom.querySelector(".agent-working-range")).toBeNull();
+      expect(editor.view.dom.querySelector(".agent-presence-caret")).not.toBeNull();
+      expect(attachedRange(editor)).toBeNull();
+      const target = activeFocusRange(editor)!;
+      expect(editor.state.doc.textBetween(target.from, target.to)).toBe("warm coat");
+      const followup = await executeDocumentTool(editor, binding, "replace_selection", { new_text: "winter coat" });
+      expect(followup.ok, followup.output).toBe(true);
+      expect(editor.state.doc.textContent).toContain("winter coat");
+      expect(highlight(editor)).toBeNull();
+    },
+  );
+
+  it("dismisses the retained working range after a completed turn", async () => {
+    const editor = openNote(NOTE);
+    Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip", session: 1 });
+    editor.commands.setTextSelection(find(editor, "rain jacket"));
+    const binding = captureRunBinding(editor, "run")!;
+    const result = await executeDocumentTool(editor, binding, "replace_selection", { new_text: "warm coat" });
+    expect(result.ok, result.output).toBe(true);
+    releaseRunBinding(editor, binding, true);
+    expect(editor.view.dom.querySelector(".agent-working-range")).not.toBeNull();
+    editor.view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(editor.view.dom.querySelector(".agent-working-range")).toBeNull();
+    expect(editor.view.dom.querySelector(".agent-presence-caret")).not.toBeNull();
   });
 });

@@ -7,7 +7,7 @@ export interface ChatGptAccount {
   planNoticeSeen: boolean;
 }
 export interface AgentStatus {
-  status: "ready" | "signed_out" | "plan_usage_disabled";
+  status: "ready" | "signed_out" | "error";
   detail: string | null;
   account: ChatGptAccount | null;
 }
@@ -98,6 +98,19 @@ export interface ConversationSummary {
   createdAt: number;
   updatedAt: number;
 }
+
+export type InlineIntent = "discuss" | "suggest" | "edit" | "research" | "clarify";
+export interface InlineDecision { intent: InlineIntent; confidence: number }
+export interface InlineContext {
+  title: string;
+  selection: string;
+  before: string;
+  after: string;
+  message: string;
+  history: Array<{ role: string; text: string }>;
+}
+export const classifyInlineContext = (context: InlineContext) =>
+  invoke<InlineDecision>("agent_classify_inline", { context });
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const setupComputerPermissions = () =>

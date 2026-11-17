@@ -36,9 +36,7 @@ chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tiny_http = "0.12"
 uuid = { version = "1", features = ["v4"] }
-rand = "0.9"
 sha2 = "0.10"
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 futures-util = "0.3"
 which = "6"
 htmd = "0.5"

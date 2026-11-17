@@ -25,6 +25,7 @@ interface FocusRange {
   id: string;
   from: number;
   to: number;
+  dismissed?: boolean;
 }
 interface ChangeState {
   hunks: AgentChange[];
@@ -40,6 +41,7 @@ interface ChangeMeta {
   clear?: boolean;
   focus?: FocusRange;
   releaseFocus?: string;
+  dismissSelection?: boolean;
   /** Agent presence metadata - keys are runIds, values are ranges */
   presence?: { [runId: string]: { from: number; to: number } };
   /** Clear presence for a specific runId */
@@ -296,7 +298,7 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
   
   // Render focus ranges (the selection a run was sent with)
   for (const range of state.focusRanges)
-    if (range.from < range.to)
+    if (!range.dismissed && range.from < range.to)
       result.push(
         Decoration.inline(range.from, range.to, { class: "agent-selection" }),
       );
@@ -389,7 +391,7 @@ const attachedSelection = new Plugin<AttachedSelection>({
       if (
         !range ||
         (focused && !state.selection.empty) ||
-        agentChangesKey.getState(state)?.focusRanges.length
+        agentChangesKey.getState(state)?.focusRanges.some((range) => !range.dismissed)
       )
         return null;
       return DecorationSet.create(state.doc, [
@@ -397,17 +399,29 @@ const attachedSelection = new Plugin<AttachedSelection>({
       ]);
     },
     handleKeyDown: (view, event) => {
-      if (event.key !== "Escape" || !attachedSelectionKey.getState(view.state)?.range)
-        return false;
+      const changes = agentChangesKey.getState(view.state);
+      const presence = changes?.presence.agent;
+      if (event.key !== "Escape" || !(
+        attachedSelectionKey.getState(view.state)?.range ||
+        changes?.focusRanges.some((range) => !range.dismissed) ||
+        (presence && presence.from < presence.to)
+      )) return false;
       event.stopPropagation();
       const { tr } = view.state;
       tr.setSelection(TextSelection.create(tr.doc, tr.selection.to));
       view.dispatch(
-        tr.setMeta(attachedSelectionKey, { clear: true }).setMeta("addToHistory", false),
+        setChangeMeta(tr, { dismissSelection: true })
+          .setMeta(attachedSelectionKey, { clear: true }).setMeta("addToHistory", false),
       );
       return true;
     },
     handleDOMEvents: {
+      mousedown: (view, event) => {
+        if (event.button === 0)
+          view.dispatch(setChangeMeta(view.state.tr, { dismissSelection: true })
+            .setMeta("addToHistory", false));
+        return false;
+      },
       focus: (view) => {
         view.dispatch(
           view.state.tr.setMeta(attachedSelectionKey, { focused: true }),
@@ -434,7 +448,8 @@ export function detachSelection(editor: Editor): void {
   if (!tr.selection.empty)
     tr.setSelection(TextSelection.create(tr.doc, tr.selection.to));
   editor.view.dispatch(
-    tr.setMeta(attachedSelectionKey, { clear: true }).setMeta("addToHistory", false),
+    setChangeMeta(tr, { dismissSelection: true })
+      .setMeta(attachedSelectionKey, { clear: true }).setMeta("addToHistory", false),
   );
 }
 
@@ -522,7 +537,11 @@ export const AgentChanges = Extension.create({
           apply(tr, previous) {
             const meta = tr.getMeta(agentChangesKey) as ChangeMeta | undefined;
             if (meta?.clear) return { hunks: [], focusRanges: [], presence: {}, arrival: DecorationSet.empty, lineChanges: [] };
-            if (!tr.docChanged && !meta) return previous;
+            // Dismiss the paint, not the run's mapped target, when the user
+            // resumes editing. Agent transactions must not count as user input.
+            const dismissSelection = meta?.dismissSelection ||
+              (!meta?.source && (tr.selectionSet || tr.docChanged));
+            if (!tr.docChanged && !meta && !dismissSelection) return previous;
             // Keep the same state object while nothing is tracked, so review UI
             // subscribed through useAgentChanges doesn't re-render on every keystroke.
             if (!meta && !previous.hunks.length && !previous.lineChanges.length && !previous.focusRanges.length && !Object.keys(previous.presence).length && previous.arrival === DecorationSet.empty)
@@ -547,11 +566,12 @@ export const AgentChanges = Extension.create({
             if (meta?.add) hunks.push(...meta.add.filter((hunk) => hunk.origin === "external"));
             
             // Update focus ranges
-            const focusRanges = previous.focusRanges
+            const focusRanges: FocusRange[] = previous.focusRanges
               .filter((range) => range.id !== meta?.releaseFocus)
               .map((range) => ({
                 ...range,
                 from: tr.mapping.map(range.from, -1),
+                dismissed: range.dismissed || dismissSelection,
                 to: tr.mapping.map(range.to, 1),
               }));
             if (meta?.focus) focusRanges.push(meta.focus);
@@ -569,6 +589,8 @@ export const AgentChanges = Extension.create({
               }
             }
             if (meta?.presence?.agent) presence.agent = meta.presence.agent;
+            if (dismissSelection && presence.agent)
+              presence.agent = { from: presence.agent.to, to: presence.agent.to };
             
             let arrival = meta?.clearArrival || tr.docChanged ? DecorationSet.empty : previous.arrival;
             if (meta?.arrival) arrival = arrivalDecorations(tr.doc, meta.arrival);

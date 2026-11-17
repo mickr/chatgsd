@@ -1,5 +1,5 @@
 mod bridge;
-pub mod chatgpt;
+pub mod codex;
 mod computer;
 pub mod computer_permissions;
 pub mod conversations;
@@ -42,7 +42,6 @@ pub struct RunContext {
 pub enum AgentErrorKind {
     Auth,
     UsageLimit,
-    NotEligible,
     Other,
 }
 
@@ -122,11 +121,11 @@ impl AgentState {
 
 #[tauri::command]
 pub async fn agent_status(app: tauri::AppHandle) -> AgentStatus {
-    chatgpt::status(&app).await
+    codex::status(&app).await
 }
 #[tauri::command]
 pub async fn agent_list_models(app: tauri::AppHandle) -> Result<Vec<ModelInfo>, String> {
-    chatgpt::list_models(&app).await
+    codex::list_models(&app).await
 }
 /// The research role's built-in brief, shown in settings until the user edits it.
 #[tauri::command]
@@ -183,7 +182,7 @@ pub async fn agent_start_run(
             return;
         }
         let model = request.model.filter(|m| !m.is_empty());
-        let result = chatgpt::run(
+        let result = codex::run(
             task_app.clone(),
             task_ctx.clone(),
             model,

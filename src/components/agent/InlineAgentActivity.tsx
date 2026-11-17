@@ -4,7 +4,9 @@ import { splitReply } from "../../lib/agent/ui/content";
 export type InlineActivityState = "thinking" | "reading" | "editing" | "researching" | "responding" | "waiting" | "done" | "paused" | "error";
 
 export function displayInstruction(text: string): string {
-  if (!text.startsWith("Inline edit request. Apply the instruction directly in the current note.")) return text;
+  // Older saved conversations used the edit-only preamble.
+  if (!text.startsWith("Inline agent request.") &&
+      !text.startsWith("Inline edit request. Apply the instruction directly in the current note.")) return text;
   const separator = "\n\nUser instruction:\n\n";
   const start = text.indexOf(separator);
   return start < 0 ? text : text.slice(start + separator.length);

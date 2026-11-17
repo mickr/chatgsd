@@ -211,3 +211,16 @@ it("leaves the note focused when leaving focus mode shows the panel again", () =
   expect(container.querySelector("aside")!.getAttribute("aria-hidden")).toBe("false");
   expect(document.activeElement).toBe(editor.view.dom);
 });
+
+it("offers a runtime retry rather than sign-in when Codex cannot start", () => {
+  const refreshStatus = vi.fn();
+  state.agent.status = { status: "error", detail: "The bundled Codex runtime is missing.", account: null };
+  state.agent.refreshStatus = refreshStatus;
+  act(() => container.querySelector("button")!.click());
+  expect(container.textContent).toContain("The bundled Codex runtime is missing.");
+  const buttons = [...container.querySelectorAll("button")];
+  expect(buttons.some(button => button.textContent === "Continue with ChatGPT")).toBe(false);
+  const retry = buttons.find(button => button.textContent === "Try again")!;
+  act(() => retry.click());
+  expect(refreshStatus).toHaveBeenCalledOnce();
+});

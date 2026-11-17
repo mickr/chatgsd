@@ -152,9 +152,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const draft = currentNote ? (drafts[currentNote.id] ?? "") : "";
   const needsPlanNotice =
     status?.account?.planUsage && !status.account.planNoticeSeen;
-  const showChatGptSignIn =
-    status?.status === "signed_out" ||
-    status?.status === "plan_usage_disabled";
+  const showChatGptSignIn = status?.status === "signed_out";
   const reason = !currentNote
     ? "Open a note to start a conversation."
     : agent.statusLoading
@@ -165,7 +163,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           ? (status.detail ??
             (status.status === "signed_out"
               ? "Sign in with ChatGPT to get started."
-              : "ChatGPT plan usage is disabled. Continue with ChatGPT to enable it."))
+              : "Codex is unavailable. Try again."))
           : needsPlanNotice
             ? "Confirm ChatGPT plan use above to continue."
             : agent.modelsLoading
@@ -553,9 +551,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           {showChatGptSignIn && (
             <div className="mb-3 space-y-2">
               <p className="text-xs text-text-muted leading-relaxed">
-                {status?.status === "plan_usage_disabled"
-                  ? "You're signed in, but ChatGSD can't use your ChatGPT plan yet. Continue with ChatGPT to allow it."
-                  : "Use your ChatGPT plan in ChatGSD. Eligible requests use your plan or credits balance."}
+                Sign in with ChatGPT to use Codex in ChatGSD. Your plan's Codex usage limits apply.
               </p>
               <ContinueWithChatGPT />
             </div>
@@ -572,6 +568,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             </p>
           )}
           {(agent.statusError ||
+            status?.status === "error" ||
             agent.modelsError ||
             (!status && !agent.statusLoading)) && (
             <button

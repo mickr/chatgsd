@@ -7,18 +7,21 @@ import { Markdown } from "@tiptap/markdown";
 import { captureRunBinding, releaseRunBinding } from "../../lib/agent/documentTools";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AgentChanges, ScratchDocument, attachedRange } from "../editor/AgentChanges";
-import { InlineAgentPrompt, inlineEditPrompt } from "./InlineAgentPrompt";
+import { InlineAgentPrompt, inlineAgentPrompt } from "./InlineAgentPrompt";
 import type { Conversation } from "../../context/AgentContext";
+import { invoke } from "@tauri-apps/api/core";
 
 const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown> }));
 vi.mock("../../context/AgentContext", () => ({ useAgent: () => state.agent }));
 vi.mock("../../context/NotesContext", () => ({ useNotes: () => ({ selectNote: vi.fn() }) }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root;
 let container: HTMLDivElement;
 let editor: Editor;
 
 beforeEach(() => {
+  vi.mocked(invoke).mockReset().mockResolvedValue({ intent: "discuss", confidence: 0.95 });
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   container = document.createElement("div");
@@ -59,7 +62,7 @@ it("opens on Cmd+Option+Enter without inserting a newline or losing the target",
   editor.commands.setTextSelection({ from: 20, to: 26 });
   const before = editor.getJSON();
   open();
-  expect(document.activeElement?.getAttribute("aria-label")).toBe("Inline edit instruction");
+  expect(document.activeElement).toBe(document.querySelector("textarea"));
   expect(attachedRange(editor)).toEqual({ from: 20, to: 26 });
   expect(editor.getJSON()).toEqual(before);
   act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
@@ -85,10 +88,10 @@ it("sends surrounding prose with the selected target through the shared agent", 
   expect(composerInput().value).toBe("");
 });
 
-it("identifies an insertion cursor and bounds context instead of attaching the whole note", () => {
+it("includes cursor context without attaching the whole note", () => {
   editor.commands.setContent(`<p>${"A".repeat(5000)}CURSOR${"B".repeat(5000)}</p>`);
   editor.commands.setTextSelection(5001);
-  const prompt = inlineEditPrompt(editor, "Add a transition");
+  const prompt = inlineAgentPrompt(editor, "What would make a good transition?");
   expect(prompt).toContain('"target":"cursor"');
   expect(prompt).toContain('"after":"CURSOR');
   expect(prompt).not.toContain("A".repeat(2001));
@@ -163,9 +166,9 @@ it("checks an initially unknown account on inline open and enables sending when 
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Shorten this");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  expect(document.querySelector<HTMLButtonElement>('[aria-label="Send inline edit"]')?.disabled).toBe(true);
+  expect(document.querySelector<HTMLButtonElement>('[aria-label="Send message"]')?.disabled).toBe(true);
   await act(async () => { resolveStatus(); await statusReady; });
-  expect(document.querySelector<HTMLButtonElement>('[aria-label="Send inline edit"]')?.disabled).toBe(false);
+  expect(document.querySelector<HTMLButtonElement>('[aria-label="Send message"]')?.disabled).toBe(false);
   await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
   expect(state.agent.send).toHaveBeenCalledOnce();
   expect(state.agent.refreshStatus).toHaveBeenCalledOnce();
@@ -224,4 +227,87 @@ it("docks while working, reveals real turns, and keeps activity visible when wri
   expect(onContinue).toHaveBeenCalledOnce();
   expect(document.querySelector(".inline-agent-prompt")).toBeNull();
   expect(state.agent.stop).toHaveBeenCalledOnce();
+});
+
+it("does not send or change notes when classification fails and keeps the message for retry", async () => {
+  open();
+  await act(async () => {});
+  vi.mocked(invoke).mockRejectedValueOnce(new Error("Decisions unavailable"));
+  const before = editor.getJSON();
+  const input = composerInput();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "What do you think?");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  expect(state.agent.send).not.toHaveBeenCalled();
+  expect(editor.getJSON()).toEqual(before);
+  expect(composerInput().value).toBe("What do you think?");
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain("Decisions unavailable");
+});
+
+it.each(["Open in sidebar", "Pause agent"])("ignores a pending classification after %s", async (action) => {
+  open();
+  await act(async () => {});
+  let resolve!: (value: unknown) => void;
+  vi.mocked(invoke).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+  const input = composerInput();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Explain this");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  act(() => document.querySelector<HTMLButtonElement>(`[aria-label="${action}"]`)!.click());
+  await act(async () => { resolve({ intent: "discuss", confidence: 0.9 }); });
+  expect(state.agent.send).not.toHaveBeenCalled();
+  if (action === "Pause agent") {
+    expect(state.agent.stop).toHaveBeenCalledOnce();
+    expect(composerInput().value).toBe("Explain this");
+    expect(composerInput().disabled).toBe(false);
+  }
+});
+
+it("does not send an old request against a newly invoked passage", async () => {
+  editor.commands.setTextSelection({ from: 20, to: 26 });
+  open();
+  await act(async () => {});
+  let resolve!: (value: unknown) => void;
+  vi.mocked(invoke).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+  const input = composerInput();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Rewrite this");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  act(() => editor.commands.setTextSelection({ from: 39, to: 44 }));
+  open();
+  await act(async () => { resolve({ intent: "edit", confidence: 0.95 }); });
+  expect(state.agent.send).not.toHaveBeenCalled();
+  const calls = vi.mocked(invoke).mock.calls;
+  expect(calls[calls.length - 1][1]).toMatchObject({ context: { message: "", selection: "After" } });
+  expect(composerInput().disabled).toBe(false);
+});
+
+it("offers classified suggestions without sending until the user submits", async () => {
+  vi.mocked(invoke).mockResolvedValue({ intent: "research", confidence: 0.95 });
+  open();
+  await act(async () => {});
+  const suggestion = document.querySelector<HTMLButtonElement>(".inline-agent-suggestions button")!;
+  const text = suggestion.textContent;
+  act(() => suggestion.click());
+  expect(composerInput().value).toBe(text);
+  expect(state.agent.send).not.toHaveBeenCalled();
+});
+
+it("allows discussion after the selected context was deleted", async () => {
+  editor.commands.setTextSelection({ from: 20, to: 26 });
+  open();
+  act(() => editor.commands.deleteRange({ from: 20, to: 26 }));
+  const input = composerInput();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "What should go here instead?");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  expect(state.agent.send).toHaveBeenCalledOnce();
 });

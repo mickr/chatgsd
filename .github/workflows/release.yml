@@ -191,6 +191,15 @@ jobs:
           signature=$(codesign --display --verbose=4 "$driver" 2>&1)
           grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
 
+          # Codex is a resource executable, signed by the preparation hook
+          # before Tauri signs and notarizes the enclosing app.
+          codex="$app/Contents/Resources/codex/codex"
+          test -x "$codex"
+          test "$("$codex" --version)" = "codex-cli 0.169.0"
+          codesign --verify --strict --verbose=2 --test-requirement "=$requirement" "$codex"
+          signature=$(codesign --display --verbose=4 "$codex" 2>&1)
+          grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+
           # Automatic updates must carry the same executable, permissions and
           # license notices as a fresh install, not just the main app binary.
           updater_dir=$(mktemp -d "$RUNNER_TEMP/chatgsd-updater.XXXXXX")
@@ -198,13 +207,22 @@ jobs:
           tar -xzf "$app.tar.gz" -C "$updater_dir" \
             ChatGSD.app/Contents/MacOS/cua-driver \
             ChatGSD.app/Contents/Resources/licenses/cua-driver/LICENSE \
-            ChatGSD.app/Contents/Resources/licenses/cua-driver/THIRD_PARTY_NOTICES.md
+            ChatGSD.app/Contents/Resources/licenses/cua-driver/THIRD_PARTY_NOTICES.md \
+            ChatGSD.app/Contents/Resources/codex/codex \
+            ChatGSD.app/Contents/Resources/licenses/codex/LICENSE \
+            ChatGSD.app/Contents/Resources/licenses/codex/NOTICE
           updated_app="$updater_dir/ChatGSD.app"
           test -x "$updated_app/Contents/MacOS/cua-driver"
           cmp "$driver" "$updated_app/Contents/MacOS/cua-driver"
           for license in LICENSE THIRD_PARTY_NOTICES.md; do
             cmp "src-tauri/resources/cua-driver/$license" "$app/Contents/Resources/licenses/cua-driver/$license"
             cmp "$app/Contents/Resources/licenses/cua-driver/$license" "$updated_app/Contents/Resources/licenses/cua-driver/$license"
+          done
+          test -x "$updated_app/Contents/Resources/codex/codex"
+          cmp "$codex" "$updated_app/Contents/Resources/codex/codex"
+          for license in LICENSE NOTICE; do
+            cmp "src-tauri/resources/codex/$license" "$app/Contents/Resources/licenses/codex/$license"
+            cmp "$app/Contents/Resources/licenses/codex/$license" "$updated_app/Contents/Resources/licenses/codex/$license"
           done
 
       # Only a verified build becomes the latest release the updater sees.

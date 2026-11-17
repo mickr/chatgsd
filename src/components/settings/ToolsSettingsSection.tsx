@@ -58,7 +58,7 @@ function CliUsageHint() {
   );
 }
 
-const STATUS_LABELS = { ready: "Ready", signed_out: "Signed out", plan_usage_disabled: "Plan usage disabled" };
+const STATUS_LABELS = { ready: "Ready", signed_out: "Signed out", error: "Codex unavailable" };
 
 /** Internet access and the researcher role that does the web work. */
 function InternetAccessSettings() {
@@ -127,7 +127,7 @@ function InternetAccessSettings() {
                 ))
               ) : (
                 <option value="">
-                  {agent.modelsLoading ? "Loading models…" : "Luna, once you're signed in"}
+                  {agent.modelsLoading ? "Loading models…" : "Available after signing in"}
                 </option>
               )}
             </Select>
@@ -222,17 +222,17 @@ export function ToolsSettingsSection() {
           <h2 className="text-xl font-medium mb-0.5">Agent</h2>
           <button type="button" className="text-xs text-text-muted hover:text-text" disabled={agent.statusLoading} onClick={() => { void agent.refreshStatus(); }}>Refresh</button>
         </div>
-        <p className="text-sm text-text-muted mb-4">Work alongside ChatGPT in your notes ({mod}J). Edits land directly while your caret stays yours.</p>
+        <p className="text-sm text-text-muted mb-4">Work alongside Codex in your notes ({mod}J), signed in with ChatGPT. Edits land directly while your caret stays yours.</p>
         {agent.statusLoading && <div className="flex items-center gap-2 p-3 text-sm text-text-muted"><SpinnerIcon className="w-4 h-4 animate-spin" />Checking your ChatGPT account…</div>}
         {agent.statusError && <p role="alert" className="text-sm text-red-500 mb-3">{agent.statusError}</p>}
         {agent.status && (
           <div className="space-y-3">
             <div className="rounded-[10px] border border-border p-4 space-y-3">
               <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2.5"><ChatGPTIcon className="w-4.5 h-4.5" /><h3 className="text-sm font-medium">ChatGPT</h3></div><span className="text-xs text-text-muted">{STATUS_LABELS[agent.status.status]}</span></div>
-              <p className="text-xs text-text-muted leading-relaxed">Use your ChatGPT plan or credits balance for eligible requests in Scratch.</p>
-              {agent.status.account && <div className="text-xs space-y-1"><p>{agent.status.account.email}</p><p className="text-text-muted">{agent.status.account.planUsage ? "Using ChatGPT plan" : "ChatGPT plan usage is disabled"}</p></div>}
+              <p className="text-xs text-text-muted leading-relaxed">Codex powers the agent using your ChatGPT account and plan's Codex usage limits.</p>
+              {agent.status.account && <div className="text-xs space-y-1"><p>{agent.status.account.email}</p><p className="text-text-muted">Using your ChatGPT plan's Codex allowance</p></div>}
               {agent.status.detail && <p className="text-xs text-text-muted">{agent.status.detail}</p>}
-              {(agent.status.status !== "ready" || !agent.status.account?.planUsage) && <ContinueWithChatGPT />}
+              {agent.status.status === "signed_out" && <ContinueWithChatGPT />}
               <div className="flex items-center justify-between text-xs"><ManageUsage />{agent.status.account && <button type="button" className="text-text-muted hover:text-text" onClick={() => { void agent.signOut(); }}>Sign out</button>}</div>
             </div>
             <PlanNotice />
