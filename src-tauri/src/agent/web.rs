@@ -15,7 +15,7 @@
 use super::{reading, skills, tools::ToolOutput};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -27,7 +27,6 @@ const MAX_REDIRECTS: usize = 5;
 const MAX_PAGE_BYTES: usize = 2_000_000;
 const MAX_INDEX_BYTES: usize = 500_000;
 const MAX_INDEX_SKILLS: usize = 50;
-const CACHED_PAGES: usize = 8;
 /// Lines longer than this are folded, so one line of minified text can't
 /// defeat paging by line.
 const MAX_LINE_CHARS: usize = 2_000;
@@ -227,9 +226,12 @@ pub struct Page {
     pub truncated: bool,
 }
 
-/// Pages read lately by address, so paging through a long one doesn't fetch it again.
-type PageCache = VecDeque<(String, Arc<Page>)>;
-static PAGES: LazyLock<Mutex<PageCache>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+/// The pages one research call has read. Paging through a long page reads the
+/// copy kept here, so its line numbers hold still between reads. Each call
+/// starts with none: a page read for an earlier question is never passed off
+/// as current.
+#[derive(Default)]
+pub struct Pages(Vec<(String, Page)>);
 
 static TITLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("title pattern"));
@@ -272,19 +274,21 @@ fn fold_long_lines(text: String) -> String {
     folded
 }
 
-async fn read_page(fetcher: Fetcher, address: &str) -> Result<Arc<Page>, String> {
-    let key = http_url(address)?.to_string();
-    let cached = PAGES
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .iter()
-        .find(|(cached, _)| *cached == key)
-        .map(|(_, page)| page.clone());
-    if let Some(page) = cached {
-        return Ok(page);
+impl Pages {
+    async fn read(&mut self, fetcher: Fetcher, address: &str) -> Result<&Page, String> {
+        let key = http_url(address)?.to_string();
+        if let Some(index) = self.0.iter().position(|(read, _)| *read == key) {
+            return Ok(&self.0[index].1);
+        }
+        let page = fetch_page(fetcher, &key).await?;
+        self.0.push((key, page));
+        Ok(&self.0[self.0.len() - 1].1)
     }
+}
+
+async fn fetch_page(fetcher: Fetcher, key: &str) -> Result<Page, String> {
     let fetched = fetcher
-        .get(&key, PAGE_ACCEPT, MAX_PAGE_BYTES)
+        .get(key, PAGE_ACCEPT, MAX_PAGE_BYTES)
         .await
         .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&fetched.bytes).into_owned();
@@ -309,23 +313,17 @@ async fn read_page(fetcher: Fetcher, address: &str) -> Result<Arc<Page>, String>
             fetched.content_type
         ));
     };
-    let page = Arc::new(Page {
+    Ok(Page {
         url: fetched.url,
         title,
         markdown: fold_long_lines(markdown),
         truncated: fetched.truncated,
-    });
-    let mut pages = PAGES.lock().unwrap_or_else(|error| error.into_inner());
-    if pages.len() == CACHED_PAGES {
-        pages.pop_front();
-    }
-    pages.push_back((key, page.clone()));
-    Ok(page)
+    })
 }
 
 /// The researcher's `web_fetch`: one page as markdown, whole when short and
 /// otherwise paged by line. Also returns the address read, after redirects.
-pub async fn fetch_tool(fetcher: Fetcher, args: &Value) -> (ToolOutput, Option<Url>) {
+pub async fn fetch_tool(fetcher: Fetcher, pages: &mut Pages, args: &Value) -> (ToolOutput, Option<Url>) {
     let Some(address) = args.get("url").and_then(Value::as_str) else {
         return (ToolOutput::error("url must be a string"), None);
     };
@@ -335,7 +333,7 @@ pub async fn fetch_tool(fetcher: Fetcher, args: &Value) -> (ToolOutput, Option<U
             .filter(|line| *line > 0)
             .map(|line| line as usize)
     };
-    match read_page(fetcher, address).await {
+    match pages.read(fetcher, address).await {
         Ok(page) => {
             let title = page
                 .title
@@ -539,18 +537,27 @@ pub mod testing {
     }
 
     /// Serves `routes` from loopback for the rest of the test process and
-    /// returns the site's base address. Unknown paths answer 404.
+    /// returns the site's base address. Unknown paths answer 404. A body's
+    /// `{visit}` becomes the number of times its path has been requested, for
+    /// pages that change between reads.
     pub fn serve(routes: Vec<Route>) -> String {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let base = format!("http://{}", server.server_addr().to_ip().unwrap());
         std::thread::spawn(move || {
+            let mut visits = std::collections::HashMap::new();
             for request in server.incoming_requests() {
                 let path = request.url().split('?').next().unwrap_or_default().to_owned();
                 let Some(route) = routes.iter().find(|route| route.path == path) else {
                     let _ = request.respond(tiny_http::Response::empty(404));
                     continue;
                 };
-                let mut response = tiny_http::Response::from_data(route.body.clone())
+                let visit: &mut usize = visits.entry(route.path).or_default();
+                *visit += 1;
+                let body = match std::str::from_utf8(&route.body) {
+                    Ok(text) if text.contains("{visit}") => text.replace("{visit}", &visit.to_string()).into_bytes(),
+                    _ => route.body.clone(),
+                };
+                let mut response = tiny_http::Response::from_data(body)
                     .with_status_code(route.status)
                     .with_header(
                         tiny_http::Header::from_bytes("Content-Type", route.content_type).unwrap(),
@@ -627,7 +634,8 @@ mod tests {
             page("/photo", "image/png", vec![0x89, b'P', b'N', b'G']),
             page("/big", "text/plain", "x".repeat(MAX_PAGE_BYTES + 10)),
         ]);
-        let (output, url) = fetch_tool(LOCAL, &json!({"url": format!("{base}/old")})).await;
+        let mut pages = Pages::default();
+        let (output, url) = fetch_tool(LOCAL, &mut pages, &json!({"url": format!("{base}/old")})).await;
         assert!(output.ok, "{}", output.text);
         assert_eq!(url.unwrap().path(), "/passes", "the address read is the redirect's target");
         assert!(output.text.contains("Title: Rail passes\n"));
@@ -637,12 +645,27 @@ mod tests {
             assert!(!output.text.contains(chrome), "{chrome} should be dropped");
         }
 
-        assert!(!fetch_tool(LOCAL, &json!({"url": format!("{base}/away")})).await.0.ok);
-        assert!(!fetch_tool(LOCAL, &json!({"url": format!("{base}/missing")})).await.0.ok);
-        let photo = fetch_tool(LOCAL, &json!({"url": format!("{base}/photo")})).await.0;
+        assert!(!fetch_tool(LOCAL, &mut pages, &json!({"url": format!("{base}/away")})).await.0.ok);
+        assert!(!fetch_tool(LOCAL, &mut pages, &json!({"url": format!("{base}/missing")})).await.0.ok);
+        let photo = fetch_tool(LOCAL, &mut pages, &json!({"url": format!("{base}/photo")})).await.0;
         assert!(!photo.ok && photo.text.contains("image/png"));
-        let big = fetch_tool(LOCAL, &json!({"url": format!("{base}/big")})).await.0;
+        let big = fetch_tool(LOCAL, &mut pages, &json!({"url": format!("{base}/big")})).await.0;
         assert!(big.ok && big.text.contains("the rest is missing"));
+    }
+
+    #[tokio::test]
+    async fn a_later_research_reads_a_changed_page_afresh() {
+        let base = serve(vec![page("/rates", "text/plain", "Rate as of visit {visit}")]);
+        let rates = json!({"url": format!("{base}/rates")});
+        let mut first_call = Pages::default();
+        let first = fetch_tool(LOCAL, &mut first_call, &rates).await.0.text;
+        assert!(first.ends_with("Rate as of visit 1"), "{first}");
+        let paged = json!({"url": format!("{base}/rates"), "start_line": 1, "end_line": 1});
+        let again = fetch_tool(LOCAL, &mut first_call, &paged).await.0.text;
+        assert!(again.ends_with("Rate as of visit 1"), "paging within a call reads the same copy: {again}");
+
+        let later = fetch_tool(LOCAL, &mut Pages::default(), &rates).await.0.text;
+        assert!(later.ends_with("Rate as of visit 2"), "{later}");
     }
 
     #[test]

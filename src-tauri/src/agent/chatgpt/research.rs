@@ -171,6 +171,7 @@ pub(super) async fn run(
     ];
     let mut input = vec![json!({"role": "user", "content": question})];
     let mut sites = Vec::new();
+    let mut pages = web::Pages::default();
     let mut report = String::new();
     let mut finished = false;
     let mut step = 0;
@@ -238,7 +239,7 @@ pub(super) async fn run(
         for call in &calls {
             let name = events::canonical_tool_name(&call.name);
             let (output, read) = if name == "web_fetch" {
-                web::fetch_tool(web::PUBLIC, &call.args).await
+                web::fetch_tool(web::PUBLIC, &mut pages, &call.args).await
             } else {
                 (ToolOutput::error(format!("Unknown tool: {name}")), None)
             };
