@@ -218,7 +218,7 @@ mod tests {
         let started = server.rpc("thread/start", json!({
             "model":"gpt-5.4","config":config,"cwd":server.cwd,"sandbox":"read-only","approvalPolicy":"on-request",
             "dynamicTools":[{"type":"namespace","name":"scratch","description":"Live editor","tools":[
-                {"name":"read_document","description":"Read the live document","inputSchema":{"type":"object","properties":{}}}
+                super::super::dynamic_tool("read_document", "Read the live document", json!({"type":"object","properties":{}}))
             ]}]
         })).await.unwrap();
         let thread = started["thread"]["id"].as_str().unwrap().to_owned();
