@@ -671,10 +671,10 @@ export const AgentChanges = Extension.create({
               startedAt = performance.now();
             }
             timer = setTimeout(() => {
-              const duration = Math.min(4000, arrival.positions.length * 24);
+              const duration = Math.min(1000, arrival.positions.length * 6);
               const reveal = Math.floor((performance.now() - startedAt) / duration * arrival.positions.length);
               view.dispatch(setChangeMeta(view.state.tr, { reveal }).setMeta("addToHistory", false));
-            }, 24);
+            }, 16);
           };
           const onMotion = () => { if (motion?.matches) finish(); };
           const onVisibility = () => { if (document.hidden) finish(); };

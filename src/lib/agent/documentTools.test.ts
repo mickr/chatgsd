@@ -461,13 +461,13 @@ describe("agent presence", () => {
     const start = caret();
     expect(serializeDocument(editor)).toBe("My paragraph.\n\nA few newly written words.");
     expect(state().arrival?.revealed).toBe(0);
-    vi.advanceTimersByTime(240);
+    vi.advanceTimersByTime(60);
     expect(state().arrival!.revealed).toBeGreaterThan(0);
     expect(caret()).toBeGreaterThan(start);
     expect(caret()).toBeLessThan(state().presence.agent.to);
     expect(editor.view.dom.querySelector(".agent-text-pending")).not.toBeNull();
     expect(editor.state.selection.toJSON()).toEqual(selection);
-    vi.advanceTimersByTime(4000);
+    vi.advanceTimersByTime(1000);
     expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
     expect(caret()).toBe(state().presence.agent.to);
     editor.commands.undo();
@@ -480,11 +480,11 @@ describe("agent presence", () => {
     await edit(editor, [{ old_text: "Original", new_text: "👩🏽‍💻é next" }]);
     vi.advanceTimersByTime(24);
     const arrival = agentChangesKey.getState(editor.state)!.arrival!;
-    expect(editor.state.doc.textBetween(arrival.ranges[0].from, arrival.positions[arrival.revealed - 1])).toBe("👩🏽‍💻");
+    expect(editor.state.doc.textBetween(arrival.ranges[0].from, arrival.positions[arrival.revealed - 1])).toBe("👩🏽‍💻é");
     await edit(editor, [{ old_text: "👩🏽‍💻é next", new_text: "Long paragraph. ".repeat(500) }]);
-    vi.advanceTimersByTime(2000);
+    vi.advanceTimersByTime(500);
     expect(agentChangesKey.getState(editor.state)!.arrival).not.toBeNull();
-    vi.advanceTimersByTime(2100);
+    vi.advanceTimersByTime(520);
     expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
   });
 

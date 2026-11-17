@@ -248,11 +248,11 @@ it("streams an accepted version at the agent caret while committing the marked t
   expect(editor.view.dom.querySelector(".agent-text-pending")).not.toBeNull();
   vi.advanceTimersByTime(24);
   const arrival = state().arrival!;
-  expect(editor.state.doc.textBetween(arrival.ranges[0].from, arrival.positions[arrival.revealed - 1])).toBe("👩🏽‍💻");
+  expect(editor.state.doc.textBetween(arrival.ranges[0].from, arrival.positions[arrival.revealed - 1])).toMatch(/^👩🏽‍💻/);
   expect(caret()).toBeGreaterThan(offer.source.from);
   expect(editor.state.selection.toJSON()).toEqual(selection);
   expect(document.activeElement).toBe(input);
-  vi.advanceTimersByTime(4000);
+  vi.advanceTimersByTime(1000);
   expect(state().arrival).toBeNull();
   expect(caret()).toBe(state().presence.agent.to);
   expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
