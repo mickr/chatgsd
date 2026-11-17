@@ -92,9 +92,15 @@ function AppWorkspace({ editorRef, onEditorReady }: {
   const [focusMode, setFocusMode] = useState(false);
   const toggleAgentPanel = useCallback(() => {
     setFocusMode(false);
-    if (!focusMode || !agent.open) agent.toggle();
-  }, [focusMode, agent.open, agent.toggle]);
-  useAgentPanelShortcut(view !== "settings", toggleAgentPanel);
+    // Focus mode only hides an open panel, so bring it back instead of closing it.
+    if (focusMode && agent.open) agent.focusPanel();
+    else agent.toggle();
+  }, [focusMode, agent.open, agent.toggle, agent.focusPanel]);
+  const focusAgentPanel = useCallback(() => {
+    setFocusMode(false);
+    agent.focusPanel();
+  }, [agent.focusPanel]);
+  useAgentPanelShortcut(view !== "settings", toggleAgentPanel, focusAgentPanel, agent.focusNote);
 
   // Listen for set-notes-folder event from CLI (scratch .)
   // Placed here in AppContent where both NotesContext and ThemeContext are available
@@ -449,11 +455,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
             />
             <AgentPanel visible={agent.open && !focusMode} />
             {currentNote && (
-              <InlineAgentPrompt key={currentNote.id} onContinue={() => {
-                setFocusMode(false);
-                if (!agent.open) agent.toggle();
-                else document.querySelector<HTMLTextAreaElement>('[aria-label="Message agent"]')?.focus();
-              }} />
+              <InlineAgentPrompt key={currentNote.id} onContinue={focusAgentPanel} />
             )}
           </>
         )}

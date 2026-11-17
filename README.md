@@ -90,8 +90,12 @@ that selection ready to send. Clicking elsewhere in the note, collapsing the
 selection with the keyboard, or pressing Escape clears the attachment. You can
 also dismiss it with the selection card's close button.
 Opening the agent panel with `Cmd+Option+B`, `Cmd+J`, or its toolbar button focuses
-the chat input when it is ready. Closing it returns focus to the note without
+the chat input right away. Closing it returns focus to the note without
 moving your cursor, in both formatted and Markdown source mode.
+Keyboard focus only crosses between the note and the sidebar when you move it:
+`Cmd+Option+→` focuses the chat input, opening the sidebar if needed, and
+`Cmd+Option+←` returns to the note where you left your cursor. Account checks,
+coediting check-ins, and agent edits never move focus.
 
 In the formatted editor, `Cmd+Option+Enter` opens a small inline edit prompt at
 the selection or cursor and checks your ChatGPT account without opening the
@@ -192,6 +196,8 @@ ChatGSD is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Shift+F`     | Search notes           |
 | `Cmd+J`           | Toggle agent panel     |
 | `Cmd+Option+B`    | Toggle agent panel     |
+| `Cmd+Option+→`    | Focus agent sidebar    |
+| `Cmd+Option+←`    | Focus note             |
 | `Cmd+Option+Enter` | Inline AI edit        |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |

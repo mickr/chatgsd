@@ -9,6 +9,8 @@ import * as agent from "../services/agent";
 import * as notes from "../services/notes";
 import type { Note } from "../types/note";
 import { executeDocumentTool } from "../lib/agent/documentTools";
+import { AgentPanel } from "../components/agent/AgentPanel";
+import { TooltipProvider } from "../components/ui";
 import {
   AgentProvider,
   useAgent,
@@ -157,6 +159,68 @@ it.each(["toggle", "close"] as const)("returns focus to the note through %s with
   } finally {
     note.remove();
     composer.remove();
+  }
+});
+
+it("moves focus between the note and an open panel without closing it or moving the cursor", async () => {
+  const note = editor.view.dom.parentElement!;
+  const composer = document.createElement("textarea");
+  document.body.append(note, composer);
+  try {
+    act(() => current.focusPanel());
+    await settle();
+    const request = current.composerFocusRequest;
+    editor.commands.setTextSelection(5);
+    composer.focus();
+    vi.useFakeTimers();
+    act(() => current.focusNote());
+    act(() => vi.advanceTimersByTime(20));
+    expect(current.open).toBe(true);
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.state.selection.from).toBe(5);
+    act(() => current.focusPanel());
+    expect(current.open).toBe(true);
+    expect(current.composerFocusRequest).toBe(request + 1);
+  } finally {
+    note.remove();
+    composer.remove();
+  }
+});
+
+it("keeps Markdown source focused when Cmd+Option+← follows → within one frame", async () => {
+  function Panel() {
+    return <TooltipProvider><AgentPanel visible={useAgent().open} /></TooltipProvider>;
+  }
+  const source = document.createElement("textarea");
+  source.dataset.noteSource = "";
+  const host = document.createElement("div");
+  document.body.append(source, host);
+  act(() => root.unmount());
+  root = createRoot(host);
+  try {
+    await act(async () => {
+      root.render(
+        <AgentProvider editorRef={{ current: editor }} editor={editor}>
+          <Probe />
+          <Panel />
+        </AgentProvider>,
+      );
+    });
+    await settle();
+    source.focus();
+    vi.useFakeTimers();
+    act(() => current.focusPanel());
+    act(() => current.focusNote());
+    act(() => vi.advanceTimersByTime(20));
+    expect(current.open).toBe(true);
+    expect(document.activeElement).toBe(source);
+
+    act(() => current.focusPanel());
+    act(() => vi.advanceTimersByTime(20));
+    expect(document.activeElement).toBe(host.querySelector('[aria-label="Message agent"]'));
+  } finally {
+    source.remove();
+    host.remove();
   }
 });
 

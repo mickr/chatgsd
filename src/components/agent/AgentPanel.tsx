@@ -130,7 +130,6 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const [reviewIndex, setReviewIndex] = useState(-1);
   const [sending, setSending] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const composerFocusRequested = useRef(false);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const status = agent.status;
@@ -218,18 +217,16 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const clearSelection = useCallback(() => {
     if (agent.editor) detachSelection(agent.editor);
   }, [agent.editor]);
+  // Focus moves only on an explicit request (toggle, ⌘⌥→), never when the
+  // account check, a send or a run settles after the user has moved on.
+  // Returning to the note before the frame withdraws the request.
+  const { composerFocusRequest, takeComposerFocus } = agent;
   useEffect(() => {
-    composerFocusRequested.current = visible;
-  }, [visible, agent.focusComposer]);
-  useEffect(() => {
-    if (!composerFocusRequested.current || !visible || reason || sending) return;
-    // Consume only the open request, not later send/status updates.
     const frame = requestAnimationFrame(() => {
-      composer.current?.focus({ preventScroll: true });
-      composerFocusRequested.current = false;
+      if (takeComposerFocus()) composer.current?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [visible, agent.focusComposer, reason, sending]);
+  }, [composerFocusRequest, takeComposerFocus]);
   useLayoutEffect(() => {
     if (follow.current && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
@@ -602,7 +599,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                   : "Ask or describe an edit…"
               }
               value={draft}
-              disabled={!!reason || sending}
+              readOnly={!currentNote}
               onChange={(event) => {
                 if (currentNote)
                   setDrafts((previous) => ({

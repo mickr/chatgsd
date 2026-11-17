@@ -146,7 +146,14 @@ export interface AgentContextValue {
   open: boolean;
   toggle: () => void;
   close: () => void;
-  focusComposer: number;
+  /** Opens the panel if needed and moves keyboard focus to its composer. */
+  focusPanel: () => void;
+  /** Returns keyboard focus to the note without moving its cursor. */
+  focusNote: () => void;
+  /** Bumped by each explicit request to focus the composer. */
+  composerFocusRequest: number;
+  /** Whether that request still stands; `focusNote` withdraws it. Clears it. */
+  takeComposerFocus: () => boolean;
   width: number;
   setWidth: (width: number, persist?: boolean) => void;
   model: string;
@@ -208,7 +215,7 @@ export function AgentProvider({
 }) {
   const { currentNote, notesFolder } = useNotes();
   const [open, setOpen] = useState(false);
-  const [focusComposer, setFocusComposer] = useState(0);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [width, updateWidth] = useState(PANEL_DEFAULT);
   const [savedModel, setSavedModel] = useState<string | null>(null);
   const [models, setModels] = useState<agent.ModelInfo[]>([]);
@@ -810,21 +817,33 @@ export function AgentProvider({
     },
     [persist],
   );
-  const close = useCallback(() => {
-    void stop();
-    setOpen(false);
+  // Set by an explicit request until the composer takes focus or the note takes it back.
+  const composerFocusPending = useRef(false);
+  const takeComposerFocus = useCallback(() => {
+    const pending = composerFocusPending.current;
+    composerFocusPending.current = false;
+    return pending;
+  }, []);
+  const focusNote = useCallback(() => {
+    composerFocusPending.current = false;
     const source = document.querySelector<HTMLTextAreaElement>("[data-note-source]");
     if (source) source.focus({ preventScroll: true });
     else editorRef.current?.commands.focus(undefined, { scrollIntoView: false });
-  }, [editorRef, stop]);
-  const toggle = useCallback(() => {
-    if (open) {
-      close();
-      return;
-    }
+  }, [editorRef]);
+  const focusPanel = useCallback(() => {
+    composerFocusPending.current = true;
     setOpen(true);
-    setFocusComposer((value) => value + 1);
-  }, [open, close]);
+    setComposerFocusRequest((value) => value + 1);
+  }, []);
+  const close = useCallback(() => {
+    void stop();
+    setOpen(false);
+    focusNote();
+  }, [focusNote, stop]);
+  const toggle = useCallback(() => {
+    if (open) close();
+    else focusPanel();
+  }, [open, close, focusPanel]);
   const newConversation = useCallback(() => {
     if (!currentNote || conversationsRef.current[currentNote.id]?.runId) return;
     setCoeditingSession(null);
@@ -1011,7 +1030,10 @@ export function AgentProvider({
       open,
       toggle,
       close,
-      focusComposer,
+      focusPanel,
+      focusNote,
+      composerFocusRequest,
+      takeComposerFocus,
       width,
       setWidth,
       model,
@@ -1054,7 +1076,10 @@ export function AgentProvider({
       open,
       toggle,
       close,
-      focusComposer,
+      focusPanel,
+      focusNote,
+      composerFocusRequest,
+      takeComposerFocus,
       width,
       setWidth,
       model,

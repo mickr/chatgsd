@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, useCallback, useState } from "react";
+import { act, useCallback, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
@@ -26,11 +26,33 @@ let editor: Editor;
 
 function Workspace() {
   const [open, setOpen] = useState(false);
-  const toggle = useCallback(() => setOpen(value => !value), []);
-  useAgentPanelShortcut(true, toggle);
+  const [focusMode, setFocusMode] = useState(false);
+  const [request, setRequest] = useState(0);
+  const pending = useRef(false);
+  state.agent.composerFocusRequest = request;
+  state.agent.takeComposerFocus = useCallback(() => {
+    const taken = pending.current;
+    pending.current = false;
+    return taken;
+  }, []);
+  const focusPanel = useCallback(() => {
+    pending.current = true;
+    setOpen(true);
+    setRequest(value => value + 1);
+  }, []);
+  const focusNote = useCallback(() => {
+    pending.current = false;
+    editor.view.focus();
+  }, []);
+  const toggle = useCallback(() => {
+    if (open) setOpen(false);
+    else focusPanel();
+  }, [open, focusPanel]);
+  useAgentPanelShortcut(true, toggle, focusPanel, focusNote);
   return <TooltipProvider>
     <button onClick={toggle}>Toggle agent</button>
-    <AgentPanel visible={open} />
+    <button onClick={() => setFocusMode(value => !value)}>Toggle focus mode</button>
+    <AgentPanel visible={open && !focusMode} />
   </TooltipProvider>;
 }
 
@@ -41,7 +63,7 @@ beforeEach(() => {
   container = document.body.appendChild(document.createElement("div"));
   root = createRoot(container);
   state.agent = {
-    editor, width: 360, focusComposer: 0,
+    editor, width: 360, composerFocusRequest: 0,
     status: { status: "ready", account: null },
     statusLoading: false, modelsLoading: false,
     model: "model", models: [{ id: "model", label: "Model" }],
@@ -128,10 +150,64 @@ it("does not steal editor focus when a pending send finishes", async () => {
   });
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
   expect(state.agent.send).toHaveBeenCalledWith("Help with this note");
-  expect(input.disabled).toBe(true);
   act(() => editor.view.focus());
   await act(async () => { finishSend(true); });
   nextFrame();
-  expect(input.disabled).toBe(false);
+  expect(document.activeElement).toBe(editor.view.dom);
+});
+
+it("moves focus to chat with Cmd+Option+→ and back with Cmd+Option+← without closing the panel", () => {
+  const press = (target: Element, code: string) => act(() => {
+    target.dispatchEvent(new KeyboardEvent("keydown", {
+      key: code, code, metaKey: true, altKey: true, bubbles: true, cancelable: true,
+    }));
+  });
+  act(() => {
+    editor.view.focus();
+    editor.commands.setTextSelection(5);
+  });
+  const before = editor.getJSON();
+  press(editor.view.dom, "ArrowRight");
+  nextFrame();
+  const input = container.querySelector("textarea")!;
+  const panel = container.querySelector("aside")!;
+  expect(panel.getAttribute("aria-hidden")).toBe("false");
+  expect(document.activeElement).toBe(input);
+
+  press(input, "ArrowLeft");
+  nextFrame();
+  expect(document.activeElement).toBe(editor.view.dom);
+  expect(panel.getAttribute("aria-hidden")).toBe("false");
+  expect(editor.state.selection.from).toBe(5);
+  expect(editor.getJSON()).toEqual(before);
+
+  press(editor.view.dom, "ArrowRight");
+  nextFrame();
+  expect(document.activeElement).toBe(input);
+  expect(panel.getAttribute("aria-hidden")).toBe("false");
+});
+
+it("focuses chat on open and leaves the note focused when the account check finishes later", () => {
+  state.agent.statusLoading = true;
+  act(() => container.querySelector("button")!.click());
+  nextFrame();
+  expect(document.activeElement).toBe(container.querySelector("textarea"));
+  act(() => editor.view.focus());
+  state.agent.statusLoading = false;
+  act(() => root.render(<Workspace />));
+  nextFrame();
+  expect(document.activeElement).toBe(editor.view.dom);
+});
+
+it("leaves the note focused when leaving focus mode shows the panel again", () => {
+  const [toggle, focusMode] = container.querySelectorAll("button");
+  act(() => toggle.click());
+  nextFrame();
+  act(() => editor.view.focus());
+  act(() => focusMode.click());
+  nextFrame();
+  act(() => focusMode.click());
+  nextFrame();
+  expect(container.querySelector("aside")!.getAttribute("aria-hidden")).toBe("false");
   expect(document.activeElement).toBe(editor.view.dom);
 });

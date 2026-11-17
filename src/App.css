@@ -1488,7 +1488,7 @@ table.not-prose th {
 .agent-panel-input-wrap:focus-within { border-color: var(--color-accent); }
 .agent-panel-input-wrap textarea { display: block; width: 100%; min-height: 72px; max-height: 180px; resize: vertical; padding: 12px; font-size: 12px; line-height: 1.6; background: transparent; outline: none; }
 .agent-panel-input-wrap textarea::placeholder { color: var(--color-text-muted); }
-.agent-panel-input-wrap textarea:disabled { opacity: .55; cursor: not-allowed; }
+.agent-panel-input-wrap textarea:is(:disabled, :read-only) { opacity: .55; cursor: not-allowed; }
 .agent-panel-link { font-size: inherit; color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; transition: opacity 150ms; }
 .agent-panel-link:hover { opacity: .65; }
 .agent-panel-link-quiet { font-size: 11px; color: var(--color-text-muted); }
