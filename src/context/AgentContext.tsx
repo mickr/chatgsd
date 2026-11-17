@@ -1330,7 +1330,7 @@ export function AgentProvider({
         return;
       }
       await send(
-        "Document activity: the user edited the live note. Read the current document before acting. Respect their changes and continue the existing collaboration where useful. Do not revert their choices or invent a new task. Check in briefly only if you have something useful to add; otherwise finish without a message.",
+        "Document activity: the user edited the live note. Read it again and respect their changes. Continue an outstanding request if this edit helps you advance it. If the request is complete or the same blocker remains, finish silently.",
         computerAccess,
         "coedit",
         { checkIn: true },

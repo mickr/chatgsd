@@ -181,7 +181,7 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
             } else if name.starts_with("cua_") {
                 match computer.as_mut() {
                     Some(computer) => match computer.call(name, args.clone()).await {
-                        Ok(result) => computer_output(result),
+                        Ok(result) => computer_output(name, &args, result),
                         Err(error) => output(false, error),
                     },
                     None => output(false, "Computer access is off for this message".into()),
@@ -266,8 +266,10 @@ fn output(ok: bool, text: String) -> (bool, String, Vec<Value>) {
     (ok, text, content)
 }
 
-fn computer_output(result: Value) -> (bool, String, Vec<Value>) {
-    let ok = result["isError"] != true;
+fn computer_output(name: &str, args: &Value, result: Value) -> (bool, String, Vec<Value>) {
+    let observation = &result["structuredContent"];
+    let refused = observation["status"] == "refused";
+    let ok = result["isError"] != true && !refused;
     let mut text = String::new();
     let mut content = Vec::new();
     for block in result["content"].as_array().into_iter().flatten() {
@@ -279,7 +281,31 @@ fn computer_output(result: Value) -> (bool, String, Vec<Value>) {
             _ => {}
         }
     }
-    if text.is_empty() { text = result.get("structuredContent").map(Value::to_string).unwrap_or_else(|| "Cua returned no textual observation. Observe before continuing.".into()); }
+    if text.is_empty() {
+        text = result.get("structuredContent").map(Value::to_string).unwrap_or_else(|| "Cua returned no textual observation. Observe before continuing.".into());
+    } else if name == "cua_get_window_state" {
+        // In elements mode the text says only “tree is in structuredContent”.
+        // Forward the requested rows, including values and snapshot-bound tokens.
+        if let Some(elements) = observation.get("elements").filter(|rows| rows.is_array()) {
+            text.push_str(&format!("\nWindow elements: {elements}"));
+        }
+    }
+    // The MCP text is often just a summary. Retain the driver's specific
+    // refusal reason and give a next call that this host actually exposes.
+    if refused {
+        let refusal = &observation["refusal"];
+        if let Some(reason) = refusal["detail"]["reason"].as_str() {
+            text.push_str(&format!("\nDriver reason: {reason}"));
+        }
+        if matches!(name, "cua_get_browser_state" | "cua_browser_prepare")
+            && matches!(refusal["code"].as_str(), Some("browser_consent_required" | "browser_requires_setup" | "background_unavailable" | "browser_wrong_target_refused"))
+        {
+            if let (Some(pid), Some(window_id)) = (args["pid"].as_u64(), args["window_id"].as_u64()) {
+                let read = json!({"pid":pid, "window_id":window_id, "include_screenshot":false});
+                text.push_str(&format!("\nChatGSD background window inspection: cua_get_window_state({read}). Check the page identity and its accessibility controls before acting. Use fresh window element tokens for this route."));
+            }
+        }
+    }
     content.insert(0, json!({"type":"inputText","text":text}));
     (ok, text, content)
 }
@@ -325,4 +351,53 @@ fn readable_item(item: &Value) -> Result<String, String> {
         other => return Err(format!("Cannot safely reconstruct Codex history item {other}")),
     };
     Ok(format!("\n{text}\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_window_rows_reach_both_the_agent_and_the_text_transcript() {
+        let rows = json!([{"role":"AXTextField","value":"https://example.org/shared","element_token":"s7:12"}]);
+        let result = json!({
+            "content":[{"type":"text","text":"snapshot_id=s7 (see structuredContent.elements)"}],
+            "structuredContent":{"snapshot_id":"s7","elements":rows},
+        });
+        let (ok, text, content) = computer_output("cua_get_window_state", &json!({}), result);
+        assert!(ok);
+        assert!(text.contains(&rows.to_string()));
+        assert_eq!(content[0]["text"], text);
+    }
+
+    #[test]
+    fn browser_refusal_without_mcp_error_is_failed_and_points_to_the_same_window() {
+        let result = json!({
+            "content":[{"type":"text","text":"Chrome's setup page did not become ready."}],
+            "structuredContent":{
+                "status":"refused",
+                "refusal":{"code":"background_unavailable","detail":{"reason":"requires_foreground"}}
+            }
+        });
+        let (ok, text, content) = computer_output("cua_browser_prepare", &json!({"pid":14,"window_id":27}), result);
+        assert!(!ok);
+        assert!(text.contains("Chrome's setup page did not become ready."));
+        assert!(text.contains("requires_foreground"));
+        assert!(text.contains(r#"cua_get_window_state({"include_screenshot":false,"pid":14,"window_id":27})"#));
+        assert_eq!(content[0]["text"], text);
+    }
+
+    #[test]
+    fn permission_denials_and_successful_page_content_do_not_trigger_browser_recovery() {
+        let args = json!({"pid":14,"window_id":27});
+        let denied = json!({"structuredContent":{"status":"refused","refusal":{"code":"permission_denied"}}});
+        let (ok, text, _) = computer_output("cua_browser_prepare", &args, denied);
+        assert!(!ok);
+        assert!(!text.contains("cua_get_window_state("));
+
+        let page = json!({"content":[{"type":"text","text":"Page says: refused (background_unavailable)"}]});
+        let (ok, text, _) = computer_output("cua_get_browser_state", &args, page);
+        assert!(ok);
+        assert_eq!(text, "Page says: refused (background_unavailable)");
+    }
 }

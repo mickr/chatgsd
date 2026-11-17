@@ -111,9 +111,16 @@ impl ComputerSession {
                 if !ALLOWED.contains(&name) { continue; }
                 let Some(mut schema) = tool.get("inputSchema").cloned() else { continue };
                 narrow_schema(&mut schema);
+                // Driver descriptions also cover standalone clients with desktop
+                // access, explicit sessions and a larger catalog than ChatGSD.
+                let description = match name {
+                    "get_browser_state" => "Inspect a browser page through an attached browser connection. Bind with the exact pid and window_id, then snapshot the returned target_id and tab_id. For content or controls in the open window, cua_get_window_state can already read the accessibility tree without attachment.",
+                    "browser_prepare" => r#"Prepare a browser connection when page-specific tools are needed. For the user's running browser use the exact pid, window_id and strategy {"kind":"existing_profile"}. ChatGSD supplies the session and permits background delivery only. If setup is unavailable, inspect the original window with cua_get_window_state."#,
+                    _ => tool.get("description").and_then(Value::as_str).unwrap_or(name),
+                };
                 session.catalog.push(json!({
                     "type":"function","name":format!("cua_{name}"),
-                    "description":tool.get("description").and_then(Value::as_str).unwrap_or(name),
+                    "description":description,
                     "parameters":schema
                 }));
             }
@@ -166,12 +173,15 @@ impl ComputerSession {
                     }
                     continue;
                 }
-                if let Some(error) = response.get("error") { return Err(format!("Cua refused the request: {error}")); }
-                return response.get("result").cloned().ok_or_else(|| "Cua returned no result".into());
+                if let Some(error) = response.get("error") {
+                    // A matched request error leaves this MCP connection usable.
+                    return Ok(Err(format!("Cua refused the request: {error}")));
+                }
+                return response.get("result").cloned().map(Ok).ok_or_else(|| "Cua returned no result".into());
             }
         };
         match timeout(CALL_TIMEOUT, exchange).await {
-            Ok(Ok(result)) => Ok(result),
+            Ok(Ok(reply)) => reply,
             result => {
                 self.terminate();
                 match result {
@@ -354,6 +364,31 @@ fn validate_arguments(value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_request_error_allows_a_window_read_but_eof_ends_the_session() {
+        let mut child = Command::new("sh").arg("-c").arg(r#"
+            read -r request
+            echo '{"id":1,"error":{"code":-32602,"message":"Invalid browser arguments"}}'
+            read -r request
+            echo '{"id":2,"result":{"structuredContent":{"snapshot_id":"s1"}}}'
+            read -r request
+        "#).stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let mut session = ComputerSession {
+            input: child.stdin.take(), output: child.stdout.take().map(BufReader::new),
+            daemon: None, proxy: Some(child), directory: std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()),
+            catalog: vec![json!({"name":"cua_browser_prepare"}), json!({"name":"cua_get_window_state"})],
+            request_id: 0, stopped: false, _controller: CONTROLLER.lock().await,
+        };
+        let args = json!({"pid":1, "window_id":27});
+        let error = session.call("cua_browser_prepare", args.clone()).await.unwrap_err();
+        assert!(error.contains("Invalid browser arguments"));
+        let result = session.call("cua_get_window_state", args.clone()).await.unwrap();
+        assert_eq!(result["structuredContent"]["snapshot_id"], "s1");
+        assert!(session.call("cua_get_window_state", args).await.is_err());
+        assert!(session.stopped);
+    }
 
     #[test]
     fn permission_recovery_targets_only_missing_grants() {
