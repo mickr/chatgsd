@@ -304,8 +304,9 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
   // Render single agent presence caret (not accumulating per-run carets)
   const agentPresence = state.presence["agent"];
   if (agentPresence) {
-    const { to } = agentPresence;
-    // Only render the caret widget, not the range highlight
+    const { from, to } = agentPresence;
+    if (from < to)
+      result.push(Decoration.inline(from, to, { class: "agent-working-range" }));
     result.push(Decoration.widget(to, () => {
       const caret = document.createElement("span");
       caret.className = "agent-presence-caret";

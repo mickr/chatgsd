@@ -24,6 +24,7 @@ import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
 import { AgentChanges, ScratchDocument, setChangeMeta } from "./AgentChanges";
+import { AgentFollow } from "./AgentFollow";
 import {
   clearDocumentHistory,
   minimalDocumentDiff,
@@ -2514,6 +2515,7 @@ export function Editor({
 
       {/* Editor content area with resize handles overlay */}
       <div data-editor-content-area className="flex-1 relative overflow-hidden">
+        {!sourceMode && editor && <AgentFollow editor={editor} containerRef={scrollContainerRef} />}
         {!focusMode && !sourceMode && (
           <EditorWidthHandles containerRef={scrollContainerRef} />
         )}

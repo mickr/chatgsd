@@ -1419,7 +1419,12 @@ table.not-prose th {
 .agent-selection-clear:hover { background: var(--color-bg-muted); color: var(--color-text); }
 .agent-selection-quote { max-height: 5.5em; overflow: hidden; margin-bottom: 6px; padding: 1px 0 1px 8px; border-left: 2px solid color-mix(in srgb, var(--color-accent) 45%, transparent); color: var(--color-text-muted); mask-image: linear-gradient(to bottom, black 60%, transparent); }
 
-/* Agent presence caret (no range highlight) */
+/* Agent presence is independent of the user's caret and selection. */
+.agent-working-range { background: color-mix(in srgb, var(--color-accent) 9%, transparent); }
+.agent-follow { position: absolute; z-index: 20; right: 20px; top: 12px; display: flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg); color: var(--color-text-muted); font: 500 11px/1.4 var(--font-sans); cursor: pointer; }
+.agent-follow:hover, .agent-follow[aria-pressed="true"] { color: var(--color-accent); border-color: var(--color-accent); }
+.agent-follow:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+.agent-follow-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .agent-presence-caret { position: relative; display: inline; border-left: 2px solid var(--color-accent); pointer-events: none; }
 .agent-presence-label { position: absolute; left: -2px; bottom: 100%; padding: 1px 5px; border-radius: 3px 3px 3px 0; background: var(--color-accent); color: var(--color-bg); font: 500 10px/1.4 var(--font-sans); white-space: nowrap; user-select: none; }
 .agent-text-arrival { animation: agentTextArrive 180ms ease-out both; }

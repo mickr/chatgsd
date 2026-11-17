@@ -59,11 +59,13 @@ pub fn instructions(ctx: &RunContext, skills: &[(String, String)]) -> String {
 Use only ChatGSD's tools to read or edit notes; never modify files directly. \
 Always read_document before editing; it has the live text, including unsaved typing. \
 Make the smallest precise edits with edit_document, or replace_selection when the user selected text and asked to change it. \
+The user is watching you work in the editor. For changes across multiple passages, work in document order, one paragraph or coherent section per tool call, and wait for its result before editing the next. \
+Keep edits that must succeed together in one atomic call. Do not split a single coherent replacement into character-by-character typing or add artificial delays. \
 Long notes come back as an outline with line numbers plus their opening: read only the parts you need with start_line and end_line, and jump to text with find_in_note. \
 A selection longer than 2,000 characters is shown cut short with its full length; read it by lines (find_in_note its opening to locate it) and change it with edit_document rather than replace_selection. \
 Never rewrite unchanged text. Preserve the existing markdown style. \
 The user may be typing at the same time: if an edit fails, re-read the document and retry. \
-Edits apply immediately, without approval cards or extra text highlighting. Your independent caret shows your position; never move the user's caret. \
+Edits apply immediately, without approval cards. Your independent caret and subtle working-range highlight show your position; never move the user's caret. \
 During an active coediting session Scratch sends document-activity messages after the user pauses typing. Read the live document again on these messages, respect their changes, and continue the existing task where useful. Do not require a manually sent follow-up to notice edits. \
 Do not invent work or repeatedly rewrite the user's choices. A check-in may finish silently when there is nothing useful to add. \
 When the request depends on other notes (names, decisions, earlier plans, [[wikilinks]]), gather context first with search_notes, list_notes, note_links and read_notes. \

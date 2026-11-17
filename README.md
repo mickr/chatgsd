@@ -23,7 +23,7 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 - **Wikilinks** - Type `[[` to link between notes with autocomplete
 - **Slash commands** - Type `/` to quickly insert headings, lists, code blocks, diagrams, and more
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
-- **Agent panel** - Co-edit with ChatGPT through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret shows where it is working without adding highlights or taking your selection. During an active coediting session, it observes your edits and checks in after you pause typing. Each note keeps its conversation history
+- **Agent panel** - Co-edit with ChatGPT through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret and subtle working-range highlight show where it is working without taking your selection. Follow agent keeps its work in view until you scroll or type. During an active coediting session, it observes your edits and checks in after you pause typing. Each note keeps its conversation history
 - **Web research** - With internet access on, the agent hands questions your notes can't answer to a researcher: a separate agent role that searches the web, reads pages and reports back with sources. Its model (Luna by default) and brief are yours to change in Settings → Integrations
 - **Skills** - Save [Agent Skills](https://agentskills.io) for the agent to follow. When a site the researcher reads publishes a skill that fits your work, the agent offers it on a card with its full instructions, and you decide whether to save it. Manage, switch off, remove or add skills by address in Settings → Skills
 - **Works with other AI agents** - Changes made to an open note on disk merge in live, and conflicting edits show up as changes to review
@@ -74,12 +74,16 @@ npm run tauri build    # Production build
 
 Scratch keeps document editing on its direct TipTap transaction tools. The agent
 has a separate caret that follows its work while your selection stays yours.
-Edits land immediately, without new highlighting, deletion ghosts, or approval
-controls. A brief, staggered text reveal makes new words visible as they arrive;
-the document transaction stays atomic, and reduced-motion preferences disable
-the animation. Normal editor Undo works within the current note and cannot
-restore a different note. Conflicting external disk changes still use the
-existing merge review controls.
+Edits land immediately, with a subtle highlight on the agent's current edit,
+without deletion ghosts or approval controls. Choose **Follow agent** in the
+formatted editor to keep its caret in view without moving yours. Scrolling,
+clicking in the editor, or typing pauses following; choose it again to rejoin.
+The agent is guided to edit one paragraph or coherent section at a time, keeping
+dependent edits together. A brief, staggered text reveal makes new words visible
+as they arrive; each document transaction stays atomic, and reduced-motion
+preferences disable the animation. Normal editor Undo works within the current
+note and cannot restore a different note. Conflicting external disk changes
+still use the existing merge review controls.
 
 Selecting text attaches it to the agent sidebar. Moving into the composer keeps
 that selection ready to send. Clicking elsewhere in the note, collapsing the
