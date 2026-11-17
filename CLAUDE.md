@@ -51,10 +51,11 @@ Runs on every push to `main` and on PRs. Validates frontend build (`tsc` + Vite)
 
 Releases are macOS only, built, signed with Developer ID, and notarized by `.github/workflows/release.yml` on the self-hosted `mars-scratch` runner (this Mac; installed in `~/.local/share/github-actions/mars-scratch`, LaunchAgent `actions.runner.mickr-scratch.mars-scratch`).
 
-The build hooks prepare checksum-pinned Codex 0.169.0 at `resources/codex/codex`.
-It is a resource executable, explicitly signed before the enclosing app is
-notarized. `CHATGSD_CODEX_PATH` selects a development override; releases use the
-bundled executable.
+The build hooks prepare checksum-pinned Codex 0.169.0 and its `codex-code-mode-host`
+helper together in `resources/codex/`. Models that use code mode need that sibling
+helper to call the document tools. Both executables are explicitly signed before
+the enclosing app is notarized. `CHATGSD_CODEX_PATH` selects a development override;
+its matching helper must sit beside it. Releases use the bundled executables.
 
 Every push to `main` that passes CI is released automatically:
 

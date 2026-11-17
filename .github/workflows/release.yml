@@ -191,14 +191,21 @@ jobs:
           signature=$(codesign --display --verbose=4 "$driver" 2>&1)
           grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
 
-          # Codex is a resource executable, signed by the preparation hook
-          # before Tauri signs and notarizes the enclosing app.
+          # The preparation hook signs both Codex executables before the app.
           codex="$app/Contents/Resources/codex/codex"
-          test -x "$codex"
           test "$("$codex" --version)" = "codex-cli 0.169.0"
-          codesign --verify --strict --verbose=2 --test-requirement "=$requirement" "$codex"
-          signature=$(codesign --display --verbose=4 "$codex" 2>&1)
-          grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+          for executable in codex codex-code-mode-host; do
+            resource="$app/Contents/Resources/codex/$executable"
+            test -x "$resource"
+            codesign --verify --strict --verbose=2 --test-requirement "=$requirement" "$resource"
+            signature=$(codesign --display --verbose=4 "$resource" 2>&1)
+            grep -Fx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+          done
+          "$app/Contents/Resources/codex/codex-code-mode-host" --help > /dev/null
+          # Exercise the packaged helper through a real document-tool call,
+          # using a local model fixture and an empty, disposable Codex home.
+          CHATGSD_CODEX_PATH="$PWD/$codex" cargo test --manifest-path src-tauri/Cargo.toml \
+            codex_runtime_code_mode_dispatches_document_tools -- --ignored
 
           # Automatic updates must carry the same executable, permissions and
           # license notices as a fresh install, not just the main app binary.
@@ -209,6 +216,7 @@ jobs:
             ChatGSD.app/Contents/Resources/licenses/cua-driver/LICENSE \
             ChatGSD.app/Contents/Resources/licenses/cua-driver/THIRD_PARTY_NOTICES.md \
             ChatGSD.app/Contents/Resources/codex/codex \
+            ChatGSD.app/Contents/Resources/codex/codex-code-mode-host \
             ChatGSD.app/Contents/Resources/licenses/codex/LICENSE \
             ChatGSD.app/Contents/Resources/licenses/codex/NOTICE
           updated_app="$updater_dir/ChatGSD.app"
@@ -218,8 +226,10 @@ jobs:
             cmp "src-tauri/resources/cua-driver/$license" "$app/Contents/Resources/licenses/cua-driver/$license"
             cmp "$app/Contents/Resources/licenses/cua-driver/$license" "$updated_app/Contents/Resources/licenses/cua-driver/$license"
           done
-          test -x "$updated_app/Contents/Resources/codex/codex"
-          cmp "$codex" "$updated_app/Contents/Resources/codex/codex"
+          for executable in codex codex-code-mode-host; do
+            test -x "$updated_app/Contents/Resources/codex/$executable"
+            cmp "$app/Contents/Resources/codex/$executable" "$updated_app/Contents/Resources/codex/$executable"
+          done
           for license in LICENSE NOTICE; do
             cmp "src-tauri/resources/codex/$license" "$app/Contents/Resources/licenses/codex/$license"
             cmp "$app/Contents/Resources/licenses/codex/$license" "$updated_app/Contents/Resources/licenses/codex/$license"

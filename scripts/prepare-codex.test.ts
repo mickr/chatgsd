@@ -66,6 +66,7 @@ describe("Codex preparation", () => {
     const output = join(resources, "codex");
     await mkdir(output, { recursive: true });
     await writeFile(join(output, "codex"), "previous binary");
+    await writeFile(join(output, "codex-code-mode-host"), "previous tool host");
     await writeFile(join(output, "LICENSE"), "previous license");
     const download = vi.fn(async (path: string) => writeFile(path, "untrusted archive"));
 
@@ -73,6 +74,7 @@ describe("Codex preparation", () => {
 
     expect(download).toHaveBeenCalledExactlyOnceWith(expect.any(String), `https://github.com/openai/codex/releases/download/rust-v0.169.0/codex-${target}.tar.gz`);
     expect(await readFile(join(output, "codex"), "utf8")).toBe("previous binary");
+    expect(await readFile(join(output, "codex-code-mode-host"), "utf8")).toBe("previous tool host");
     expect(await readFile(join(output, "LICENSE"), "utf8")).toBe("previous license");
     expect(await readdir(resources)).toEqual(["codex"]);
   });

@@ -10,6 +10,7 @@
       "resources/cua-driver/LICENSE": "licenses/cua-driver/LICENSE",
       "resources/cua-driver/THIRD_PARTY_NOTICES.md": "licenses/cua-driver/THIRD_PARTY_NOTICES.md",
       "resources/codex/codex": "codex/codex",
+      "resources/codex/codex-code-mode-host": "codex/codex-code-mode-host",
       "resources/codex/LICENSE": "licenses/codex/LICENSE",
       "resources/codex/NOTICE": "licenses/codex/NOTICE"
     }

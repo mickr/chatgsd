@@ -178,6 +178,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an explicitly selected installed Codex runtime"]
     async fn codex_runtime_handshake_account_and_dynamic_thread() {
+        runtime_dynamic_thread(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly selected installed Codex runtime and its code-mode host"]
+    async fn codex_runtime_code_mode_dispatches_document_tools() {
+        runtime_dynamic_thread(true).await;
+    }
+
+    async fn runtime_dynamic_thread(code_mode: bool) {
         let binary = PathBuf::from(std::env::var_os("CHATGSD_CODEX_PATH").expect("select Codex with CHATGSD_CODEX_PATH"));
         let home = std::env::temp_dir().join(format!("chatgsd-codex-test-{}", uuid::Uuid::new_v4()));
         // A local Responses fixture exercises the real Codex runtime without
@@ -190,7 +200,9 @@ mod tests {
                 let mut body = String::new();
                 request.as_reader().read_to_string(&mut body).unwrap();
                 if round == 1 { assert!(body.contains("Unsaved live note")); }
-                let item = if round == 0 {
+                let item = if round == 0 && code_mode {
+                    json!({"type":"custom_tool_call","id":"tool-item","call_id":"read-live","name":"exec","input":"text(await tools.scratch__read_document({}));","status":"completed"})
+                } else if round == 0 {
                     json!({"type":"function_call","id":"tool-item","call_id":"read-live","namespace":"scratch","name":"read_document","arguments":"{}","status":"completed"})
                 } else {
                     json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Read the unsaved note.","annotations":[]}]})
@@ -213,10 +225,11 @@ mod tests {
         let config = json!({
             "model_provider":"fixture",
             "model_providers.fixture":{"name":"Local fixture","base_url":address,"wire_api":"responses","requires_openai_auth":false},
-            "features.enable_request_compression":false
+            "features.enable_request_compression":false,
+            "features.code_mode":code_mode
         });
         let started = server.rpc("thread/start", json!({
-            "model":"gpt-5.4","config":config,"cwd":server.cwd,"sandbox":"read-only","approvalPolicy":"on-request",
+            "model":if code_mode { "gpt-6.1-sol" } else { "gpt-5.4" },"config":config,"cwd":server.cwd,"sandbox":"read-only","approvalPolicy":"on-request",
             "dynamicTools":[{"type":"namespace","name":"scratch","description":"Live editor","tools":[
                 super::super::dynamic_tool("read_document", "Read the live document", json!({"type":"object","properties":{}}))
             ]}]
