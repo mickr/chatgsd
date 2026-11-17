@@ -1427,18 +1427,9 @@ table.not-prose th {
 .agent-follow-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .agent-presence-caret { position: relative; display: inline; border-left: 2px solid var(--color-accent); pointer-events: none; }
 .agent-presence-label { position: absolute; left: -2px; bottom: 100%; padding: 1px 5px; border-radius: 3px 3px 3px 0; background: var(--color-accent); color: var(--color-bg); font: 500 10px/1.4 var(--font-sans); white-space: nowrap; user-select: none; }
-.agent-text-arrival { animation: agentTextArrive 180ms ease-out both; }
-.agent-presence-caret[data-writing="true"] .agent-presence-label { animation: agentCaretWrite 420ms ease-in-out; }
-@keyframes agentTextArrive {
-  from { opacity: 0.12; filter: blur(1px); }
-  to { opacity: 1; filter: none; }
-}
-@keyframes agentCaretWrite {
-  0%, 100% { transform: translateY(0); }
-  40% { transform: translateY(-2px); }
-}
+.agent-text-pending { display: none; }
 @media (prefers-reduced-motion: reduce) {
-  .agent-text-arrival, .agent-presence-caret[data-writing="true"] .agent-presence-label { animation: none; }
+  .agent-text-pending { display: inline; }
 }
 .agent-panel-messages { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px; display: flex; flex-direction: column; gap: 16px; overscroll-behavior: contain; }
 .agent-panel-empty { margin: auto 12px; padding: 24px 0 40px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; max-width: 280px; }

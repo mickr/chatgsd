@@ -27,11 +27,16 @@ interface FocusRange {
   to: number;
   dismissed?: boolean;
 }
+interface TextArrival {
+  ranges: Array<{ from: number; to: number }>;
+  positions: number[];
+  revealed: number;
+}
 interface ChangeState {
   hunks: AgentChange[];
   focusRanges: FocusRange[];
   presence: Record<string, { from: number; to: number }>;
-  arrival: DecorationSet;
+  arrival: TextArrival | null;
   lineChanges: AgentLineChange[];
 }
 interface ChangeMeta {
@@ -48,6 +53,7 @@ interface ChangeMeta {
   clearPresence?: string;
   arrival?: Array<{ from: number; to: number }>;
   clearArrival?: boolean;
+  reveal?: number;
   lineChanges?: AgentLineChange[];
 }
 export interface ScratchDocumentStorage {
@@ -143,31 +149,56 @@ const REVIEW_ICON_PATHS = {
   reject: "M18 6 6 18M6 6l12 12",
 } as const;
 
-/** Brief word-by-word reveal of committed text, without changing document marks. */
-function arrivalDecorations(doc: ProseMirrorNode, ranges: Array<{ from: number; to: number }>): DecorationSet {
-  const result: Decoration[] = [];
-  for (const { from, to } of ranges) {
+/** Animate only the view: saved content and undo history already contain the full edit. */
+function textArrival(doc: ProseMirrorNode, ranges: Array<{ from: number; to: number }>): TextArrival | null {
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || typeof Intl.Segmenter !== "function") return null;
+  const merged: Array<{ from: number; to: number }> = [];
+  for (const range of [...ranges].sort((a, b) => a.from - b.from)) {
+    const last = merged[merged.length - 1];
+    if (last && range.from <= last.to) last.to = Math.max(last.to, range.to);
+    else merged.push({ ...range });
+  }
+  const textRanges: TextArrival["ranges"] = [];
+  const positions: number[] = [];
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  for (const { from, to } of merged) {
     doc.nodesBetween(from, to, (node, pos) => {
-      if (result.length >= 40) return false;
       if (!node.isText || !node.text) return;
-      const end = Math.min(to - pos, node.nodeSize);
-      const words = /\S+\s*/gu;
-      words.lastIndex = Math.max(0, from - pos);
-      let match: RegExpExecArray | null;
-      while (result.length < 40 && (match = words.exec(node.text)) && match.index < end) {
-        result.push(Decoration.inline(pos + match.index, pos + Math.min(words.lastIndex, end), {
-          class: "agent-text-arrival",
-          style: `animation-delay: ${Math.min(result.length * 12, 120)}ms`,
-        }));
+      const start = Math.max(from, pos);
+      const end = Math.min(to, pos + node.nodeSize);
+      if (start >= end) return;
+      // A minimal diff can start inside an emoji or combining sequence.
+      const segments = segmenter.segment(node.text);
+      const first = segments.containing(start - pos)!;
+      const last = segments.containing(end - pos - 1)!;
+      const range = { from: pos + first.index, to: pos + last.index + last.segment.length };
+      const previous = textRanges[textRanges.length - 1];
+      if (previous && range.from <= previous.to) previous.to = Math.max(previous.to, range.to);
+      else textRanges.push(range);
+      for (const { index, segment } of segmenter.segment(node.text.slice(range.from - pos, range.to - pos))) {
+        const next = range.from + index + segment.length;
+        if (!positions.length || next > positions[positions.length - 1]) positions.push(next);
       }
     });
   }
-  return result.length ? DecorationSet.create(doc, result) : DecorationSet.empty;
+  return positions.length ? { ranges: textRanges, positions, revealed: 0 } : null;
+}
+
+function arrivalCaret(arrival: TextArrival): number {
+  return arrival.revealed ? arrival.positions[arrival.revealed - 1] : arrival.ranges[0].from;
 }
 
 function decorations(editor: Editor, state: ChangeState): DecorationSet {
   const { doc, schema } = editor.state;
-  const result: Decoration[] = state.arrival.find();
+  const result: Decoration[] = [];
+  if (state.arrival) {
+    const cursor = arrivalCaret(state.arrival);
+    for (const range of state.arrival.ranges) {
+      const from = Math.max(range.from, cursor);
+      if (from < range.to)
+        result.push(Decoration.inline(from, range.to, { class: "agent-text-pending" }));
+    }
+  }
   const markerGroups = new Map<number, AgentLineChange[]>();
   for (const change of state.lineChanges) {
     const position = doc.resolve(change.from);
@@ -309,10 +340,10 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
     const { from, to } = agentPresence;
     if (from < to)
       result.push(Decoration.inline(from, to, { class: "agent-working-range" }));
-    result.push(Decoration.widget(to, () => {
+    result.push(Decoration.widget(state.arrival ? arrivalCaret(state.arrival) : to, () => {
       const caret = document.createElement("span");
       caret.className = "agent-presence-caret";
-      caret.dataset.writing = String(state.arrival !== DecorationSet.empty);
+      caret.dataset.writing = String(Boolean(state.arrival));
       caret.contentEditable = "false";
       caret.setAttribute("aria-label", "Agent working here");
       const label = document.createElement("span");
@@ -320,7 +351,7 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
       label.textContent = "Agent";
       caret.append(label);
       return caret;
-    }, { key: state.arrival === DecorationSet.empty ? "agent-presence-idle" : "agent-presence-writing", side: -1 }));
+    }, { key: state.arrival ? "agent-presence-writing" : "agent-presence-idle", side: -1 }));
   }
   
   return DecorationSet.create(doc, result);
@@ -533,10 +564,15 @@ export const AgentChanges = Extension.create({
       new Plugin<ChangeState>({
         key: agentChangesKey,
         state: {
-          init: () => ({ hunks: [], focusRanges: [], presence: {}, arrival: DecorationSet.empty, lineChanges: [] }),
+          init: () => ({ hunks: [], focusRanges: [], presence: {}, arrival: null, lineChanges: [] }),
           apply(tr, previous) {
             const meta = tr.getMeta(agentChangesKey) as ChangeMeta | undefined;
-            if (meta?.clear) return { hunks: [], focusRanges: [], presence: {}, arrival: DecorationSet.empty, lineChanges: [] };
+            if (meta?.clear) return { hunks: [], focusRanges: [], presence: {}, arrival: null, lineChanges: [] };
+            if (meta?.reveal !== undefined && previous.arrival) {
+              const arrival = meta.reveal >= previous.arrival.positions.length
+                ? null : { ...previous.arrival, revealed: meta.reveal };
+              return { ...previous, arrival };
+            }
             // Dismiss the paint, not the run's mapped target, when the user
             // resumes editing. Agent transactions must not count as user input.
             const dismissSelection = meta?.dismissSelection ||
@@ -544,7 +580,7 @@ export const AgentChanges = Extension.create({
             if (!tr.docChanged && !meta && !dismissSelection) return previous;
             // Keep the same state object while nothing is tracked, so review UI
             // subscribed through useAgentChanges doesn't re-render on every keystroke.
-            if (!meta && !previous.hunks.length && !previous.lineChanges.length && !previous.focusRanges.length && !Object.keys(previous.presence).length && previous.arrival === DecorationSet.empty)
+            if (!meta && !previous.hunks.length && !previous.lineChanges.length && !previous.focusRanges.length && !Object.keys(previous.presence).length && !previous.arrival)
               return previous;
             
             // Only external disk changes retain review hunks.
@@ -592,8 +628,9 @@ export const AgentChanges = Extension.create({
             if (dismissSelection && presence.agent)
               presence.agent = { from: presence.agent.to, to: presence.agent.to };
             
-            let arrival = meta?.clearArrival || tr.docChanged ? DecorationSet.empty : previous.arrival;
-            if (meta?.arrival) arrival = arrivalDecorations(tr.doc, meta.arrival);
+            let arrival = meta?.clearArrival || meta?.clearPresence || dismissSelection || tr.docChanged
+              ? null : previous.arrival;
+            if (meta?.arrival) arrival = textArrival(tr.doc, meta.arrival);
             // Markers describe the latest editing turn, and disappear if their
             // passage changes again. The immutable transcript keeps older edits.
             let lineChanges = previous.lineChanges
@@ -618,19 +655,37 @@ export const AgentChanges = Extension.create({
         },
         view(view) {
           let timer: ReturnType<typeof setTimeout> | undefined;
-          let previous = DecorationSet.empty;
+          let positions: number[] | undefined;
+          let startedAt = 0;
+          const motion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+          const finish = () => {
+            if (agentChangesKey.getState(view.state)?.arrival)
+              view.dispatch(setChangeMeta(view.state.tr, { clearArrival: true }).setMeta("addToHistory", false));
+          };
           const update = () => {
             const arrival = agentChangesKey.getState(view.state)!.arrival;
-            if (arrival === previous) return;
-            previous = arrival;
             clearTimeout(timer);
-            if (arrival !== DecorationSet.empty)
-              timer = setTimeout(() => {
-                view.dispatch(setChangeMeta(view.state.tr, { clearArrival: true }).setMeta("addToHistory", false));
-              }, 420);
+            if (!arrival) { positions = undefined; return; }
+            if (arrival.positions !== positions) {
+              positions = arrival.positions;
+              startedAt = performance.now();
+            }
+            timer = setTimeout(() => {
+              const duration = Math.min(4000, arrival.positions.length * 24);
+              const reveal = Math.floor((performance.now() - startedAt) / duration * arrival.positions.length);
+              view.dispatch(setChangeMeta(view.state.tr, { reveal }).setMeta("addToHistory", false));
+            }, 24);
           };
+          const onMotion = () => { if (motion?.matches) finish(); };
+          const onVisibility = () => { if (document.hidden) finish(); };
+          motion?.addEventListener("change", onMotion);
+          document.addEventListener("visibilitychange", onVisibility);
           update();
-          return { update, destroy: () => clearTimeout(timer) };
+          return { update, destroy: () => {
+            clearTimeout(timer);
+            motion?.removeEventListener("change", onMotion);
+            document.removeEventListener("visibilitychange", onVisibility);
+          } };
         },
         props: {
           decorations: (state) =>

@@ -16,7 +16,7 @@ export function AgentFollow({ editor, containerRef }: {
     const container = containerRef.current;
     if (!container) return;
     let frame = 0;
-    let previous = agentChangesKey.getState(editor.state)?.presence.agent;
+    let previous = agentChangesKey.getState(editor.state);
     const pause = () => {
       followingRef.current = false;
       setFollowing(false);
@@ -41,11 +41,12 @@ export function AgentFollow({ editor, containerRef }: {
     };
     revealRef.current = reveal;
     const update = () => {
-      const presence = agentChangesKey.getState(editor.state)?.presence.agent;
+      const changes = agentChangesKey.getState(editor.state);
+      const presence = changes?.presence.agent;
       setAvailable(Boolean(presence));
       if (!presence) pause();
-      else if (presence !== previous && followingRef.current) reveal();
-      previous = presence;
+      else if ((presence !== previous?.presence.agent || changes?.arrival !== previous?.arrival) && followingRef.current) reveal();
+      previous = changes;
     };
     update();
     editor.on("transaction", update);

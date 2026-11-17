@@ -79,6 +79,7 @@ async function edit(
 afterEach(() => {
   for (const editor of editors.splice(0)) editor.destroy();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("serializeDocument", () => {
@@ -446,19 +447,104 @@ describe("agent presence", () => {
     expect(editor.view.dom.querySelector(".agent-presence-caret")).toBeNull();
   });
 
-  it("reveals committed words briefly and cancels the reveal when the user types", async () => {
+  it("reveals text at the agent caret while saving atomically and preserving the user's selection", async () => {
+    vi.useFakeTimers();
+    const editor = openNote("My paragraph.\n\nOriginal.");
+    const binding = captureRunBinding(editor, "run", false)!;
+    editor.commands.setTextSelection({ from: 1, to: 3 });
+    const selection = editor.state.selection.toJSON();
+    await executeDocumentTool(editor, binding, "edit_document", {
+      edits: [{ old_text: "Original.", new_text: "A few newly written words." }],
+    });
+    const state = () => agentChangesKey.getState(editor.state)!;
+    const caret = () => editor.view.posAtDOM(editor.view.dom.querySelector(".agent-presence-caret")!, 0);
+    const start = caret();
+    expect(serializeDocument(editor)).toBe("My paragraph.\n\nA few newly written words.");
+    expect(state().arrival?.revealed).toBe(0);
+    vi.advanceTimersByTime(240);
+    expect(state().arrival!.revealed).toBeGreaterThan(0);
+    expect(caret()).toBeGreaterThan(start);
+    expect(caret()).toBeLessThan(state().presence.agent.to);
+    expect(editor.view.dom.querySelector(".agent-text-pending")).not.toBeNull();
+    expect(editor.state.selection.toJSON()).toEqual(selection);
+    vi.advanceTimersByTime(4000);
+    expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
+    expect(caret()).toBe(state().presence.agent.to);
+    editor.commands.undo();
+    expect(serializeDocument(editor)).toBe("My paragraph.\n\nOriginal.");
+  });
+
+  it("reveals graphemes intact and bounds the duration of long edits", async () => {
+    vi.useFakeTimers();
+    const editor = openNote("Original");
+    await edit(editor, [{ old_text: "Original", new_text: "👩🏽‍💻é next" }]);
+    vi.advanceTimersByTime(24);
+    const arrival = agentChangesKey.getState(editor.state)!.arrival!;
+    expect(editor.state.doc.textBetween(arrival.ranges[0].from, arrival.positions[arrival.revealed - 1])).toBe("👩🏽‍💻");
+    await edit(editor, [{ old_text: "👩🏽‍💻é next", new_text: "Long paragraph. ".repeat(500) }]);
+    vi.advanceTimersByTime(2000);
+    expect(agentChangesKey.getState(editor.state)!.arrival).not.toBeNull();
+    vi.advanceTimersByTime(2100);
+    expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
+  });
+
+  it("does not split an emoji when the edit shares its prefix", async () => {
+    vi.useFakeTimers();
+    const editor = openNote("👩🏽‍💻 at work");
+    await edit(editor, [{ old_text: "👩🏽‍💻", new_text: "👩🏽‍🔬" }]);
+    const arrival = agentChangesKey.getState(editor.state)!.arrival!;
+    expect(editor.state.doc.textBetween(arrival.ranges[0].from, arrival.positions[0])).toBe("👩🏽‍🔬");
+    vi.advanceTimersByTime(24);
+    expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
+    expect(serializeDocument(editor)).toBe("👩🏽‍🔬 at work");
+  });
+
+  it("reveals disjoint formatted edits in document order as one undo event", async () => {
+    vi.useFakeTimers();
+    const editor = openNote("First.\n\nSecond.");
+    await edit(editor, [
+      { old_text: "Second.", new_text: "Second with **strong words**." },
+      { old_text: "First.", new_text: "First with *emphasis*." },
+    ]);
+    const arrival = agentChangesKey.getState(editor.state)!.arrival!;
+    expect(arrival.positions).toEqual([...new Set(arrival.positions)].sort((a, b) => a - b));
+    expect(editor.view.dom.querySelector("strong")).not.toBeNull();
+    vi.advanceTimersByTime(120);
+    editor.commands.undo();
+    expect(serializeDocument(editor)).toBe("First.\n\nSecond.");
+    expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
+    vi.advanceTimersByTime(5000);
+    expect(serializeDocument(editor)).toBe("First.\n\nSecond.");
+  });
+
+  it("finishes immediately when the user selects, types, pauses, or switches notes", async () => {
     vi.useFakeTimers();
     const editor = openNote("Original.");
     await edit(editor, [{ old_text: "Original.", new_text: "A few newly written words." }]);
-    expect(serializeDocument(editor)).toBe("A few newly written words.");
-    expect(editor.view.dom.querySelectorAll(".agent-text-arrival").length).toBeGreaterThan(1);
-    vi.advanceTimersByTime(420);
-    expect(editor.view.dom.querySelector(".agent-text-arrival")).toBeNull();
-    expect(editor.view.dom.querySelector(".agent-presence-caret")).not.toBeNull();
+    editor.commands.setTextSelection(4);
+    expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
     await edit(editor, [{ old_text: "newly", new_text: "freshly" }]);
     editor.view.dispatch(editor.state.tr.insertText("User: ", 1));
-    expect(editor.view.dom.querySelector(".agent-text-arrival")).toBeNull();
+    expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
     expect(serializeDocument(editor)).toBe("User: A few freshly written words.");
+    const binding = captureRunBinding(editor, "run")!;
+    await edit(editor, [{ old_text: "freshly", new_text: "recently" }]);
+    releaseRunBinding(editor, binding);
+    expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
+    await edit(editor, [{ old_text: "recently", new_text: "newly" }]);
+    editor.commands.setContent(parseDocument(editor, "Another note.").toJSON());
+    vi.advanceTimersByTime(5000);
+    expect(serializeDocument(editor)).toBe("Another note.");
+    expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
+  });
+
+  it("skips progressive reveal for reduced motion", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    const editor = openNote("Original.");
+    await edit(editor, [{ old_text: "Original.", new_text: "A few newly written words." }]);
+    expect(agentChangesKey.getState(editor.state)!.arrival).toBeNull();
+    expect(editor.view.dom.querySelector(".agent-text-pending")).toBeNull();
+    expect(serializeDocument(editor)).toBe("A few newly written words.");
   });
 
   it("does not let undo restore content from a different note", async () => {
