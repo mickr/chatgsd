@@ -64,9 +64,15 @@ function Workspace() {
   </TooltipProvider>;
 }
 
+let logResized: () => void;
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: () => void) { logResized = callback; }
+    observe() {}
+    disconnect() {}
+  });
   const editorElement = document.body.appendChild(document.createElement("div"));
   editor = new Editor({ element: editorElement, extensions: [StarterKit, ScratchDocument, AgentChanges], content: "<p>A note that must not become a quote.</p>" });
   editor.storage.scratchDocument.noteId = "note";
@@ -185,6 +191,22 @@ it("scrolls to the latest streaming text after the writer has scrolled up", () =
     act(() => root.render(<Workspace />));
     expect(log.scrollTop).toBe(900);
   }
+});
+
+it("keeps the newest message in view when the composer grows, unless the writer scrolled up", () => {
+  act(() => container.querySelector("button")!.click());
+  const log = container.querySelector<HTMLElement>('[role="log"]')!;
+  let height = 300;
+  Object.defineProperties(log, { scrollHeight: { value: 900 }, clientHeight: { get: () => height } });
+  log.scrollTop = 600;
+  act(() => log.dispatchEvent(new Event("scroll")));
+  height = 260;
+  act(() => logResized());
+  expect(log.scrollTop).toBe(900);
+  log.scrollTop = 100;
+  act(() => log.dispatchEvent(new Event("scroll")));
+  act(() => logResized());
+  expect(log.scrollTop).toBe(100);
 });
 
 it.each(["metaKey", "ctrlKey"] as const)("opens from the editor with %s and focuses chat without changing the note", (modifier) => {

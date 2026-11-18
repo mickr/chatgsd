@@ -245,6 +245,7 @@ it("keeps Markdown source focused when Cmd+Option+← follows → within one fra
     return <TooltipProvider><AgentPanel visible={useAgent().open} /></TooltipProvider>;
   }
   vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   const source = document.createElement("textarea");
   source.dataset.noteSource = "";
   const host = document.createElement("div");

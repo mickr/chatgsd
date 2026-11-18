@@ -270,6 +270,25 @@ export function AgentPanel({
     if (visible && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [visible, conversation.items, conversation.error, conversation.computerUnavailable, conversation.cancelled, running, agent.writingOffer?.id, agent.writingSuggestion]);
+  // The composer grows when its pills return after a send, shrinking the log.
+  // A log resting at its end stays there, so the newest message isn't covered.
+  useEffect(() => {
+    const log = scroll.current;
+    if (!log) return;
+    let atEnd = true;
+    const onScroll = () => {
+      atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+    };
+    const observer = new ResizeObserver(() => {
+      if (atEnd) log.scrollTop = log.scrollHeight;
+    });
+    log.addEventListener("scroll", onScroll, { passive: true });
+    observer.observe(log);
+    return () => {
+      log.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+    };
+  }, []);
   useEffect(() => {
     setReviewIndex(-1);
   }, [currentNote?.id]);
