@@ -570,6 +570,10 @@ describe("AgentProvider expressions", () => {
     expect(current.conversation.runId).toBe("check-in");
     expect(current.conversation.expression).toBeUndefined();
     expect(current.conversation.items[current.conversation.items.length - 1]).toMatchObject({ type: "activity" });
+
+    // A check-in with nothing to add leaves no "Checking in" line in the conversation.
+    emit({ type: "done", stopReason: "completed" }, "check-in");
+    expect(current.conversation.items.some((item) => item.type === "activity")).toBe(false);
   });
 
   it("hides expression calls and results without hiding failed document tools", async () => {

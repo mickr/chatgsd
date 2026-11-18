@@ -721,6 +721,11 @@ export function AgentProvider({
         if (event.type === "error" || event.stopReason === "cancelled")
           setCoeditingSession((session) => session?.documentSession === run.binding.documentSession ? haltedSession(run.binding.documentSession) : session);
         runs.current.delete(payload.runId);
+        // A check-in that added nothing leaves no line behind.
+        if (event.type === "done")
+          updateConversation(run.noteId, (conversation) =>
+            conversation.items[conversation.items.length - 1]?.type === "activity"
+              ? { ...conversation, items: conversation.items.slice(0, -1) } : conversation);
         saveConversation(run.noteId);
         if (event.type === "error" && event.kind === "auth")
           void refreshStatus();
