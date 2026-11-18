@@ -420,17 +420,20 @@ it("offers the four ways to work together until the writer starts typing", () =>
   expect(button("Check a claim")).toBeUndefined();
 });
 
-it("shows the face with the reason for a concern, and lets the writer explore or dismiss the suggestion", () => {
+it("shows the face with the reason for a concern, and lets the writer explore or dismiss the suggestion", async () => {
   state.agent.writingFocus = "evidence";
   state.agent.writingSuggestion = { id: "s", text: "This claim needs a source.", documentSession: 0 };
   const input = openPanel();
   const face = container.querySelector(".agent-panel-header .inline-agent-face")!;
   expect(face.getAttribute("data-expression")).toBe("concerned");
   expect(container.querySelector('[role="status"]')!.textContent).toBe("A claim worth checking");
-  act(() => button("Explore this").click());
-  expect(input.value).toContain("This claim needs a source.");
+  type(input, "Half a thought");
+  await act(async () => { button("Explore this").click(); });
+  // The suggestion goes straight to the agent and the writer's own draft stays put.
+  expect(state.agent.send).toHaveBeenCalledOnce();
+  expect(state.agent.send).toHaveBeenCalledWith(expect.stringContaining("This claim needs a source."), undefined, "coedit", expect.anything());
+  expect(input.value).toBe("Half a thought");
   expect(state.agent.dismissWritingSuggestion).toHaveBeenCalledOnce();
-  expect(state.agent.send).not.toHaveBeenCalled();
 });
 
 it("shows the model's expression while it works and a paused face after Pause", () => {

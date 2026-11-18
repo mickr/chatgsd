@@ -188,6 +188,12 @@ interface CoeditingSession { documentSession: number; openRequest: boolean; halt
 const NO_STARTERS: string[] = [];
 /** Long enough to let a writer who opened the panel to type go first; short enough to feel immediate. */
 const STARTERS_DELAY_MS = 800;
+// How long the writer pauses before a check, and the least time between checks.
+// The gate is cheap, so it runs close to the pace of a person reading along.
+const REQUEST_IDLE_MS = 1000;
+const REQUEST_INTERVAL_MS = 4000;
+const OFFER_IDLE_MS = 1500;
+const OFFER_INTERVAL_MS = 6000;
 const haltedSession = (documentSession: number): CoeditingSession => ({ documentSession, openRequest: false, halted: true });
 export interface AgentContextValue {
   open: boolean;
@@ -1592,7 +1598,7 @@ export function AgentProvider({
     openRequest
       ? assessingWriting || (!!conversation.runId && !pendingQuestion)
       : !!conversation.runId || assessingWriting || engaged,
-    checkIn, openRequest ? 2000 : 3000, openRequest ? 10000 : 15000, !openRequest);
+    checkIn, openRequest ? REQUEST_IDLE_MS : OFFER_IDLE_MS, openRequest ? REQUEST_INTERVAL_MS : OFFER_INTERVAL_MS, !openRequest);
   const value = useMemo<AgentContextValue>(
     () => ({
       open,

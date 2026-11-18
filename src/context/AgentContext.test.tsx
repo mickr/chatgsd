@@ -802,9 +802,9 @@ describe("AgentProvider coediting", () => {
     await advance(12000);
     expect(agent.startRun).toHaveBeenCalledTimes(1);
     act(() => editor.commands.insertContent("Walking "));
-    await advance(1500);
+    await advance(500);
     act(() => editor.commands.insertContent("Saturday "));
-    await advance(1999);
+    await advance(999);
     expect(agent.startRun).toHaveBeenCalledTimes(1);
     await advance(1);
     expect(agent.startRun).toHaveBeenCalledTimes(2);
@@ -870,9 +870,9 @@ describe("AgentProvider coediting", () => {
     expect(current.openRequest).toBe(false);
     expect(current.coediting).toBe(true);
     act(() => editor.commands.insertContent("Saturday "));
-    await advance(10000);
+    await advance(3000);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
-    await advance(5000);
+    await advance(3000);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(3);
     expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ openRequest: false }));
     expect(agent.startRun).toHaveBeenCalledTimes(1);
@@ -1099,7 +1099,7 @@ describe("first look and moving around", () => {
     expect(opening.passage.length).toBeLessThanOrEqual(6000);
     vi.useFakeTimers();
     act(() => editor.commands.setTextSelection(editor.state.doc.content.size - 1));
-    await advance(2999);
+    await advance(1499);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(1);
     await advance(1);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
@@ -1173,9 +1173,9 @@ describe("writing companion", () => {
     await act(async () => { await current.startCompanion(); });
     vi.useFakeTimers();
     act(() => editor.commands.insertContent("First "));
-    await advance(2000);
+    await advance(1000);
     act(() => editor.commands.insertContent("Second "));
-    await advance(2999);
+    await advance(1499);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(1);
     await advance(1);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(2);

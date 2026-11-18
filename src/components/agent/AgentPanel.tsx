@@ -539,12 +539,10 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                     setPointerReplay((value) => value + 1);
                   }}>Show passage</button>
                 )}
-                {!suggestion.applied && <button type="button" disabled={sending || running || !currentNote} onClick={() => {
-                  if (!currentNote) return;
-                  const prompt = `Let's explore this suggestion: ${suggestion.text}\n\nOffer ideas or wording without editing the note.`;
-                  setDrafts((previous) => ({ ...previous, [currentNote.id]: prompt }));
+                {!suggestion.applied && <button type="button" disabled={!sendSuggestion} onClick={() => {
+                  // Goes straight to the agent; the draft in the composer is left alone.
+                  sendSuggestion?.(`Let's explore this suggestion: ${suggestion.text}\n\nOffer ideas or wording without editing the note.`);
                   agent.dismissWritingSuggestion();
-                  composer.current?.focus({ preventScroll: true });
                 }}>Explore this</button>}
                 <button type="button" onClick={agent.dismissWritingSuggestion}>{suggestion.applied ? "Keep" : "Dismiss suggestion"}</button>
               </div>
