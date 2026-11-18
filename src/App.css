@@ -1418,8 +1418,8 @@ table.not-prose th {
 .agent-selection-preview:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .agent-selection-preview[data-clipped] { mask-image: linear-gradient(to bottom, black 65%, transparent); }
 :is(.agent-selection-preview, .agent-selection-quote) .agent-panel-markdown { font-size: 11px; line-height: 1.55; }
-:is(.agent-selection-preview, .agent-selection-quote) .agent-panel-markdown > * + * { margin-top: 3px; }
-:is(.agent-selection-preview, .agent-selection-quote) .agent-panel-markdown :is(ul, ol) { padding-left: 15px; }
+:is(.agent-selection-preview, .agent-selection-quote) .agent-panel-prose > * + * { margin-top: 3px; }
+:is(.agent-selection-preview, .agent-selection-quote) .agent-panel-prose :is(ul, ol) { padding-left: 15px; }
 .agent-selection-meta { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--color-text-muted); }
 .agent-selection-clear { margin-left: auto; flex-shrink: 0; padding: 2px; border-radius: 4px; color: var(--color-text-muted); cursor: pointer; }
 .agent-selection-clear:hover { background: var(--color-bg-muted); color: var(--color-text); }
@@ -1457,19 +1457,37 @@ table.not-prose th {
 .agent-panel-empty { margin: auto 12px; padding: 24px 0 40px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; max-width: 280px; }
 .agent-panel-user { margin-left: 20px; padding: 10px 12px; background: var(--color-bg-muted); border-radius: 10px 10px 3px 10px; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-panel-markdown { font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
-.agent-panel-markdown > * + * { margin-top: 8px; }
-.agent-panel-markdown p { white-space: pre-wrap; }
-.agent-panel-markdown ul, .agent-panel-markdown ol { padding-left: 20px; }
-.agent-panel-markdown ul { list-style: disc; }
-.agent-panel-markdown ol { list-style: decimal; }
-.agent-panel-markdown strong { font-weight: 600; }
-.agent-panel-markdown code { font-size: 11px; background: var(--color-bg-muted); border-radius: 3px; padding: 1px 4px; }
-.agent-panel-markdown a { text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-.agent-panel-markdown blockquote { border-left: 2px solid var(--color-border); padding-left: 10px; color: var(--color-text-muted); white-space: pre-wrap; }
-.agent-panel-markdown hr { border-color: var(--color-border); }
-.agent-panel-code { position: relative; background: var(--color-bg-muted); border: 1px solid var(--color-border); border-radius: 7px; }
-.agent-panel-code pre { padding: 30px 10px 10px; overflow-x: auto; white-space: pre; }
-.agent-panel-code code { padding: 0; background: transparent; }
+.agent-panel-markdown > * + *, .agent-panel-prose > * + * { margin-top: 8px; }
+.agent-panel-prose :is(h1, h2, h3, h4, h5, h6) { font-weight: 600; line-height: 1.4; }
+.agent-panel-prose :is(h1, h2) { font-size: 13px; }
+.agent-panel-prose > :is(h1, h2, h3, h4, h5, h6):not(:first-child) { margin-top: 14px; }
+.agent-panel-prose :is(ul, ol) { padding-left: 20px; }
+.agent-panel-prose ul { list-style: disc; }
+.agent-panel-prose ol { list-style: decimal; }
+.agent-panel-prose li > :is(ul, ol, p) { margin-top: 2px; }
+.agent-panel-prose li:has(> input[type="checkbox"]) { list-style: none; margin-left: -18px; }
+.agent-panel-prose input[type="checkbox"] { margin-right: 5px; vertical-align: -1px; accent-color: var(--color-accent); }
+.agent-panel-prose strong { font-weight: 600; }
+.agent-panel-prose code { font-family: var(--font-mono); font-size: 11px; background: var(--color-bg-muted); border-radius: 3px; padding: 1px 4px; }
+.agent-panel-prose a { text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.agent-panel-prose blockquote { border-left: 2px solid var(--color-border); padding-left: 10px; color: var(--color-text-muted); }
+.agent-panel-prose hr { border-color: var(--color-border); }
+.agent-panel-prose table { display: block; overflow-x: auto; border-collapse: collapse; font-size: 11px; }
+.agent-panel-prose :is(th, td) { border: 1px solid var(--color-border); padding: 3px 8px; text-align: left; }
+.agent-panel-prose th { font-weight: 600; background: var(--color-bg-muted); }
+.agent-panel-prose [data-markdown="math-display"] { display: block; margin-inline: auto; max-width: 100%; }
+.agent-panel-prose [data-markdown="code-block"] { background: var(--color-bg-muted); border: 1px solid var(--color-border); border-radius: 7px; overflow: hidden; }
+.agent-panel-prose [data-markdown="code-header"] { display: flex; align-items: center; justify-content: space-between; padding: 3px 4px 0 10px; font-size: 10px; color: var(--color-text-muted); }
+.agent-panel-prose [data-markdown="code-header"] button { height: 22px; padding: 0 6px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+.agent-panel-prose [data-markdown="code-header"] button:hover:not(:disabled) { color: var(--color-text); background: var(--color-bg-emphasis); }
+.agent-panel-prose [data-markdown="code-header"] button:disabled { opacity: .5; cursor: default; }
+.agent-panel-prose pre { padding: 4px 10px 10px; overflow-x: auto; line-height: 1.6; tab-size: 2; }
+.agent-panel-prose pre code { display: block; padding: 0; background: transparent; white-space: pre; }
+.agent-panel-prose pre [data-markdown="code-lines"] { display: block; }
+.agent-panel-prose pre span[style] { color: var(--hls-light); }
+.dark .agent-panel-prose pre span[style] { color: var(--hls-dark); }
+.agent-panel-prose [data-animated="true"] { animation: agent-prose-fade 180ms ease-out backwards; }
+@keyframes agent-prose-fade { from { opacity: 0; } }
 .agent-panel-caret { display: inline-block; height: 12px; width: 2px; margin-left: 3px; background: var(--color-text-muted); animation: pulse 1.5s ease-in-out infinite; vertical-align: middle; }
 .agent-panel-tool { font-size: 11px; color: var(--color-text-muted); border: 1px solid var(--color-border); border-radius: 7px; }
 .agent-panel-tool summary { cursor: pointer; display: flex; gap: 7px; align-items: center; padding: 8px 10px; list-style: none; }
@@ -1554,6 +1572,6 @@ table.not-prose th {
 .agent-panel-messages > :is(.agent-panel-user, .agent-panel-tool, .agent-panel-markdown) { content-visibility: auto; contain-intrinsic-size: auto 48px; }
 @media (prefers-reduced-motion: reduce) {
   .agent-panel { transition: none; }
-  .agent-panel-caret { animation: none; }
+  .agent-panel-caret, .agent-panel-prose [data-animated="true"] { animation: none; }
 }
 .agent-panel:has(.agent-panel-resizing) { transition: none; }

@@ -1,132 +1,74 @@
-import { Fragment, memo, useMemo, type ReactNode } from "react";
+import { memo, useMemo, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { CodeCopyButton } from "../ui";
+import { Markdown } from "@pierre/words/react";
+import { createHighlightsPlugin } from "@pierre/words/highlights";
+import pierreDark from "@pierre/highlights/themes/pierre-dark";
+import pierreLight from "@pierre/highlights/themes/pierre-light";
 import { errorMessage } from "../../services/agent";
 import { renderableSpec, splitReply } from "../../lib/agent/ui/content";
 import { AgentSpec } from "./ui/AgentSpec";
 
-function inline(text: string): ReactNode[] {
-  const pattern =
-    /`([^`]+)`|\*\*(.+?)\*\*|__(.+?)__|\*([^*]+)\*|_([^_]+)_|~~(.+?)~~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
-  const result: ReactNode[] = [];
-  let start = 0;
-  for (const match of text.matchAll(pattern)) {
-    const index = match.index;
-    if (index > start) result.push(text.slice(start, index));
-    const key = `${index}`;
-    if (match[1]) result.push(<code key={key}>{match[1]}</code>);
-    else if (match[2] || match[3])
-      result.push(<strong key={key}>{match[2] || match[3]}</strong>);
-    else if (match[4] || match[5])
-      result.push(<em key={key}>{match[4] || match[5]}</em>);
-    else if (match[6]) result.push(<del key={key}>{match[6]}</del>);
-    else
-      result.push(
-        <a
-          key={key}
-          href={match[8]}
-          onClick={(event) => {
-            event.preventDefault();
-            void invoke("open_url_safe", { url: match[8] }).catch((error) =>
-              toast.error(errorMessage(error)),
-            );
-          }}
-        >
-          {match[7]}
-        </a>,
-      );
-    start = index + match[0].length;
-  }
-  if (start < text.length) result.push(text.slice(start));
-  return result;
+const plugins = {
+  code: createHighlightsPlugin({
+    themes: { light: pierreLight, dark: pierreDark },
+    defaultColor: false,
+  }),
+};
+const controls = { code: { copy: true, download: false } };
+/** Replies never load remote images; the CSP would block them anyway. */
+const disallowedElements = ["img"];
+
+function setCopyLabel(button: HTMLButtonElement, label: string) {
+  if (button.isConnected) button.textContent = label;
 }
-function CodeBlock({ text }: { text: string }) {
-  return (
-    <div className="agent-panel-code">
-      <CodeCopyButton text={text} className="absolute right-1 top-1" />
-      <pre>
-        <code>{text}</code>
-      </pre>
-    </div>
+
+/** Links and Copy go through Tauri commands; the webview's own handling is unreliable. */
+function handleClick(event: MouseEvent<HTMLDivElement>) {
+  if (!(event.target instanceof Element)) return;
+  const link = event.target.closest("a[href]");
+  if (link) {
+    event.preventDefault();
+    const url = link.getAttribute("href") ?? "";
+    if (/^https?:\/\//.test(url))
+      void invoke("open_url_safe", { url }).catch((error) =>
+        toast.error(errorMessage(error)),
+      );
+    return;
+  }
+  const button = event.target.closest<HTMLButtonElement>(
+    'button[data-code-action="copy"]',
   );
+  if (!button) return;
+  event.stopPropagation();
+  const block = button.closest<HTMLElement>('[data-markdown="code-block"]');
+  const text =
+    block?.dataset.code ?? block?.querySelector("pre code")?.textContent ?? "";
+  void invoke("copy_to_clipboard", { text })
+    .then(() => {
+      setCopyLabel(button, "Copied");
+      window.setTimeout(() => setCopyLabel(button, "Copy"), 1500);
+    })
+    .catch((error) => toast.error(errorMessage(error)));
 }
-function parseMarkdown(text: string): ReactNode[] {
-  const lines = text.split("\n");
-  const blocks: ReactNode[] = [];
-  for (let index = 0; index < lines.length;) {
-    const line = lines[index];
-    const key = index;
-    const fence = line.match(/^\s*(`{3,}|~{3,})/);
-    if (fence) {
-      const code: string[] = [];
-      index++;
-      while (
-        index < lines.length &&
-        !lines[index].trimStart().startsWith(fence[1])
-      )
-        code.push(lines[index++]);
-      if (index < lines.length) index++;
-      blocks.push(<CodeBlock key={key} text={code.join("\n")} />);
-      continue;
-    }
-    if (!line.trim()) {
-      index++;
-      continue;
-    }
-    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
-      blocks.push(<hr key={key} />);
-      index++;
-      continue;
-    }
-    const heading = line.match(/^#{1,6}\s+(.+)/);
-    if (heading) {
-      blocks.push(
-        <p key={key} className="font-semibold">
-          {inline(heading[1])}
-        </p>,
-      );
-      index++;
-      continue;
-    }
-    if (/^\s*>/.test(line)) {
-      const quote: string[] = [];
-      while (index < lines.length && /^\s*>/.test(lines[index]))
-        quote.push(lines[index++].replace(/^\s*>\s?/, ""));
-      blocks.push(
-        <blockquote key={key}>{inline(quote.join("\n"))}</blockquote>,
-      );
-      continue;
-    }
-    const ordered = /^\s*\d+[.)]\s+/;
-    const unordered = /^\s*[-*+]\s+/;
-    const listPattern = ordered.test(line)
-      ? ordered
-      : unordered.test(line)
-        ? unordered
-        : null;
-    if (listPattern) {
-      const items: ReactNode[] = [];
-      while (index < lines.length && listPattern.test(lines[index])) {
-        items.push(
-          <li key={index}>
-            {inline(lines[index++].replace(listPattern, ""))}
-          </li>,
-        );
-      }
-      blocks.push(
-        ordered.test(line) ? (
-          <ol key={key}>{items}</ol>
-        ) : (
-          <ul key={key}>{items}</ul>
-        ),
-      );
-      continue;
-    }
-    blocks.push(<p key={key}>{inline(line)}</p>);
-    index++;
-  }
-  return blocks;
+
+function Prose({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  return (
+    <Markdown
+      className="agent-panel-prose"
+      mode={streaming ? "streaming" : "static"}
+      isAnimating={streaming}
+      animated={streaming}
+      plugins={plugins}
+      controls={controls}
+      lineNumbers={false}
+      disallowedElements={disallowedElements}
+      math
+      onClickCapture={handleClick}
+    >
+      {text}
+    </Markdown>
+  );
 }
 /** User-written markdown (a selection, say): rendered as written, with no UI blocks. */
 export const MarkdownPreview = memo(function MarkdownPreview({
@@ -134,8 +76,11 @@ export const MarkdownPreview = memo(function MarkdownPreview({
 }: {
   text: string;
 }) {
-  const content = useMemo(() => parseMarkdown(text), [text]);
-  return <div className="agent-panel-markdown">{content}</div>;
+  return (
+    <div className="agent-panel-markdown">
+      <Prose text={text} />
+    </div>
+  );
 });
 export const AgentMarkdown = memo(function AgentMarkdown({
   text,
@@ -146,9 +91,15 @@ export const AgentMarkdown = memo(function AgentMarkdown({
 }) {
   const content = useMemo(
     () =>
-      splitReply(text, streaming).map((segment, index) => {
+      splitReply(text, streaming).map((segment, index, segments) => {
         if (segment.type === "text")
-          return <Fragment key={index}>{parseMarkdown(segment.text)}</Fragment>;
+          return (
+            <Prose
+              key={index}
+              text={segment.text}
+              streaming={streaming && index === segments.length - 1}
+            />
+          );
         const spec = renderableSpec(segment.spec);
         if (spec)
           return (
