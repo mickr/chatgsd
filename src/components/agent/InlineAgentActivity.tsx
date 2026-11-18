@@ -64,7 +64,7 @@ export function inlineActivity(conversation: Conversation, waiting: boolean, sta
         return { state: "editing", label: "Editing your note" };
       if (["research", "web_search", "web_fetch"].includes(item.name))
         return { state: "researching", label: "Researching" };
-      if (["read_document", "read_notes", "search_notes", "list_notes", "find_in_note", "note_links", "read_skill"].includes(item.name))
+      if (["read_document", "read_notes", "search_notes", "list_notes", "list_projects", "search_projects", "find_in_note", "note_links", "read_skill"].includes(item.name))
         return { state: "reading", label: "Reading" };
       return { state: "thinking", label: "Working" };
     }

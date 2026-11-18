@@ -30,6 +30,10 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
     return `Search: ${String(input.query ?? "notes")}`;
   if (item.name === "list_notes")
     return input.folder ? `Listed notes in ${String(input.folder)}` : "Listed notes";
+  if (item.name === "list_projects")
+    return input.path ? `Looked in ${String(input.path)}` : "Looked at projects";
+  if (item.name === "search_projects")
+    return `Search ${input.project ? String(input.project) : "projects"}: ${String(input.query ?? "")}`;
   if (item.name === "read_notes") {
     const ids = Array.isArray(input.ids) ? input.ids.map(String) : [];
     return ids.length
@@ -50,6 +54,10 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
   }
   if (item.name === "web_fetch")
     return `Read ${sourceHost(String(input.url ?? ""))}${lineRange(input)}`;
+  if (item.name === "mcp_tools")
+    return `Checked what ${String(input.server ?? "a service")} can do`;
+  if (item.name === "mcp_call")
+    return `${String(input.server ?? "Service")}: ${String(input.tool ?? "").replace(/_/g, " ")}`;
   if (item.name === "read_skill")
     return `Used skill: ${String(input.name ?? "")}`;
   if (item.name === "offer_skill")

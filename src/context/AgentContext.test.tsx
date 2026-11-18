@@ -30,11 +30,11 @@ vi.mock("../services/agent", async (importOriginal) => ({
   startRun: vi.fn(),
   reviewWriting: vi.fn(),
   returnThought: vi.fn(async () => {}),
-  holdThought: vi.fn(async () => {}),
   forgetMemory: vi.fn(async () => {}),
   getNoteMemory: vi.fn(async () => ({ documentId: "test-document", revision: 0, entries: [] })),
   classifyInlineContext: vi.fn(),
   toolRespond: vi.fn(() => Promise.resolve()),
+  steerRun: vi.fn(() => Promise.resolve()),
   cancelRun: vi.fn(() => Promise.resolve()),
   listConversations: vi.fn(),
   loadConversation: vi.fn(),
@@ -47,6 +47,9 @@ vi.mock("../services/agent", async (importOriginal) => ({
     mocks.toolHandler = handler;
     return Promise.resolve(() => {});
   }),
+}));
+vi.mock("./McpContext", () => ({
+  useMcp: () => ({ servers: [], error: null, refresh: vi.fn() }),
 }));
 vi.mock("../services/notes", () => ({
   getSettings: vi.fn(() => Promise.resolve({})),
@@ -114,7 +117,7 @@ async function openPanel(starters = "") {
   vi.useRealTimers();
 }
 
-async function startRunAndAsk(args: Record<string, unknown>) {
+async function startRunAndAsk(args: Record<string, unknown>, name = "ask_user") {
   act(() => current.toggle());
   await settle();
   await act(async () => {
@@ -124,7 +127,7 @@ async function startRunAndAsk(args: Record<string, unknown>) {
     mocks.toolHandler?.({
       requestId: "q1",
       runId: "run-1",
-      name: "ask_user",
+      name,
       args,
     }),
   );
@@ -302,13 +305,10 @@ it.each(["toggle", "close"] as const)("returns focus to Markdown source through 
   }
 });
 
-it("holds the writer’s words with their selected passage and forgets by revision without editing", async () => {
+it("forgets a saved item by revision without editing", async () => {
   act(() => current.toggle());
   await settle();
   const draft = editor.state.doc;
-  editor.commands.setTextSelection({ from: 1, to: 5 });
-  await act(async () => { expect(await current.holdThought("Compare the costs later.")).toBe(true); });
-  expect(agent.holdThought).toHaveBeenCalledWith("/notes", "test-document", READY.account!.email, "Compare the costs later.", "Trip");
   await act(async () => { await current.forgetMemory("costs"); });
   expect(agent.forgetMemory).toHaveBeenCalledWith("/notes", "test-document", READY.account!.email, 0, "costs");
   expect(editor.state.doc.eq(draft)).toBe(true);
@@ -371,6 +371,24 @@ describe("AgentProvider ask_user", () => {
       type: "question",
       answer: "Sunday",
     });
+  });
+
+  it("asks before an MCP tool runs and returns the user's choice to the waiting call", async () => {
+    await startRunAndAsk({
+      question: 'Allow Tracker to run create_issue?\n{\n  "title": "Book the ferry"\n}',
+      options: ["Allow once", "Always allow", "Don't allow"],
+      form: null,
+    }, "mcp_approval");
+
+    expect(current.pendingQuestion).toMatchObject({
+      question: expect.stringContaining("Allow Tracker to run create_issue?"),
+      options: ["Allow once", "Always allow", "Don't allow"],
+    });
+    await act(async () => {
+      await current.answerQuestion("Always allow");
+    });
+    expect(agent.toolRespond).toHaveBeenCalledWith("q1", true, "The user answered: Always allow");
+    expect(current.pendingQuestion).toBeNull();
   });
 
   it("returns form answers as JSON and keeps a valid form spec", async () => {
@@ -1476,4 +1494,38 @@ it("coalesces repeated explicit offer requests while the classifier is pending",
   expect(agent.startRun).not.toHaveBeenCalled();
   await act(async () => { resolve({ intent: "suggest", confidence: .95, route: "fast" }); await first; });
   expect(agent.startRun).toHaveBeenCalledOnce();
+});
+
+describe("AgentProvider steer", () => {
+  const texts = () => current.conversation.items.map((item) => ("text" in item ? item.text : item.type));
+
+  it("hands the working agent a message, shows it, and lets the reply continue after it", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("Plan the trip"); });
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text: "Drafting" } }));
+
+    await act(async () => { expect(await current.steer("  Keep it to two days  ")).toBe(true); });
+    expect(agent.steerRun).toHaveBeenCalledWith("run-1", "Keep it to two days");
+    expect(agent.startRun).toHaveBeenCalledOnce();
+    expect(current.conversation.runId).toBe("run-1");
+
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text: "Two days it is." } }));
+    expect(texts().slice(-3)).toEqual(["Drafting", "Keep it to two days", "Two days it is."]);
+  });
+
+  it("steers nothing when no request is running, and keeps the message when Codex refuses", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { expect(await current.steer("Keep it short")).toBe(false); });
+    expect(agent.steerRun).not.toHaveBeenCalled();
+
+    await act(async () => { await current.send("Plan the trip"); });
+    const before = current.conversation.items.length;
+    vi.mocked(agent.steerRun).mockRejectedValueOnce("The agent has already finished. Send this as a new message.");
+    await act(async () => { expect(await current.steer("Keep it short")).toBe(false); });
+    expect(current.conversation.items).toHaveLength(before);
+    await act(async () => { expect(await current.steer("   ")).toBe(false); });
+    expect(agent.steerRun).toHaveBeenCalledOnce();
+  });
 });

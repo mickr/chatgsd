@@ -41,7 +41,7 @@ export const AgentQuestion = memo(function AgentQuestion({
       data-pending={pending}
       aria-label="Question from ChatGPT"
     >
-      <p className="text-xs font-medium leading-relaxed">{item.question}</p>
+      <p className="text-xs font-medium leading-relaxed whitespace-pre-wrap break-words">{item.question}</p>
       {item.answer !== null ? (
         <p className="text-xs text-text-muted">
           You answered: <span className="text-text">{item.answer}</span>

@@ -6,6 +6,7 @@ import {
   KeyboardIcon,
   InfoIcon,
   IntegrationsIcon,
+  ServerIcon,
   SkillIcon,
 } from "../icons";
 import { Button, IconButton } from "../ui";
@@ -15,13 +16,16 @@ import { ShortcutsSettingsSection } from "./ShortcutsSettingsSection";
 import { AboutSettingsSection } from "./AboutSettingsSection";
 import { ToolsSettingsSection } from "./ToolsSettingsSection";
 import { SkillsSettingsSection } from "./SkillsSettingsSection";
+import { McpSettingsSection } from "./McpSettingsSection";
 import { mod, isMac, isWindows } from "../../lib/platform";
+
+export type SettingsTab = "general" | "tools" | "mcp" | "skills" | "editor" | "shortcuts" | "about";
 
 interface SettingsPageProps {
   onBack: () => void;
+  /** The tab to open on; the folder tab when left out. */
+  initialTab?: SettingsTab;
 }
-
-type SettingsTab = "general" | "tools" | "skills" | "editor" | "shortcuts" | "about";
 
 const tabs: {
   id: SettingsTab;
@@ -31,14 +35,15 @@ const tabs: {
 }[] = [
   { id: "general", label: "Folder", icon: FolderIcon, shortcut: "1" },
   { id: "tools", label: "Integrations", icon: IntegrationsIcon, shortcut: "2" },
-  { id: "skills", label: "Skills", icon: SkillIcon, shortcut: "3" },
-  { id: "editor", label: "Appearance", icon: SwatchIcon, shortcut: "4" },
-  { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, shortcut: "5" },
-  { id: "about", label: "About", icon: InfoIcon, shortcut: "6" },
+  { id: "mcp", label: "MCP Servers", icon: ServerIcon, shortcut: "3" },
+  { id: "skills", label: "Skills", icon: SkillIcon, shortcut: "4" },
+  { id: "editor", label: "Appearance", icon: SwatchIcon, shortcut: "5" },
+  { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, shortcut: "6" },
+  { id: "about", label: "About", icon: InfoIcon, shortcut: "7" },
 ];
 
-export function SettingsPage({ onBack }: SettingsPageProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("general");
+export function SettingsPage({ onBack, initialTab = "general" }: SettingsPageProps) {
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Reset scroll position when tab changes
@@ -122,6 +127,7 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
           <div className={`w-full max-w-3xl mx-auto px-6 pb-6${isWindows ? " pt-2" : ""}`}>
             {activeTab === "general" && <GeneralSettingsSection />}
             {activeTab === "tools" && <ToolsSettingsSection />}
+            {activeTab === "mcp" && <McpSettingsSection />}
             {activeTab === "skills" && <SkillsSettingsSection />}
             {activeTab === "editor" && <AppearanceSettingsSection />}
             {activeTab === "shortcuts" && <ShortcutsSettingsSection />}

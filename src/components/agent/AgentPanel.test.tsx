@@ -3,7 +3,7 @@ import { act, useCallback, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChanges, ScratchDocument } from "../editor/AgentChanges";
 import { TooltipProvider } from "../ui";
 import { AgentPanel, orderedStarters } from "./AgentPanel";
@@ -17,6 +17,9 @@ const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown> }));
 vi.mock("../../context/AgentContext", async (original) => ({
   ...await original<typeof AgentContext>(),
   useAgent: () => state.agent,
+}));
+vi.mock("../../context/McpContext", () => ({
+  useMcp: () => ({ servers: [], error: null, refresh: vi.fn() }),
 }));
 vi.mock("../../context/NotesContext", () => ({
   useNotes: () => ({ currentNote: { id: "note", title: "Note" }, selectNote: vi.fn() }),
@@ -563,4 +566,64 @@ it("replaces the standing starters with the agent's own next moves for this note
   expect(state.agent.requestWritingHelp).not.toHaveBeenCalled();
   const [prompt] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
   expect(prompt).toContain("User instruction:\n\nConnect Venus to the opening");
+});
+
+describe("while the agent works on a request", () => {
+  const working = () => {
+    Object.assign(state.agent, {
+      conversation: { runId: "run", items: [{ id: "u", type: "user", text: "Tighten the intro" }] },
+      steer: vi.fn().mockResolvedValue(true),
+    });
+    return openPanel();
+  };
+  const control = (label: string) => container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);
+  const enter = (input: HTMLTextAreaElement) =>
+    act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+
+  it("offers Stop, and Steer once there is something to steer with", async () => {
+    const input = working();
+    expect(input.placeholder).toBe("Steer the agent…");
+    expect(control("Stop agent")).not.toBeNull();
+    expect(control("Steer agent")).toBeNull();
+    expect(control("Send message")).toBeNull();
+
+    type(input, "Keep the first sentence");
+    expect(control("Steer agent")).not.toBeNull();
+    expect(container.textContent).toContain("Enter to steer");
+
+    await act(async () => { control("Stop agent")!.click(); });
+    expect(state.agent.stop).toHaveBeenCalledOnce();
+    expect(state.agent.steer).not.toHaveBeenCalled();
+  });
+
+  it("steers with the message instead of starting another request", async () => {
+    const input = working();
+    type(input, "Keep the first sentence");
+    await enter(input);
+    expect(state.agent.steer).toHaveBeenCalledWith("Keep the first sentence");
+    expect(state.agent.send).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+
+    type(input, "And the title");
+    await act(async () => { control("Steer agent")!.click(); });
+    expect(state.agent.steer).toHaveBeenLastCalledWith("And the title");
+  });
+
+  it("puts the message back when it could not be delivered", async () => {
+    const input = working();
+    vi.mocked(state.agent.steer as () => Promise<boolean>).mockResolvedValue(false);
+    type(input, "Keep the first sentence");
+    await enter(input);
+    expect(input.value).toBe("Keep the first sentence");
+  });
+
+  it("still sends a message over a background check, with no Stop and no steering", async () => {
+    Object.assign(state.agent, { companionChecking: true });
+    const input = working();
+    expect(control("Stop agent")).toBeNull();
+    type(input, "Tighten this paragraph");
+    await enter(input);
+    expect(state.agent.steer).not.toHaveBeenCalled();
+    expect(state.agent.send).toHaveBeenCalledOnce();
+  });
 });

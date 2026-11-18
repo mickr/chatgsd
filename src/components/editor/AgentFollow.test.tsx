@@ -17,6 +17,7 @@ let scroll: Mock;
 let caretTop: number;
 
 beforeEach(() => {
+  localStorage.clear();
   host = document.createElement("div");
   pane = document.createElement("div");
   document.body.append(host, pane);
@@ -70,28 +71,67 @@ it("follows offscreen agent work only after opting in, without moving the user's
   expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("true");
 });
 
-it.each(["wheel", "touchstart", "pointerdown", "keydown", "beforeinput"])("pauses on %s and cancels a queued follow until rejoined", event => {
+it.each(["wheel", "touchstart", "pointerdown", "keydown", "beforeinput"])("keeps following after %s until explicitly switched off", event => {
   presence();
   toggle();
   act(() => pane.dispatchEvent(new Event(event)));
   flush();
+  expect(scroll).toHaveBeenCalledOnce();
+  expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("true");
   presence(22);
-  flush();
-  expect(scroll).not.toHaveBeenCalled();
-  expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("false");
   toggle();
+  flush();
+  expect(scroll).toHaveBeenCalledOnce();
+  expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("false");
+  presence(24);
   flush();
   expect(scroll).toHaveBeenCalledOnce();
 });
 
-it("clears following when the document's presence is cleared", () => {
+it("waits for the next agent caret and allows switching off while idle", () => {
   presence();
   toggle();
   act(() => editor.view.dispatch(setChangeMeta(editor.state.tr, { clear: true })));
   flush();
   expect(scroll).not.toHaveBeenCalled();
+  expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("true");
+  presence();
+  flush();
+  expect(scroll).toHaveBeenCalledOnce();
+  act(() => editor.view.dispatch(setChangeMeta(editor.state.tr, { clearPresence: "agent" })));
+  toggle();
   expect(host.querySelector("button")).toBeNull();
   presence();
   flush();
+  expect(scroll).toHaveBeenCalledOnce();
+});
+
+it("lets the writer type elsewhere and follows the next agent action", () => {
+  presence();
+  toggle();
+  flush();
+  scroll.mockClear();
+  act(() => editor.view.dispatch(editor.state.tr.insertText("My ", 1)));
+  flush();
+  expect(scroll).not.toHaveBeenCalled();
+  presence(24);
+  flush();
+  expect(scroll).toHaveBeenCalledOnce();
+});
+
+it("restores the writer's last choice when the editor reopens", () => {
+  const reopen = () => {
+    act(() => root.render(null));
+    act(() => root.render(<AgentFollow editor={editor} containerRef={{ current: pane }} />));
+    flush();
+  };
+  presence();
+  toggle();
+  reopen();
+  expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("true");
+  expect(scroll).toHaveBeenCalledOnce();
+  toggle();
+  reopen();
   expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("false");
+  expect(scroll).toHaveBeenCalledOnce();
 });

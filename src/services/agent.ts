@@ -129,8 +129,6 @@ export interface MemoryEntry {
 export interface NoteMemory { documentId: string; revision: number; entries: MemoryEntry[] }
 export const getNoteMemory = (folder: string, noteId: string, email: string) =>
   invoke<NoteMemory>("agent_note_memory", { folder, noteId, email });
-export const holdThought = (folder: string, documentId: string, email: string, summary: string, quote: string | null) =>
-  invoke<void>("agent_hold_thought", { folder, documentId, email, summary, quote });
 export const returnThought = (folder: string, documentId: string, email: string, revision: number, key: string, result: string) =>
   invoke<void>("agent_return_thought", { folder, documentId, email, revision, key, result });
 export const observeWording = (folder: string, documentId: string, email: string,
@@ -163,6 +161,9 @@ export const setupComputerPermissions = (permission: ComputerPermission) =>
 export const listModels = () => invoke<ModelInfo[]>("agent_list_models");
 export const startRun = (request: StartRunRequest) =>
   invoke<{ runId: string }>("agent_start_run", { request });
+/** Hands the working agent a message without stopping it. */
+export const steerRun = (runId: string, text: string) =>
+  invoke<void>("agent_steer_run", { runId, text });
 export const cancelRun = (runId: string) =>
   invoke<void>("agent_cancel_run", { runId });
 export const toolRespond = (requestId: string, ok: boolean, output: string) =>

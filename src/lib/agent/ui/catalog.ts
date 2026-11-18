@@ -75,7 +75,7 @@ export const componentDefinitions = {
       detail: z.string().nullable(),
     }),
     description:
-      "A link to another note by ID (from list_notes, search_notes or read_notes). Clicking opens it.",
+      "A link to another note or a project file by ID (from list_notes, search_notes, read_notes, list_projects or search_projects). Clicking opens it.",
   },
   WritingSuggestion: {
     props: z.object({ id: z.string() }),

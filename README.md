@@ -28,6 +28,7 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
 - **Agent panel** - Co-edit with Codex through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret and subtle working-range highlight show where it is working without taking your selection. Follow agent keeps its work in view until you scroll or type. While the panel is open it follows your edits: a cheap classifier decides after each pause whether to stay quiet, offer a suggestion, or continue an edit you asked for. Its face shows what it is doing and stays on a launcher when the panel is closed. Each note keeps its conversation history
 - **Web research** - With internet access on, the agent hands questions your notes can't answer to a researcher: a separate Codex role that searches the web, reads pages and reports back with sources. Its model and brief are yours to change in Settings → Integrations
+- **MCP servers** - Connect the agent to services you use (an issue tracker, a calendar, a document store) by pasting a remote MCP server's address. ChatGSD reads the server's name and tools, signs in through your browser with OAuth when the server asks, and lets the agent look things up there while it reads the note you're working on. Tools that may change something ask you first. Add, edit, switch off, reconnect, re-authorize and remove servers, and choose Allow, Ask first or Off per tool, in Settings → MCP Servers; the agent panel shows which are connected
 - **Skills** - Save [Agent Skills](https://agentskills.io) for the agent to follow. When a site the researcher reads publishes a skill that fits your work, the agent offers it on a card with its full instructions, and you decide whether to save it. Manage, switch off, remove or add skills by address in Settings → Skills
 - **Works with other AI agents** - Changes made to an open note on disk merge in live, and conflicting edits show up as changes to review
 - **Folders** - Opt-in collapsible folder tree with drag-and-drop to organize notes
@@ -99,8 +100,9 @@ Scratch keeps document editing on its direct TipTap transaction tools. The agent
 has a separate caret that follows its work while your selection stays yours.
 Edits land immediately, with a subtle highlight on the agent's current edit,
 without deletion ghosts or approval controls. Choose **Follow agent** in the
-formatted editor to keep its caret in view without moving yours. Scrolling,
-clicking in the editor, or typing pauses following; choose it again to rejoin.
+formatted editor to keep its caret in view without moving yours. You can scroll
+and type while following. Your choice carries across notes and app restarts.
+Choose **Following agent** to turn it off, even while the agent is idle.
 The agent is guided to edit one paragraph or coherent section at a time, keeping
 dependent edits together. A brief, staggered text reveal makes new words visible
 as they arrive; each document transaction stays atomic, and reduced-motion
@@ -108,9 +110,13 @@ preferences disable the animation. Normal editor Undo works within the current
 note and cannot restore a different note. Conflicting external disk changes
 still use the existing merge review controls.
 
-Each note keeps a working memory for the signed-in account. In the agent panel,
-type a thought and choose **Hold for later** to save it with the selected
-passage. Expand the saved items to revisit or forget one. The agent checks for
+While the agent is working on a request, the composer shows **Stop**, and
+anything you type steers it: press Enter and the agent takes the message into
+account from its next step, without starting over.
+
+Each note keeps a working memory for the signed-in account. Ask the agent to
+hold a thought for later and it saves it with the note. Expand the saved items
+to revisit or forget one. The agent checks for
 the requested follow-up as you write and saves its suggestion with the thought.
 Assignments and wording choices also carry over across chats and app restarts.
 

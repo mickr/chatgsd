@@ -26,6 +26,7 @@ import {
 import { mod, shift, isMac, isWindows } from "../../lib/platform";
 import * as notesService from "../../services/notes";
 import { FolderNameDialog } from "../notes/FolderNameDialog";
+import { ProjectsSection } from "../notes/ProjectsSection";
 
 interface SidebarProps {
   onOpenSettings?: () => void;
@@ -419,6 +420,9 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           setLastClickedNoteId={setLastClickedNoteId}
         />
       </div>
+
+      {/* Folders linked from elsewhere, always in view below the notes */}
+      <ProjectsSection />
 
       {/* Footer with git status, commit, and settings */}
       <Footer onOpenSettings={onOpenSettings} />

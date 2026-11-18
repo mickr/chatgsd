@@ -6,8 +6,10 @@ pub mod conversations;
 pub mod events;
 pub mod expression;
 pub mod note_edits;
+pub mod projects;
 pub mod prompt;
 pub mod memory;
+pub mod mcp;
 mod reading;
 pub mod skills;
 pub mod tools;
@@ -107,6 +109,8 @@ pub struct StartRunResponse {
 struct Run {
     task: tauri::async_runtime::JoinHandle<()>,
     context: RunContext,
+    /// Messages the user sends while the run works reach it here.
+    steer: tokio::sync::mpsc::UnboundedSender<String>,
 }
 #[derive(Default)]
 pub struct AgentState {
@@ -188,6 +192,7 @@ pub async fn agent_start_run(
     let task_app = app.clone();
     // The gate ensures tools cannot arrive before the run and its context are registered.
     let (start, ready) = tokio::sync::oneshot::channel();
+    let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
     let task = tauri::async_runtime::spawn(async move {
         if ready.await.is_err() {
             return;
@@ -199,6 +204,7 @@ pub async fn agent_start_run(
             model,
             request.session_id,
             request.prompt,
+            steered,
         )
         .await;
         let state = task_app.state::<AgentState>();
@@ -227,9 +233,25 @@ pub async fn agent_start_run(
         .runs
         .lock()
         .expect("agent runs mutex")
-        .insert(run_id.clone(), Run { task, context: ctx });
+        .insert(run_id.clone(), Run { task, context: ctx, steer });
     let _ = start.send(());
     Ok(StartRunResponse { run_id })
+}
+/// Hands the working agent a message from the user without stopping it. The
+/// run delivers it between steps, or as its next turn if this one just ended.
+#[tauri::command]
+pub fn agent_steer_run(run_id: String, text: String, state: State<'_, AgentState>) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Enter a message first".into());
+    }
+    let finished = || "The agent has already finished. Send this as a new message.".to_owned();
+    let runs = state.runs.lock().expect("agent runs mutex");
+    let run = runs.get(&run_id).ok_or_else(finished)?;
+    if run.context.read_only {
+        return Err("A background check can't be steered".into());
+    }
+    run.steer.send(text.to_owned()).map_err(|_| finished())
 }
 #[tauri::command]
 pub fn agent_cancel_run(app: tauri::AppHandle, run_id: String, state: State<'_, AgentState>) {

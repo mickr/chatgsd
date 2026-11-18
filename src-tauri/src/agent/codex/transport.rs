@@ -15,6 +15,9 @@ pub(super) struct Server {
     output: BufReader<ChildStdout>,
     stderr: tokio::task::JoinHandle<()>,
     queued: VecDeque<Value>,
+    /// The start of a message still arriving, kept here so a read that is
+    /// dropped while waiting loses nothing.
+    partial: Vec<u8>,
     request_id: u64,
     pub home: PathBuf,
     pub cwd: PathBuf,
@@ -98,7 +101,7 @@ impl Server {
             let mut bytes = [0; 4096];
             while matches!(stderr.read(&mut bytes).await, Ok(count) if count > 0) {}
         });
-        let mut server = Self { child, input, output, stderr: drain, queued: VecDeque::new(), request_id: 0, home: home.into(), cwd };
+        let mut server = Self { child, input, output, stderr: drain, queued: VecDeque::new(), partial: Vec::new(), request_id: 0, home: home.into(), cwd };
         server.rpc("initialize", json!({"clientInfo":{"name":"chatgsd","title":"ChatGSD","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         server.send(json!({"method":"initialized"})).await?;
         Ok(server)
@@ -113,19 +116,19 @@ impl Server {
     }
 
     async fn read(&mut self) -> Result<Value, String> {
-        let mut line = Vec::new();
         loop {
             let bytes = self.output.fill_buf().await.map_err(|error| error.to_string())?;
             if bytes.is_empty() {
                 return Err("Codex exited unexpectedly. No further tools were dispatched.".into());
             }
             let count = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |index| index + 1);
-            if line.len() + count > MAX_MESSAGE_BYTES { return Err("Codex exceeded the transport message limit".into()); }
+            if self.partial.len() + count > MAX_MESSAGE_BYTES { return Err("Codex exceeded the transport message limit".into()); }
             let complete = bytes[count - 1] == b'\n';
-            line.extend_from_slice(&bytes[..count]);
+            self.partial.extend_from_slice(&bytes[..count]);
             self.output.consume(count);
             if complete { break; }
         }
+        let line = std::mem::take(&mut self.partial);
         serde_json::from_slice(&line).map_err(|error| format!("Invalid Codex protocol message: {error}"))
     }
 
@@ -178,16 +181,23 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an explicitly selected installed Codex runtime"]
     async fn codex_runtime_handshake_account_and_dynamic_thread() {
-        runtime_dynamic_thread(false).await;
+        runtime_dynamic_thread(false, false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly selected installed Codex runtime"]
+    async fn codex_runtime_steers_a_working_turn() {
+        runtime_dynamic_thread(false, true).await;
     }
 
     #[tokio::test]
     #[ignore = "requires an explicitly selected installed Codex runtime and its code-mode host"]
     async fn codex_runtime_code_mode_dispatches_document_tools() {
-        runtime_dynamic_thread(true).await;
+        runtime_dynamic_thread(true, false).await;
     }
 
-    async fn runtime_dynamic_thread(code_mode: bool) {
+    /// `steer` sends the user's follow-up while the first tool call is still open.
+    async fn runtime_dynamic_thread(code_mode: bool, steer: bool) {
         let binary = PathBuf::from(std::env::var_os("CHATGSD_CODEX_PATH").expect("select Codex with CHATGSD_CODEX_PATH"));
         let home = std::env::temp_dir().join(format!("chatgsd-codex-test-{}", uuid::Uuid::new_v4()));
         // A local Responses fixture exercises the real Codex runtime without
@@ -200,6 +210,7 @@ mod tests {
                 let mut body = String::new();
                 request.as_reader().read_to_string(&mut body).unwrap();
                 if round == 1 { assert!(body.contains("Unsaved live note")); }
+                assert_eq!(body.contains("Use British spelling."), steer && round == 1, "steering reaches the model's next request only");
                 let item = if round == 0 && code_mode {
                     json!({"type":"custom_tool_call","id":"tool-item","call_id":"read-live","name":"exec","input":"text(await tools.scratch__read_document({}));","status":"completed"})
                 } else if round == 0 {
@@ -246,6 +257,11 @@ mod tests {
                     assert_eq!(message["params"]["tool"], "read_document");
                     assert_eq!(message["params"]["namespace"], "scratch");
                     saw_tool = true;
+                    if steer {
+                        let steered = server.rpc("turn/steer", json!({"threadId":thread,"expectedTurnId":turn,
+                            "input":[{"type":"text","text":"Use British spelling.","text_elements":[]}]})).await.unwrap();
+                        assert_eq!(steered["turnId"], turn);
+                    }
                     server.send(json!({"id":message["id"],"result":{"success":true,"contentItems":[{"type":"inputText","text":"Unsaved live note"}]}})).await.unwrap();
                 } else if message.get("id").is_some() {
                     server.reject(&message).await.unwrap();

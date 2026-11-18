@@ -1401,7 +1401,13 @@ table.not-prose th {
 .agent-panel-history-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 13px; border-radius: 5px; color: var(--color-text); cursor: pointer; outline: none; }
 .agent-panel-history-item[data-highlighted] { background: var(--color-bg-muted); }
 .agent-panel-history-check { flex-shrink: 0; visibility: hidden; color: var(--color-text-muted); }
-.agent-panel-history-item[data-current] .agent-panel-history-check { visibility: visible; }
+.agent-panel-history-item[data-current] .agent-panel-history-check, .agent-panel-history-item[data-state="checked"] .agent-panel-history-check { visibility: visible; }
+.agent-panel-services { margin-top: 6px; padding-top: 7px; border-top: 1px dashed var(--color-border); display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--color-text-muted); }
+.agent-panel-services-trigger { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; color: inherit; cursor: pointer; border-radius: 4px; transition: color 150ms; }
+.agent-panel-services-trigger:hover, .agent-panel-services-trigger[data-state="open"] { color: var(--color-text); }
+.agent-panel-services-trigger:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+.agent-panel-services-action { padding-left: 30px; font-size: 12px; color: var(--color-text-muted); }
+.agent-panel-services-separator { height: 1px; margin: 4px 0; background: var(--color-border); }
 .agent-panel-context { margin: 0 16px 8px; padding: 9px 11px; border: 1px solid var(--color-border); border-radius: 8px; display: flex; flex-direction: column; gap: 3px; background: var(--color-bg); }
 /* The selection the agent will use, or is using: the same accent in the panel and the note. */
 .agent-selection { background: color-mix(in srgb, var(--color-accent) 16%, transparent); border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }

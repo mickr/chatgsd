@@ -82,7 +82,7 @@ pub fn http_url(address: &str) -> Result<Url, String> {
 }
 
 /// Whether an address is on the public internet, not this machine or its network.
-fn is_public(address: IpAddr) -> bool {
+pub(super) fn is_public(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(ip) => {
             let [a, b, ..] = ip.octets();
@@ -124,11 +124,15 @@ fn is_public(address: IpAddr) -> bool {
 
 #[derive(Clone, Copy)]
 pub struct Fetcher {
-    /// Tests serve from loopback; the app never sets this.
+    /// Only for addresses the user typed themselves (an MCP server on this Mac
+    /// or its network) and for tests, which serve from loopback.
     allow_local: bool,
 }
 
 pub const PUBLIC: Fetcher = Fetcher { allow_local: false };
+/// Reaches this machine and its network too. Never for an address that came
+/// from a model or a web page.
+pub const ANY: Fetcher = Fetcher { allow_local: true };
 
 impl Fetcher {
     /// Resolves the host once and refuses anything off the public internet.
@@ -157,6 +161,22 @@ impl Fetcher {
         }
     }
 
+    /// A client for one request to `url`: no proxy, no redirects, and the
+    /// connection pinned to the address that was checked.
+    pub async fn client(&self, url: &Url, timeout: Duration) -> Result<reqwest::Client, FetchError> {
+        let host = url.host_str().unwrap_or_default().to_owned();
+        // No proxy: one would resolve the host itself, past the pinned address.
+        let mut client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .user_agent(USER_AGENT);
+        if let Some((domain, pinned)) = self.checked_address(url).await? {
+            client = client.resolve(&domain, pinned);
+        }
+        client.build().map_err(|_| FetchError::Other(format!("Couldn't reach {host}")))
+    }
+
     /// GETs `address`, following up to five redirects, and reads at most
     /// `max_bytes` of the body.
     pub async fn get(&self, address: &str, accept: &str, max_bytes: usize) -> Result<Fetched, FetchError> {
@@ -164,18 +184,9 @@ impl Fetcher {
         for _ in 0..=MAX_REDIRECTS {
             let host = url.host_str().unwrap_or_default().to_owned();
             let unreachable = || FetchError::Other(format!("Couldn't reach {host}"));
-            // No proxy: one would resolve the host itself, past the address pinned below.
-            let mut client = reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(TIMEOUT)
-                .user_agent(USER_AGENT);
-            if let Some((domain, pinned)) = self.checked_address(&url).await? {
-                client = client.resolve(&domain, pinned);
-            }
-            let mut response = client
-                .build()
-                .map_err(|_| unreachable())?
+            let mut response = self
+                .client(&url, TIMEOUT)
+                .await?
                 .get(url.clone())
                 .header(reqwest::header::ACCEPT, accept)
                 .send()

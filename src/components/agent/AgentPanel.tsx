@@ -1,4 +1,5 @@
 import { WorkingMemory } from "./WorkingMemory";
+import { McpServices } from "./McpServices";
 import {
   useCallback,
   useEffect,
@@ -37,6 +38,7 @@ import {
   ArrowUpIcon,
   PlusIcon,
   SpinnerIcon,
+  StopIcon,
   XIcon,
 } from "../icons";
 import { IconButton, Tooltip } from "../ui";
@@ -145,7 +147,14 @@ function ResizeHandle() {
     </div>
   );
 }
-export function AgentPanel({ visible }: { visible: boolean }) {
+export function AgentPanel({
+  visible,
+  onManageServers,
+}: {
+  visible: boolean;
+  /** Opens settings on the MCP servers tab. */
+  onManageServers?: () => void;
+}) {
   const agent = useAgent();
   const { currentNote, selectNote } = useNotes();
   const changes = useAgentChanges(agent.editor);
@@ -266,7 +275,9 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   }, [currentNote?.id]);
   const { pendingQuestion, answerQuestion } = agent;
   const waiting = !!pendingQuestion;
-  const sendLabel = pendingQuestion ? "Send answer" : "Send message";
+  // While the agent works on a request, a message redirects it instead of waiting its turn.
+  const steering = running && !agent.companionChecking && !waiting;
+  const sendLabel = pendingQuestion ? "Send answer" : steering ? "Steer agent" : "Send message";
   const answer = useCallback(
     (value: QuestionAnswer) => {
       void answerQuestion(value);
@@ -288,10 +299,13 @@ export function AgentPanel({ visible }: { visible: boolean }) {
       await answerQuestion(text);
       return;
     }
-    // A background writing check gives way to a message; any other run does not.
-    if (running && !agent.companionChecking) return;
     const text = draft;
     setDrafts((previous) => ({ ...previous, [id]: "" }));
+    // A background writing check gives way to a message; any other run is steered by it.
+    if (steering) {
+      if (!(await agent.steer(text))) setDrafts((previous) => ({ ...previous, [id]: previous[id] || text }));
+      return;
+    }
     await deliver(text, () => setDrafts((previous) => ({ ...previous, [id]: previous[id] || text })));
   };
   /** Route and send one message; `restore` puts it back if it never left. */
@@ -485,6 +499,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               {agent.coediting || running ? "Pause" : "Write with me"}
             </button>
           </div>
+          <McpServices onManage={onManageServers} />
         </div>
         <OpenNoteContext.Provider value={openNote}>
           <WritingOfferContext.Provider value={offerControls}>
@@ -707,7 +722,9 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               placeholder={
                 pendingQuestion
                   ? "Type your answer…"
-                  : "Ask or describe an edit…"
+                  : steering
+                    ? "Steer the agent…"
+                    : "Ask or describe an edit…"
               }
               value={draft}
               readOnly={!currentNote}
@@ -735,21 +752,31 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               }}
             />
             <div className="flex items-center justify-between gap-2 px-2.5 pb-2">
-              <span className="text-[10px] text-text-muted">
+              <span className="min-w-0 text-[10px] text-text-muted">
                 {pendingQuestion
                   ? "Enter to answer · ⇧ Enter for newline"
-                  : running
-                    ? "You can keep editing."
-                    : "Enter to send · ⇧ Enter for newline"}
+                  : steering
+                    ? draft.trim()
+                      ? "Enter to steer · ⇧ Enter for newline"
+                      : "Type to steer, or keep editing."
+                    : running
+                      ? "You can keep editing."
+                      : "Enter to send · ⇧ Enter for newline"}
               </span>
-              <div className="flex items-center gap-1.5">
-                {currentNote && draft.trim() && !waiting && agent.memory?.documentId && <button type="button" className="agent-panel-link"
-                  disabled={sending || draft.trim().length > 400} title="Save up to 400 characters for later"
-                  onClick={async () => {
-                    const id = currentNote.id;
-                    if (await agent.holdThought(draft)) setDrafts(current => current[id] === draft ? { ...current, [id]: "" } : current);
-                  }}>Hold for later</button>}
-                {(!running || waiting) && (
+              <div className="flex shrink-0 items-center gap-1">
+                {running && !agent.companionChecking && (
+                  <IconButton
+                    tabIndex={0}
+                    aria-label="Stop agent"
+                    title="Stop the agent"
+                    onClick={() => {
+                      void agent.stop();
+                    }}
+                  >
+                    <StopIcon className="w-4 h-4" />
+                  </IconButton>
+                )}
+                {(!running || waiting || (steering && !!draft.trim())) && (
                   <IconButton
                     tabIndex={0}
                     aria-label={sendLabel}

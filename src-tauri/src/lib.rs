@@ -3261,6 +3261,8 @@ pub fn run() {
             };
             app.manage(state);
             app.manage(agent::AgentState::default());
+            app.manage(agent::mcp::McpState::default());
+            agent::mcp::start(app.handle());
 
             // Add notes folder to asset protocol scope so images can be served
             if let Some(ref folder) = app.state::<AppState>().app_config.read().expect("app_config read lock").notes_folder.clone() {
@@ -3365,6 +3367,7 @@ pub fn run() {
             agent::computer_permissions::agent_computer_permissions,
             agent::agent_list_models,
             agent::agent_start_run,
+            agent::agent_steer_run,
             agent::agent_cancel_run,
             agent::agent_tool_respond,
             agent::agent_research_brief_default,
@@ -3373,11 +3376,29 @@ pub fn run() {
             agent::skills::agent_remove_skill,
             agent::skills::agent_set_skill_enabled,
             agent::skills::agent_find_skills,
+            agent::mcp::mcp_list_servers,
+            agent::mcp::mcp_redirect_uri,
+            agent::mcp::mcp_add_server,
+            agent::mcp::mcp_update_server,
+            agent::mcp::mcp_remove_server,
+            agent::mcp::mcp_set_server_enabled,
+            agent::mcp::mcp_connect_server,
+            agent::mcp::mcp_authorize_server,
+            agent::mcp::mcp_cancel_authorize,
+            agent::mcp::mcp_sign_out_server,
+            agent::mcp::mcp_set_tool_policy,
+            agent::projects::projects_list,
+            agent::projects::projects_create,
+            agent::projects::projects_rename,
+            agent::projects::projects_remove,
+            agent::projects::projects_add_folder,
+            agent::projects::projects_remove_folder,
+            agent::projects::projects_folder_files,
+            agent::projects::projects_open_file,
             agent::conversations::agent_list_conversations,
             agent::conversations::agent_note_memory,
             agent::conversations::agent_forget_memory,
             agent::conversations::agent_observe_wording,
-            agent::conversations::agent_hold_thought,
             agent::conversations::agent_return_thought,
             agent::conversations::agent_load_conversation,
             agent::conversations::agent_save_conversation,

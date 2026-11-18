@@ -784,16 +784,6 @@ pub async fn agent_return_thought(app: AppHandle, folder: PathBuf, document_id: 
 }
 
 #[tauri::command]
-pub async fn agent_hold_thought(app: AppHandle, folder: PathBuf, document_id: String, email: String,
-    summary: String, quote: Option<String>) -> Result<(), String> {
-    let digest = Sha256::digest(serde_json::to_vec(&(&summary, &quote)).map_err(|e| e.to_string())?);
-    let entry = Entry { key: format!("held-{}", &format!("{digest:x}")[..24]), kind: Kind::Thought, status: Status::Waiting,
-        summary, quote, next: None };
-    update_writer_memory(&app, &folder, &document_id, &email, |memory|
-        memory.update(Update { revision: memory.revision, entry })).await
-}
-
-#[tauri::command]
 pub async fn agent_observe_wording(app: AppHandle, folder: PathBuf, document_id: String, email: String,
     kept: String, proposed: String, restored: bool) -> Result<(), String> {
     if kept.trim().is_empty() || proposed.trim().is_empty() || kept == proposed ||

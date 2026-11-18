@@ -12,10 +12,11 @@ import { Editor } from "./components/editor/Editor";
 import type { Editor as TiptapEditor } from "@tiptap/react";
 import { FolderPicker } from "./components/layout/FolderPicker";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
-import { SettingsPage } from "./components/settings";
+import { SettingsPage, type SettingsTab } from "./components/settings";
 import { SpinnerIcon } from "./components/icons";
 import { AgentProvider, useAgent } from "./context/AgentContext";
 import { SkillsProvider } from "./context/SkillsContext";
+import { McpProvider } from "./context/McpContext";
 import { AgentPanel } from "./components/agent/AgentPanel";
 import { useAgentPanelShortcut } from "./components/agent/useAgentPanelShortcut";
 import { AgentLauncher } from "./components/agent/AgentLauncher";
@@ -54,9 +55,11 @@ function AppContent() {
   }, []);
   return (
     <SkillsProvider>
-      <AgentProvider editorRef={editorRef} editor={editor}>
-        <AppWorkspace editorRef={editorRef} onEditorReady={handleEditorReady} />
-      </AgentProvider>
+      <McpProvider>
+        <AgentProvider editorRef={editorRef} editor={editor}>
+          <AppWorkspace editorRef={editorRef} onEditorReady={handleEditorReady} />
+        </AgentProvider>
+      </McpProvider>
     </SkillsProvider>
   );
 }
@@ -87,6 +90,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
   currentNoteRef.current = currentNote;
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [view, setView] = useState<ViewState>("notes");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -137,11 +141,18 @@ function AppWorkspace({ editorRef, onEditorReady }: {
   }, [selectedNoteId]);
 
   const toggleSettings = useCallback(() => {
+    setSettingsTab(undefined);
     setView((prev) => (prev === "settings" ? "notes" : "settings"));
   }, []);
 
   const closeSettings = useCallback(() => {
     setView("notes");
+    setSettingsTab(undefined);
+  }, []);
+
+  const manageMcpServers = useCallback(() => {
+    setSettingsTab("mcp");
+    setView("settings");
   }, []);
 
 
@@ -434,7 +445,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
     <>
       <div className="h-full min-h-0 flex bg-bg text-text overflow-hidden">
         {view === "settings" ? (
-          <SettingsPage onBack={closeSettings} />
+          <SettingsPage onBack={closeSettings} initialTab={settingsTab} />
         ) : (
           <>
             <div
@@ -458,7 +469,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
                 <AgentLauncher onOpen={focusAgentPanel} />
               )}
             </div>
-            <AgentPanel visible={agent.open && !focusMode} />
+            <AgentPanel visible={agent.open && !focusMode} onManageServers={manageMcpServers} />
           </>
         )}
       </div>

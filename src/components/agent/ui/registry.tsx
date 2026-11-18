@@ -2,9 +2,10 @@ import { createContext, useContext } from "react";
 import { defineRegistry, useBoundProp } from "@json-render/react";
 import { catalog } from "../../../lib/agent/ui/catalog";
 import { cn } from "../../../lib/utils";
+import { isProjectFileId, openFile } from "../../../services/projects";
 import { WritingSuggestionView } from "./writingOfferContext";
 
-/** Lets NoteLink open a note without the model wiring an action. */
+/** Lets NoteLink open a note without the model wiring an action. Project files open in their own window. */
 export const OpenNoteContext = createContext<(id: string) => void>(() => {});
 
 /**
@@ -54,7 +55,7 @@ function NoteLinkView({
     <button
       type="button"
       className="agent-ui-notelink"
-      onClick={() => openNote(id)}
+      onClick={() => (isProjectFileId(id) ? void openFile(id).catch(() => {}) : openNote(id))}
       title={`Open ${title}`}
     >
       <span className="font-medium text-text">{title}</span>

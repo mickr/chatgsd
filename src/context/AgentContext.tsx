@@ -224,13 +224,14 @@ export interface AgentContextValue {
   answerQuestion: (answer: QuestionAnswer) => Promise<void>;
   conversation: Conversation;
   send: (prompt: string, computerAccess?: boolean, mode?: "coedit" | "companion", options?: SendOptions) => Promise<boolean>;
+  /** Redirects the working agent with a message, without stopping it. False if there was nothing to steer. */
+  steer: (text: string) => Promise<boolean>;
   stop: () => Promise<void>;
   /** The agent is following the user's edits in the open note. */
   coediting: boolean;
   /** An earlier edit request may continue when the user edits. */
   openRequest: boolean;
   memory: agent.NoteMemory | null;
-  holdThought: (text: string) => Promise<boolean>;
   forgetMemory: (key: string) => Promise<void>;
   companionChecking: boolean;
   writingFocus: agent.WritingFocus | null;
@@ -383,23 +384,6 @@ export function AgentProvider({
     editor.on("transaction", changed);
     return () => { editor.off("transaction", changed); };
   }, [editor, notesFolder, noteId, email, memoryDocument]);
-  const holdThought = useCallback(async (text: string) => {
-    if (!noteId || !notesFolder || !email || !memoryDocument) return false;
-    const activeEditor = editor?.storage.scratchDocument.noteId === noteId && !editor.isDestroyed ? editor : null;
-    const session = activeEditor?.storage.scratchDocument.session;
-    const selection = activeEditor?.state.selection;
-    const quote = activeEditor && selection && selection.to - selection.from <= 500
-      ? activeEditor.state.doc.textBetween(selection.from, selection.to, " ").trim() : "";
-    try {
-      await agent.holdThought(notesFolder, memoryDocument, email, text.trim(), quote || null);
-      setMemoryVersion(value => value + 1);
-      if (session !== undefined && editorRef.current?.storage.scratchDocument.session === session && folderRef.current === notesFolder) {
-        reviewedPassages.current.passages = [];
-        setCoeditingSession(current => current?.documentSession === session ? current : { documentSession: session, openRequest: false });
-      }
-      return true;
-    } catch (error) { toast.error(agent.errorMessage(error)); return false; }
-  }, [editor, editorRef, noteId, notesFolder, email, memoryDocument]);
   const forgetMemory = useCallback(async (key: string) => {
     if (!notesFolder || !email || !memory?.documentId) return;
     try {
@@ -855,7 +839,8 @@ export function AgentProvider({
         await agent.toolRespond(request.requestId, false, "Writing check-ins can only read the current note.").catch(() => {});
         return;
       }
-      if (request.name === "ask_user") {
+      // An MCP tool that needs the user's go-ahead asks the same way ask_user does.
+      if (request.name === "ask_user" || request.name === "mcp_approval") {
         const { question, options, form } = parseQuestion(request.args);
         if (!question) {
           await agent
@@ -1103,6 +1088,24 @@ export function AgentProvider({
       prepareCompanionMessage,
     ],
   );
+  const steer = useCallback(async (text: string) => {
+    const message = text.trim();
+    const id = currentNote && conversationsRef.current[currentNote.id]?.runId;
+    const run = id ? runs.current.get(id) : undefined;
+    // A background check has no request to steer, and a run still starting has nowhere to send it.
+    if (!message || !id || !run || run.suggestion || run.cancelRequested || id.startsWith("pending:")) return false;
+    try {
+      await agent.steerRun(id, message);
+    } catch (error) {
+      toast.error(`Couldn't steer the agent: ${agent.errorMessage(error)}`);
+      return false;
+    }
+    updateConversation(run.noteId, (conversation) => ({
+      ...conversation,
+      items: [...conversation.items, { id: crypto.randomUUID(), type: "user", text: message }],
+    }));
+    return true;
+  }, [currentNote, updateConversation]);
   const stop = useCallback(async () => {
     reviewVersion.current++;
     setAssessingWriting(false);
@@ -1624,7 +1627,7 @@ export function AgentProvider({
       answerQuestion,
       coediting,
       openRequest,
-      memory, forgetMemory, holdThought,
+      memory, forgetMemory,
       companionChecking,
       writingFocus,
       writingStarters,
@@ -1653,6 +1656,7 @@ export function AgentProvider({
       dismissSkillOffer,
       conversation,
       send,
+      steer,
       stop,
       newConversation,
       history,
@@ -1688,7 +1692,7 @@ export function AgentProvider({
       answerQuestion,
       coediting,
       openRequest,
-      memory, forgetMemory, holdThought,
+      memory, forgetMemory,
       companionChecking,
       writingFocus,
       writingStarters,
@@ -1716,6 +1720,7 @@ export function AgentProvider({
       dismissSkillOffer,
       conversation,
       send,
+      steer,
       stop,
       newConversation,
       history,
