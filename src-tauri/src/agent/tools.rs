@@ -14,7 +14,7 @@ const MAX_LIST_LIMIT: u64 = 100;
 const SEARCH_RESULT_LIMIT: usize = 8;
 
 /// Increment when saved native threads need a new dynamic tool catalog.
-pub const CATALOG_VERSION: u32 = 2;
+pub const CATALOG_VERSION: u32 = 3;
 
 pub struct ToolSpec {
     pub name: &'static str,
@@ -26,15 +26,22 @@ pub struct ToolSpec {
 pub fn catalog(web_access: bool, read_only: bool) -> Vec<ToolSpec> {
     let mut tools = vec![
         ToolSpec { name: "set_expression", description: "Set the agent face's expressive UI metadata from conversation and task context, not the user's psychological state or task completion. expression is neutral, curious, focused, uncertain, pleased or concerned; sentiment is a number from -1 to 1; intensity is a number from 0 to 1. Use at the start and meaningful shifts alongside useful work, never repetitive animation calls.", parameters: json!({"type":"object","properties":{"expression":{"type":"string","enum":["neutral","curious","focused","uncertain","pleased","concerned"]},"sentiment":{"type":"number"},"intensity":{"type":"number"}},"required":["expression","sentiment","intensity"],"additionalProperties":false}) },
+        ToolSpec { name: "remember_work", description: "Save or update one durable, note-specific commitment or writer choice. Use the revision from the current working memory. Reuse the same short kebab-case key across updates. Include the writer's goal, a unique exact quote from the current note if applicable, and the concrete next step or condition for returning. Use done only with evidence. Never save credentials, access grants, or private reasoning.", parameters: json!({
+            "type":"object","properties":{"revision":{"type":"integer","minimum":0},"entry":{"type":"object","properties":{
+                "key":{"type":"string","maxLength":64},"kind":{"type":"string","enum":["assignment","thought","choice"]},
+                "status":{"type":"string","enum":["open","waiting","done"]},"summary":{"type":"string","maxLength":400},
+                "quote":{"type":["string","null"],"maxLength":500},"next":{"type":["string","null"],"maxLength":400}},
+                "required":["key","kind","status","summary","quote","next"],"additionalProperties":false}},
+            "required":["revision","entry"],"additionalProperties":false}) },
         ToolSpec { name: "read_document", description: "Read the current live note, including unsaved typing, and the user's selection. Always call before editing. Short notes come back whole; a long note comes back as an outline with line numbers and its opening, so pass start_line and end_line (1-based, inclusive, up to 400 lines) to read further. Pass null for both to start.", parameters: json!({"type":"object","properties":{"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["start_line","end_line"],"additionalProperties":false}) },
-        ToolSpec { name: "offer_writing_help", description: "Offer one grounded writing interaction without changing the note. Read the live note first. kind rewrite proposes plain-text replacement for quote; question asks one useful question at quote and traces up to three exact passages in argument order; evidence returns source detail for a claim, using only URLs successfully opened by research in this run; move previews moving the entire quoted top-level paragraph immediately BEFORE the entire earlier destination paragraph. quote, destination and trace must copy exact visible plain text from the note (not markdown syntax). explanation is brief. Use null for irrelevant replacement/question/destination; trace and sources are empty when unused. For a question, options gives two to four short answers the writer might pick, each under 80 characters and in their voice; use [] for other kinds or when the answer is open. The user can review, edit, accept or dismiss. An offer is not an applied edit. Do not repeat the offer in chat.", parameters: json!({"type":"object","properties":{
+        ToolSpec { name: "offer_writing_help", description: "Offer one grounded writing interaction without changing the note. Read the live note first. kind rewrite proposes plain-text replacement for quote, with a distinct alternative when the writer wants to compare versions; question asks one useful question at quote and traces up to three exact passages in argument order; evidence returns source detail for a claim, using only URLs successfully opened by research in this run; move previews moving the entire quoted top-level paragraph immediately BEFORE the entire earlier destination paragraph. For an explicitly requested return to a held thought, include its key in thought_key only when this offer fulfills it. Otherwise use null. quote, destination and trace must copy exact visible plain text from the note (not markdown syntax). explanation is brief. Use null for irrelevant replacement/question/destination; trace and sources are empty when unused. For a question, options gives two to four short answers the writer might pick, each under 80 characters and in their voice; use [] for other kinds or when the answer is open. The user can review, edit, accept or dismiss. An offer is not an applied edit. Do not repeat the offer in chat.", parameters: json!({"type":"object","properties":{
             "kind":{"type":"string","enum":["rewrite","question","evidence","move"]},
             "quote":{"type":"string"},"explanation":{"type":"string"},
-            "replacement":{"type":["string","null"]},"question":{"type":["string","null"]},"destination":{"type":["string","null"]},
+            "replacement":{"type":["string","null"]},"alternative":{"type":["string","null"]},"thought_key":{"type":["string","null"]},"question":{"type":["string","null"]},"destination":{"type":["string","null"]},
             "trace":{"type":"array","maxItems":3,"items":{"type":"string"}},
             "options":{"type":"array","maxItems":4,"items":{"type":"string"}},
             "sources":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"title":{"type":"string"},"url":{"type":"string"},"excerpt":{"type":"string"}},"required":["title","url","excerpt"],"additionalProperties":false}}
-        },"required":["kind","quote","explanation","replacement","question","destination","trace","options","sources"],"additionalProperties":false}) },
+        },"required":["kind","quote","explanation","replacement","alternative","thought_key","question","destination","trace","options","sources"],"additionalProperties":false}) },
         ToolSpec { name: "edit_document", description: "Apply 1 to 20 precise replacements atomically, in order. Each old_text must be nonempty and match exactly once in the markdown from read_document; include surrounding text to make it unique. Preserve unchanged markdown.", parameters: json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["edits"],"additionalProperties":false}) },
         ToolSpec { name: "replace_selection", description: "Replace the selection captured when the user sent their message.", parameters: json!({"type":"object","properties":{"new_text":{"type":"string"}},"required":["new_text"],"additionalProperties":false}) },
         ToolSpec { name: "ask_user", description: "Ask the user one short clarifying question and wait for the answer. Use it when the request is ambiguous in a way that changes what you would write and the answer isn't in this note or other notes. Give 2 to 4 short options when the choices are discrete, or an empty options array for a free-text answer. For a question with several parts or that needs context alongside it, also pass form: a Scratch UI spec {root, elements, state} with inputs bound to /answers/<key>; otherwise form is null.", parameters: json!({"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"form":{"type":["object","null"]}},"required":["question","options","form"],"additionalProperties":false}) },
@@ -79,6 +86,21 @@ impl ToolOutput {
         }
     }
 }
+/// Validate an optional passage in the bound live editor before persisting a checkpoint.
+pub async fn remember_work(app: &tauri::AppHandle, ctx: &RunContext, session: &str, account: &str, args: Value) -> Result<String, String> {
+    let update: super::memory::Update = serde_json::from_value(args)
+        .map_err(|e| format!("Invalid working memory update: {e}"))?;
+    if let Some(quote) = &update.entry.quote {
+        if update.entry.status != super::memory::Status::Done {
+            let result = app.state::<AgentState>().bridge.execute(app, &ctx.run_id, "validate_memory_anchor",
+                json!({ "quote": quote }), Some(EDITOR_TOOL_TIMEOUT)).await;
+            if !result.ok { return Err(result.text); }
+        }
+    }
+    let memory = super::conversations::remember(app, &ctx.notes_folder, session, account, update).await?;
+    Ok(format!("Saved. Working memory revision {}.", memory.revision))
+}
+
 pub async fn execute(app: &tauri::AppHandle, run_id: &str, name: &str, args: Value) -> ToolOutput {
     let name = canonical_tool_name(name);
     let state = app.state::<AgentState>();

@@ -76,12 +76,18 @@ function OfferView(controls: WritingOfferControls) {
   };
   const revealed = useProposalReveal(offer.kind === "rewrite" ? draft : "", editing);
   const unavailable = stale || busy;
+  const title = prepared.requested === "readback" ? "What I took from this passage"
+    : offer.alternative ? "Two ways to say it" : TITLES[offer.kind];
   const showLabel = offer.kind === "question" ? "Trace argument" : offer.kind === "move" ? "Preview move" : "Show passage";
-  return <section className="writing-offer-card" data-kind={offer.kind} aria-label={TITLES[offer.kind]}>
+  return <section className="writing-offer-card" data-kind={offer.kind} aria-label={title}>
     <header><span className="writing-offer-kind">{offer.kind === "move" ? "Structure" : offer.kind === "rewrite" ? "A version to try" : offer.kind === "question" ? "One question" : "Source check"}</span>
-      <h4>{TITLES[offer.kind]}</h4></header>
+      <h4>{title}</h4></header>
     <p className="writing-offer-explanation">{offer.explanation}</p>
     {offer.kind === "rewrite" && <>
+      {offer.alternative && <div className="writing-offer-actions" aria-label="Compare versions">
+        {[offer.replacement, offer.alternative].map((version, i) => <button key={i} type="button"
+          aria-pressed={draft === version} onClick={() => { setEditing(false); updateDraft(version); }}>Version {i + 1}</button>)}
+      </div>}
       <details className="writing-offer-original"><summary>Original passage</summary><blockquote>{offer.quote}</blockquote></details>
       {editing ? <label className="writing-offer-field"><span>Your version</span>
         <textarea aria-label="Edit proposed wording" rows={4} maxLength={6000} value={draft}
@@ -89,6 +95,10 @@ function OfferView(controls: WritingOfferControls) {
       </label> : <div className="writing-offer-proposal" role="region" aria-label="Proposed wording" aria-live="off">
         {revealed}<span className="writing-offer-caret" aria-hidden="true" data-visible={revealed !== draft} />
       </div>}
+      {prepared.previewContext && <details className="writing-offer-original"><summary>Read in context</summary>
+        <p>{prepared.previewContext.before}<strong>{draft}</strong>{prepared.previewContext.after}</p>
+        {prepared.previewContext.following && <p>{prepared.previewContext.following}</p>}
+      </details>}
       <div className="writing-offer-actions">
         <button type="button" className="agent-panel-primary" disabled={unavailable || !draft.trim()}
           onClick={() => { if (!unavailable && draft.trim()) onAccept(draft); }}>Accept rewrite</button>

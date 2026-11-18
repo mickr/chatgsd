@@ -49,12 +49,12 @@ pub async fn status(app: &tauri::AppHandle) -> AgentStatus {
 }
 
 /// Refresh through Codex, then read only its app-owned bearer credential.
-pub(super) async fn decisions_token(app: &tauri::AppHandle) -> Result<String, String> {
+pub(super) async fn decisions_token(app: &tauri::AppHandle) -> Result<(String, String), String> {
     let mut server = Server::start(app).await?;
     let _guard = AUTH_LOCK.lock().await;
     let email = read_unlocked(&mut server).await?
         .ok_or("Sign in with ChatGPT to classify inline requests.")?;
-    if !account(app, email).await?.plan_notice_seen {
+    if !account(app, email.clone()).await?.plan_notice_seen {
         return Err("Confirm ChatGPT plan use in the sidebar first.".into());
     }
     #[derive(serde::Deserialize)]
@@ -68,7 +68,7 @@ pub(super) async fn decisions_token(app: &tauri::AppHandle) -> Result<String, St
     if auth.tokens.access_token.is_empty() {
         return Err("Sign in with ChatGPT again to classify inline requests.".into());
     }
-    Ok(auth.tokens.access_token)
+    Ok((auth.tokens.access_token, email))
 }
 
 #[tauri::command]

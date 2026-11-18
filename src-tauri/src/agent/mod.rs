@@ -7,6 +7,7 @@ pub mod events;
 pub mod expression;
 pub mod note_edits;
 pub mod prompt;
+pub mod memory;
 mod reading;
 pub mod skills;
 pub mod tools;
@@ -149,6 +150,11 @@ pub(crate) async fn notes_folder(app: &tauri::AppHandle) -> Result<PathBuf, Stri
     tokio::fs::canonicalize(folder)
         .await
         .map_err(|e| format!("Cannot open notes folder: {e}"))
+}
+pub(super) async fn check_memory_folder(app: &tauri::AppHandle, expected: &std::path::Path) -> Result<(), String> {
+    let expected = tokio::fs::canonicalize(expected).await.map_err(|e| e.to_string())?;
+    if notes_folder(app).await? != expected { return Err("The notes folder changed.".into()); }
+    Ok(())
 }
 #[tauri::command]
 pub async fn agent_start_run(

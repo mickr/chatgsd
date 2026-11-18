@@ -108,6 +108,12 @@ preferences disable the animation. Normal editor Undo works within the current
 note and cannot restore a different note. Conflicting external disk changes
 still use the existing merge review controls.
 
+Each note keeps a working memory for the signed-in account. In the agent panel,
+type a thought and choose **Hold for later** to save it with the selected
+passage. Expand the saved items to revisit or forget one. The agent checks for
+the requested follow-up as you write and saves its suggestion with the thought.
+Assignments and wording choices also carry over across chats and app restarts.
+
 Selecting text attaches it to the agent sidebar. Moving into the composer keeps
 that selection ready to send. Clicking elsewhere in the note, collapsing the
 selection with the keyboard, or pressing Escape clears the attachment. You can

@@ -82,6 +82,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it("checks memory anchors against the bound live note without changing prose or selection", async () => {
+  const editor = openNote("The **pilot** starts today. The pilot ends Friday.");
+  const binding = captureRunBinding(editor, "run")!;
+  const { doc, selection } = editor.state;
+  const check = (quote: string) => executeDocumentTool(editor, binding, "validate_memory_anchor", { quote });
+  expect((await check("The pilot starts today.")).ok).toBe(true);
+  expect((await check("The pilot")).ok).toBe(false);
+  expect((await check("The pilot was canceled.")).ok).toBe(false);
+  editor.storage.scratchDocument.session++;
+  expect((await check("The pilot starts today.")).ok).toBe(false);
+  expect(editor.state.doc.eq(doc)).toBe(true);
+  expect(editor.state.selection.eq(selection)).toBe(true);
+});
+
 describe("serializeDocument", () => {
   it("writes empty table cells as spaces and reloads them as empty", () => {
     const editor = openNote("| A | B |\n| --- | --- |\n| x |  |\n");

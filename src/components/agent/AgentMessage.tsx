@@ -16,6 +16,7 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
     item.input && typeof item.input === "object"
       ? (item.input as Record<string, unknown>)
       : {};
+  if (item.name === "remember_work") return item.ok === false ? "Couldn’t save memory" : item.ok ? "Saved for this note" : "Saving for this note";
   if (item.name === "read_document") return `Read note${lineRange(input)}`;
   if (item.name === "replace_selection")
     return item.ok ? "Edited selection" : "Edit selection";

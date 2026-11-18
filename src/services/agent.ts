@@ -118,7 +118,30 @@ export interface InlineContext {
 export const classifyInlineContext = (context: InlineContext) =>
   invoke<InlineDecision>("agent_classify_inline", { context });
 
+export interface MemoryEntry {
+  key: string;
+  kind: "assignment" | "thought" | "choice";
+  status: "open" | "waiting" | "done";
+  summary: string;
+  quote: string | null;
+  next: string | null;
+}
+export interface NoteMemory { documentId: string; revision: number; entries: MemoryEntry[] }
+export const getNoteMemory = (folder: string, noteId: string, email: string) =>
+  invoke<NoteMemory>("agent_note_memory", { folder, noteId, email });
+export const holdThought = (folder: string, documentId: string, email: string, summary: string, quote: string | null) =>
+  invoke<void>("agent_hold_thought", { folder, documentId, email, summary, quote });
+export const returnThought = (folder: string, documentId: string, email: string, revision: number, key: string, result: string) =>
+  invoke<void>("agent_return_thought", { folder, documentId, email, revision, key, result });
+export const observeWording = (folder: string, documentId: string, email: string,
+  observation: { kept: string; proposed: string; restored: boolean }) =>
+  invoke<void>("agent_observe_wording", { folder, documentId, email, ...observation });
+export const forgetMemory = (folder: string, documentId: string, email: string, revision: number, key: string) =>
+  invoke<void>("agent_forget_memory", { folder, documentId, email, revision, key });
+
 export interface WritingReviewContext {
+  noteId?: string;
+  folder?: string;
   title: string;
   passage: string;
   paragraphCount: number;
@@ -132,7 +155,7 @@ export type RequestState = "continue" | "open" | "done";
 export type WritingFocus = "clarity" | "evidence" | "development";
 export type WritingScores = Record<WritingFocus, number>;
 export const reviewWriting = (context: WritingReviewContext) =>
-  invoke<{ focus: WritingFocus | null; anchor: number | null; route: ModelRoute; request?: RequestState | null; scores?: WritingScores }>("agent_review_writing", { context });
+  invoke<{ revisit?: boolean; focus: WritingFocus | null; anchor: number | null; route: ModelRoute; request?: RequestState | null; scores?: WritingScores }>("agent_review_writing", { context });
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const setupComputerPermissions = (permission: ComputerPermission) =>

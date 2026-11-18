@@ -9,6 +9,7 @@
 //! - `<session>.model.json`: the old Responses history, retained as migration
 //!   input only. Encrypted reasoning is never sent to Codex.
 //! - `<session>.codex.json`: account-isolated native Codex thread IDs.
+use super::memory::{Entry, Kind, Status, Update, WorkingMemory};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -27,6 +28,8 @@ const TITLE_CHARS: usize = 60;
 struct Index {
     documents: BTreeMap<String, String>,
     sessions: Vec<ConversationSummary>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    memory: BTreeMap<String, BTreeMap<String, WorkingMemory>>,
 }
 
 impl Index {
@@ -35,6 +38,17 @@ impl Index {
             .iter()
             .find(|(_, id)| id.as_str() == note_id)
             .map(|(document, _)| document.as_str())
+    }
+
+    fn document_memory(&self, document: &str, account: &str) -> WorkingMemory {
+        self.memory.get(document).and_then(|accounts| accounts.get(account)).cloned().unwrap_or_default()
+    }
+
+    fn ensure_document(&mut self, note_id: &str) -> String {
+        if let Some(id) = self.document_for(note_id) { return id.to_owned(); }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.documents.insert(id.clone(), note_id.to_owned());
+        id
     }
 
     /// The session, if it exists and belongs to the note's document.
@@ -88,6 +102,7 @@ impl Index {
             .map(|(document, _)| document.clone())
             .collect();
         self.documents.retain(|document, _| !gone.contains(document));
+        self.memory.retain(|document, _| !gone.contains(document));
         let mut removed = Vec::new();
         self.sessions.retain(|session| {
             let keep = !gone.contains(&session.document_id);
@@ -571,14 +586,7 @@ pub async fn begin(app: &AppHandle, notes_folder: &Path, note_id: &str, session_
         })?;
         return Ok(());
     }
-    let document_id = match index.document_for(note_id) {
-        Some(document) => document.to_owned(),
-        None => {
-            let document = uuid::Uuid::new_v4().to_string();
-            index.documents.insert(document.clone(), note_id.to_owned());
-            document
-        }
-    };
+    let document_id = index.ensure_document(note_id);
     let time = now();
     index.sessions.push(ConversationSummary {
         id: session_id.to_owned(),
@@ -674,6 +682,136 @@ pub async fn agent_save_conversation(app: AppHandle, session_id: String, items: 
     store.write(&store.index_path(), &index).await
 }
 
+/// Reuse the document identity that follows a note through moves and renames.
+pub async fn working_memory(app: &AppHandle, folder: &Path, note: &str, session: Option<&str>, account: &str) -> Result<WorkingMemory, String> {
+    let store = Store::open(app, folder).await?;
+    let mut index = store.index().await?;
+    let account = account_key(account)?;
+    if let Some(session) = session {
+        let document = index.session_for_save(session)?.document_id.clone();
+        return Ok(index.document_memory(&document, &account));
+    }
+    Ok(index.document_for(note).map(|id| index.document_memory(id, &account)).unwrap_or_default())
+}
+
+pub async fn remember(app: &AppHandle, folder: &Path, session: &str, account: &str, update: Update) -> Result<WorkingMemory, String> {
+    let store = Store::open(app, folder).await?;
+    let _lock = INDEX_LOCK.lock().await;
+    let mut index = store.index().await?;
+    let document = index.session_for_save(session)?.document_id.clone();
+    let memory = index.memory.entry(document).or_default().entry(account_key(account)?).or_default();
+    let revision = update.revision;
+    if let Err(error) = memory.update(update) {
+        if memory.revision != revision {
+            let snapshot = serde_json::to_string(memory).map_err(|e| e.to_string())?;
+            return Err(format!("{error} Current working memory: {snapshot}"));
+        }
+        return Err(error);
+    }
+    let snapshot = memory.clone();
+    store.write(&store.index_path(), &index).await?;
+    Ok(snapshot)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryView {
+    document_id: String,
+    #[serde(flatten)]
+    memory: WorkingMemory,
+}
+
+async fn memory_view_account(app: &AppHandle, email: &str) -> Result<String, String> {
+    let status = super::codex::account::status(app).await;
+    let account = account_key(&status.account.ok_or("Sign in to see this note's working memory.")?.email)?;
+    if account != account_key(email)? { return Err("The signed-in account changed.".into()); }
+    Ok(account)
+}
+
+#[tauri::command]
+pub async fn agent_note_memory(app: AppHandle, folder: PathBuf, note_id: String, email: String) -> Result<MemoryView, String> {
+    super::check_memory_folder(&app, &folder).await?;
+    let store = Store::open(&app, &folder).await?;
+    let (index, document_id) = {
+        let _lock = INDEX_LOCK.lock().await;
+        let mut index = store.index().await?;
+        let document = if let Some(id) = index.document_for(&note_id) { id.to_owned() } else {
+            let path = crate::abs_path_from_id(&folder, &note_id)?;
+            if !tokio::fs::try_exists(path).await.map_err(|e| e.to_string())? { return Err("The note was removed.".into()); }
+            let id = index.ensure_document(&note_id);
+            store.write(&store.index_path(), &index).await?;
+            id
+        };
+        (index, document)
+    };
+    let memory = if index.memory.contains_key(&document_id) {
+        let account = memory_view_account(&app, &email).await?;
+        index.document_memory(&document_id, &account)
+    } else { WorkingMemory::default() };
+    Ok(MemoryView { document_id, memory })
+}
+
+async fn update_writer_memory(
+    app: &AppHandle, folder: &Path, document_id: &str, email: &str,
+    update: impl FnOnce(&mut WorkingMemory) -> Result<(), String>,
+) -> Result<(), String> {
+    super::check_memory_folder(app, folder).await?;
+    let account = memory_view_account(app, email).await?;
+    let store = Store::open(app, folder).await?;
+    let _lock = INDEX_LOCK.lock().await;
+    let mut index = store.index().await?;
+    if !index.documents.contains_key(document_id) { return Err("The original note was removed.".into()); }
+    let memory = index.memory.entry(document_id.to_owned()).or_default().entry(account).or_default();
+    update(memory)?;
+    store.write(&store.index_path(), &index).await
+}
+
+#[tauri::command]
+pub async fn agent_forget_memory(app: AppHandle, folder: PathBuf, document_id: String, email: String, revision: u64, key: String) -> Result<(), String> {
+    update_writer_memory(&app, &folder, &document_id, &email, |memory| memory.forget(revision, &key)).await
+}
+
+#[tauri::command]
+pub async fn agent_return_thought(app: AppHandle, folder: PathBuf, document_id: String, email: String,
+    revision: u64, key: String, result: String) -> Result<(), String> {
+    update_writer_memory(&app, &folder, &document_id, &email, |memory| {
+        let mut entry = memory.entries.iter().find(|item| item.key == key && item.waiting_thought())
+            .cloned().ok_or("The held thought has already changed.")?;
+        entry.status = Status::Done;
+        entry.next = Some(result);
+        memory.update(Update { revision, entry })
+    }).await
+}
+
+#[tauri::command]
+pub async fn agent_hold_thought(app: AppHandle, folder: PathBuf, document_id: String, email: String,
+    summary: String, quote: Option<String>) -> Result<(), String> {
+    let digest = Sha256::digest(serde_json::to_vec(&(&summary, &quote)).map_err(|e| e.to_string())?);
+    let entry = Entry { key: format!("held-{}", &format!("{digest:x}")[..24]), kind: Kind::Thought, status: Status::Waiting,
+        summary, quote, next: None };
+    update_writer_memory(&app, &folder, &document_id, &email, |memory|
+        memory.update(Update { revision: memory.revision, entry })).await
+}
+
+#[tauri::command]
+pub async fn agent_observe_wording(app: AppHandle, folder: PathBuf, document_id: String, email: String,
+    kept: String, proposed: String, restored: bool) -> Result<(), String> {
+    if kept.trim().is_empty() || proposed.trim().is_empty() || kept == proposed ||
+        kept.chars().count() > 500 || proposed.chars().count() > 500 { return Err("Invalid wording observation.".into()); }
+    let digest = Sha256::digest(serde_json::to_vec(&(&kept, &proposed)).map_err(|e| e.to_string())?);
+    let key = format!("wording-{}", &format!("{digest:x}")[..24]);
+    update_writer_memory(&app, &folder, &document_id, &email, |memory| {
+        if restored {
+            let entry = Entry { key, kind: Kind::Choice, status: Status::Open,
+                summary: "The writer restored this wording.".into(), quote: Some(kept),
+                next: Some(format!("Avoid repeating the reverted wording: {}", proposed.chars().take(350).collect::<String>())) };
+            memory.update(Update { revision: memory.revision, entry })
+        } else if memory.entries.iter().any(|e| e.key == key) {
+            memory.forget(memory.revision, &key)
+        } else { Ok(()) }
+    }).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,6 +829,30 @@ mod tests {
             });
         }
         index
+    }
+
+    #[test]
+    fn working_memory_survives_restart_and_rename_and_isolated_from_recreated_notes() {
+        let mut index = index();
+        let legacy = serde_json::to_vec(&index).unwrap();
+        assert!(serde_json::from_slice::<Index>(&legacy).unwrap().memory.is_empty());
+        let account = account_key("Writer@Example.org").unwrap();
+        let entry = Entry {
+            key: "pilot".into(), kind: Kind::Thought, status: Status::Waiting,
+            summary: "Compare pilot medians".into(), next: None, quote: None,
+        };
+        index.memory.entry("d1".into()).or_default().entry(account.clone()).or_default()
+            .update(Update { revision: 0, entry }).unwrap();
+        let mut reopened: Index = serde_json::from_slice(&serde_json::to_vec(&index).unwrap()).unwrap();
+        assert!(reopened.rename("Trip plan", "New plan"));
+        let doc = reopened.document_for("New plan").unwrap();
+        assert_eq!(reopened.document_memory(doc, &account).entries[0].key, "pilot");
+        assert!(reopened.document_memory(doc, "other@example.org").entries.is_empty());
+        assert!(reopened.document_memory("d2", &account).entries.is_empty());
+        reopened.forget("New plan");
+        let replacement = reopened.ensure_document("New plan");
+        assert!(reopened.document_memory(&replacement, &account).entries.is_empty());
+        assert!(reopened.memory.is_empty());
     }
 
     #[test]

@@ -9,6 +9,7 @@ interface OfferBase {
   quote: string;
   explanation: string;
   replacement: string | null;
+  alternative?: string | null;
   question: string | null;
   destination: string | null;
   trace: string[];
@@ -22,6 +23,7 @@ export type WritingOffer = OfferBase & (
   | { kind: "evidence"; replacement: null; question: null; destination: null }
   | { kind: "move"; replacement: null; question: null; destination: string }
 );
+export type WritingRequest = WritingOffer["kind"] | "compare" | "readback";
 export interface WritingRange { from: number; to: number }
 export interface PreparedWritingOffer {
   offer: WritingOffer;
@@ -29,6 +31,8 @@ export interface PreparedWritingOffer {
   documentSession: number;
   /** Exact text positions, suitable for a highlight or replacement. */
   source: WritingRange;
+  requested?: WritingRequest;
+  previewContext?: { before: string; after: string; following: string };
   /** Whole node positions, suitable for the companion cursor. */
   sourceBlock: WritingRange;
   destination: WritingRange | null;
@@ -65,7 +69,7 @@ const MAX_OPTION_CHARS = 120;
 
 function parseOffer(args: unknown): WritingOffer {
   // Suggested answers are optional: most offers have none.
-  const input = object(args, OFFER_FIELDS, "The writing offer", ["options"]);
+  const input = object(args, OFFER_FIELDS, "The writing offer", ["options", "alternative"]);
   const suggested = input.options ?? [];
   if (!["rewrite", "question", "evidence", "move"].includes(input.kind as string))
     throw new Error("Unknown writing offer kind.");
@@ -73,6 +77,9 @@ function parseOffer(args: unknown): WritingOffer {
   const quote = text(input.quote, MAX_PASSAGE, "The quoted passage");
   const explanation = text(input.explanation, 1200, "The explanation");
   const replacement = kind === "rewrite" ? replacementText(input.replacement) : null;
+  const alternative = input.alternative == null ? null : replacementText(input.alternative);
+  if (alternative && (kind !== "rewrite" || alternative === replacement || alternative === quote))
+    throw new Error("Use a distinct second version only for a rewrite.");
   const question = kind === "question" ? text(input.question, 1000, "The question") : null;
   const destination = kind === "move" ? text(input.destination, MAX_PASSAGE, "The destination paragraph") : null;
   if ((kind !== "rewrite" && input.replacement !== null) || (kind !== "question" && input.question !== null) ||
@@ -96,7 +103,7 @@ function parseOffer(args: unknown): WritingOffer {
     throw new Error("Only a question may suggest up to four answers.");
   const options = suggested.map(value => text(value, MAX_OPTION_CHARS, "A suggested answer").trim());
   return { kind, quote, explanation, replacement, question, destination, trace, sources,
-    ...(options.length ? { options } : {}) } as WritingOffer;
+    ...(alternative ? { alternative } : {}), ...(options.length ? { options } : {}) } as WritingOffer;
 }
 
 interface LocatedPassage { text: WritingRange; block: WritingRange; node: ProseMirrorNode; topLevel: boolean }
@@ -128,11 +135,20 @@ function locate(doc: ProseMirrorNode, quote: string): LocatedPassage {
   return matches[0];
 }
 
+/** Memory can refer to a passage without moving either caret. */
+export function validateMemoryAnchor(editor: Editor, quote: unknown): void {
+  locate(editor.state.doc, text(quote, 500, "The memory anchor"));
+}
+
 /** Preparing an offer is read-only. It cannot select, focus, scroll, or edit the note. */
-export function prepareWritingOffer(editor: Editor, args: unknown): PreparedWritingOffer {
+export function prepareWritingOffer(editor: Editor, args: unknown, requested?: WritingRequest): PreparedWritingOffer {
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || !scope?.noteId) throw new Error("Open a note before reviewing a writing offer.");
   const offer = parseOffer(args);
+  if (requested === "compare" && (offer.kind !== "rewrite" || !offer.alternative || offer.replacement === offer.quote))
+    throw new Error("The writer requested two distinct rewrites. Provide both replacement and alternative for this passage.");
+  if (requested === "readback" && offer.kind !== "question")
+    throw new Error("Give the reader’s takeaway in a question card anchored to this passage.");
   const source = locate(editor.state.doc, offer.quote);
   let destination: WritingRange | null = null;
   if (offer.kind === "move") {
@@ -144,7 +160,13 @@ export function prepareWritingOffer(editor: Editor, args: unknown): PreparedWrit
     destination = target.block;
   }
   const trace = offer.trace.map(quote => locate(editor.state.doc, quote));
-  return { offer, noteId: scope.noteId, documentSession: scope.session, source: source.text,
+  const offset = source.text.from - source.block.from - 1;
+  const previewContext = offer.alternative ? {
+    before: source.node.textContent.slice(Math.max(0, offset - 350), offset),
+    after: source.node.textContent.slice(offset + offer.quote.length, offset + offer.quote.length + 350),
+    following: editor.state.doc.nodeAt(source.block.to)?.textContent.slice(0, 350) ?? "",
+  } : undefined;
+  return { offer, requested, previewContext, noteId: scope.noteId, documentSession: scope.session, source: source.text,
     sourceBlock: source.block, destination, trace: trace.map(item => item.text), traceBlocks: trace.map(item => item.block) };
 }
 
@@ -152,7 +174,7 @@ export function prepareWritingOffer(editor: Editor, args: unknown): PreparedWrit
 export function refreshWritingOffer(editor: Editor, prepared: PreparedWritingOffer): PreparedWritingOffer | null {
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || scope?.noteId !== prepared.noteId || scope?.session !== prepared.documentSession) return null;
-  try { return prepareWritingOffer(editor, prepared.offer); } catch { return null; }
+  try { return prepareWritingOffer(editor, prepared.offer, prepared.requested); } catch { return null; }
 }
 
 /** Longer rewrites are shown first: the writer should read them before they land. */

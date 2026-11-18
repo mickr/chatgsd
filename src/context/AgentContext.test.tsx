@@ -29,6 +29,10 @@ vi.mock("../services/agent", async (importOriginal) => ({
   listModels: vi.fn(),
   startRun: vi.fn(),
   reviewWriting: vi.fn(),
+  returnThought: vi.fn(async () => {}),
+  holdThought: vi.fn(async () => {}),
+  forgetMemory: vi.fn(async () => {}),
+  getNoteMemory: vi.fn(async () => ({ documentId: "test-document", revision: 0, entries: [] })),
   classifyInlineContext: vi.fn(),
   toolRespond: vi.fn(() => Promise.resolve()),
   cancelRun: vi.fn(() => Promise.resolve()),
@@ -296,6 +300,19 @@ it.each(["toggle", "close"] as const)("returns focus to Markdown source through 
     source.remove();
     composer.remove();
   }
+});
+
+it("holds the writer’s words with their selected passage and forgets by revision without editing", async () => {
+  act(() => current.toggle());
+  await settle();
+  const draft = editor.state.doc;
+  editor.commands.setTextSelection({ from: 1, to: 5 });
+  await act(async () => { expect(await current.holdThought("Compare the costs later.")).toBe(true); });
+  expect(agent.holdThought).toHaveBeenCalledWith("/notes", "test-document", READY.account!.email, "Compare the costs later.", "Trip");
+  await act(async () => { await current.forgetMemory("costs"); });
+  expect(agent.forgetMemory).toHaveBeenCalledWith("/notes", "test-document", READY.account!.email, 0, "costs");
+  expect(editor.state.doc.eq(draft)).toBe(true);
+  expect(agent.startRun).not.toHaveBeenCalled();
 });
 
 describe("AgentProvider model list", () => {
@@ -1311,6 +1328,26 @@ describe("structured writing offers", () => {
     act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
     await settle();
   }
+  it("returns a promised thought on clear prose only after publishing a grounded offer", async () => {
+    const memory: agent.NoteMemory = { documentId: "my-trip", revision: 6, entries: [{
+      key: "opening", kind: "thought", status: "waiting", quote: "Trip plan",
+      summary: "Bring back a quieter opening", next: null,
+    }] };
+    vi.mocked(agent.getNoteMemory).mockResolvedValueOnce(memory);
+    vi.mocked(agent.reviewWriting).mockResolvedValueOnce({ revisit: true, focus: null, anchor: null, route: "fast" });
+    await readyWithModels();
+    await act(async () => { await current.startCompanion(); });
+    expect(agent.startRun).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true, computerAccess: false }));
+    expect(current.writingTarget).toBeNull();
+    await act(async () => { await mocks.toolHandler?.({ runId: "run-1", requestId: "offer", name: "offer_writing_help",
+      args: { ...offer, thought_key: "opening" } }); });
+    expect(agent.returnThought).not.toHaveBeenCalled();
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+    expect(current.writingOffer?.prepared.offer.replacement).toBe("A quieter trip");
+    expect(agent.returnThought).toHaveBeenCalledWith("/notes", "my-trip", READY.account!.email, 6, "opening", "A quieter trip");
+    expect(editor.getText()).toBe("Trip plan");
+  });
   it("routes simple proposals to Luna and applies only on explicit acceptance", async () => {
     await readyWithModels();
     await act(async () => { await current.requestWritingHelp("rewrite"); });

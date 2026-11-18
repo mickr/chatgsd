@@ -13,6 +13,7 @@ import {
   setChangeMeta,
   type AgentChange,
 } from "../../components/editor/AgentChanges";
+import { validateMemoryAnchor } from "./writingOffers";
 import { documentChange, type NoteChange } from "./turnChanges";
 import type { AgentLineChange } from "../../components/editor/AgentChangeMarker";
 
@@ -623,6 +624,10 @@ export async function executeDocumentTool(
       );
     }
     const input = objectArgs(args);
+    if (name === "validate_memory_anchor") {
+      validateMemoryAnchor(editor, input.quote);
+      return { ok: true, output: "Passage found." };
+    }
     if (name === "read_document") {
       let selection = "none";
       const range = attachedRange(editor);

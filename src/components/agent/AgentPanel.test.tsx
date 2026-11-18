@@ -540,15 +540,15 @@ it("holds suggested next steps while the agent is working", () => {
 });
 
 it("puts the help that fits the passage first and marks it, without changing which help is on offer", () => {
-  expect(orderedStarters(null).map(starter => starter.kind)).toEqual(["rewrite", "question", "evidence", "move"]);
+  expect(orderedStarters(null).map(starter => starter.kind)).toEqual(["rewrite", "question", "evidence", "readback", "compare", "move"]);
   expect(orderedStarters(null).some(starter => starter.fitting)).toBe(false);
   // A weak lead reorders nothing worth pointing at.
   expect(orderedStarters({ clarity: 0.1, evidence: 0.4, development: 0.2 })[0]).toMatchObject({ kind: "evidence", fitting: false });
   state.agent.writingScores = { clarity: 0.2, evidence: 0.8, development: 0.3 };
   openPanel();
   const starters = [...container.querySelectorAll(".agent-panel-starters button")];
-  expect(starters.map(item => item.textContent)).toEqual(["Check a claim", "Trace my argument", "Explore the order", "Show a version"]);
-  expect(starters.map(item => item.hasAttribute("data-fitting"))).toEqual([true, false, false, false]);
+  expect(starters.map(item => item.textContent)).toEqual(["Check a claim", "Trace my argument", "Compare versions", "Explore the order", "Show a version", "Read it back"]);
+  expect(starters.map(item => item.hasAttribute("data-fitting"))).toEqual([true, false, false, false, false, false]);
 });
 
 it("replaces the standing starters with the agent's own next moves for this note and sends one as a message", async () => {

@@ -1,3 +1,4 @@
+import { WorkingMemory } from "./WorkingMemory";
 import {
   useCallback,
   useEffect,
@@ -47,7 +48,7 @@ import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
-import { writingOfferChatText, type WritingOffer } from "../../lib/agent/writingOffers";
+import { writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
 import type { WritingScores } from "../../services/agent";
 import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
 import { agentPresence, displayInstruction } from "./InlineAgentActivity";
@@ -55,16 +56,18 @@ import { InlineAgentFace } from "./InlineAgentFace";
 import { WritingCompanionPointer } from "./WritingCompanionPointer";
 
 /** Each way to work together, and which of the gate's scores says it fits this passage. */
-const STARTERS: Array<{ label: string; kind: WritingOffer["kind"]; fits: (scores: WritingScores) => number }> = [
+const STARTERS: Array<{ label: string; kind: WritingRequest; fits: (scores: WritingScores) => number }> = [
   { label: "Show a version", kind: "rewrite", fits: (scores) => scores.clarity },
   { label: "Trace my argument", kind: "question", fits: (scores) => Math.max(scores.clarity, scores.development) },
   { label: "Check a claim", kind: "evidence", fits: (scores) => scores.evidence },
+  { label: "Read it back", kind: "readback", fits: (scores) => scores.clarity },
+  { label: "Compare versions", kind: "compare", fits: (scores) => scores.development },
   { label: "Explore the order", kind: "move", fits: (scores) => scores.development },
 ];
 /** A starter is marked as fitting once its score says help is more likely useful than not. */
 const FITTING_STARTER = 0.5;
 
-/** The same four starters, best fit first; ties keep their usual order. */
+/** The standing starters, best fit first; ties keep their usual order. */
 export function orderedStarters(scores: WritingScores | null) {
   const ranked = STARTERS.map((starter) => ({ ...starter, score: scores ? starter.fits(scores) : 0 }));
   ranked.sort((a, b) => b.score - a.score);
@@ -492,6 +495,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             aria-label="Conversation"
             aria-busy={running}
           >
+            <WorkingMemory />
             {!conversation.items.length && !offer && !suggestion && (
               <div className="agent-panel-empty">
                 <h2 className="text-sm font-medium">A second pair of eyes.</h2>
@@ -687,7 +691,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
           )}
           {!waiting && !draft && !offer && !reason && (
             <div className="agent-panel-starters" aria-label="Ways to work together">
-              {/* Once the agent has read the note, its own next moves replace the standing four. */}
+              {/* Once the agent has read the note, its own next moves replace the standing suggestions. */}
               {agent.writingStarters.length > 0 ? agent.writingStarters.map((starter) => (
                 <button type="button" key={starter} disabled={sending || (running && !agent.companionChecking)}
                   onClick={() => { void deliver(starter, () => {}); }}>{starter}</button>
@@ -741,6 +745,12 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                     : "Enter to send · ⇧ Enter for newline"}
               </span>
               <div className="flex items-center gap-1.5">
+                {currentNote && draft.trim() && !waiting && agent.memory?.documentId && <button type="button" className="agent-panel-link"
+                  disabled={sending || draft.trim().length > 400} title="Save up to 400 characters for later"
+                  onClick={async () => {
+                    const id = currentNote.id;
+                    if (await agent.holdThought(draft)) setDrafts(current => current[id] === draft ? { ...current, [id]: "" } : current);
+                  }}>Hold for later</button>}
                 {(!running || waiting) && (
                   <IconButton
                     tabIndex={0}

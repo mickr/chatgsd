@@ -308,3 +308,16 @@ it("accepts up to four suggested answers for a question and for nothing else", (
   expect(() => prepareWritingOffer(editor, { ...rewrite(), options: ["Yes"] })).toThrow(/four answers/);
   expect(() => prepareWritingOffer(editor, { ...question, extra: true })).toThrow(/unexpected fields/);
 });
+
+it("previews both versions in the surrounding paragraph before applying the selected one", () => {
+  const editor = open("<p>Before. A rough sentence. After.</p><p>The next paragraph.</p>");
+  const before = editor.getJSON();
+  expect(() => prepareWritingOffer(editor, rewrite(), "compare")).toThrow(/two distinct rewrites/);
+  const offer = prepareWritingOffer(editor, { ...rewrite(), alternative: "Another approach." }, "compare");
+  expect(offer.previewContext).toEqual({ before: "Before. ", after: " After.", following: "The next paragraph." });
+  expect(editor.getJSON()).toEqual(before);
+  applyWritingOffer(editor, offer, offer.offer.alternative!);
+  expect(editor.state.doc.firstChild!.textContent).toBe("Before. Another approach. After.");
+  editor.commands.undo();
+  expect(editor.getJSON()).toEqual(before);
+});
