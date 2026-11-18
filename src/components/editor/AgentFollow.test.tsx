@@ -135,3 +135,18 @@ it("restores the writer's last choice when the editor reopens", () => {
   expect(host.querySelector("button")!.getAttribute("aria-pressed")).toBe("false");
   expect(scroll).toHaveBeenCalledOnce();
 });
+
+it("clears the agent's caret ten seconds after its last move", () => {
+  vi.useFakeTimers();
+  try {
+    presence();
+    act(() => { vi.advanceTimersByTime(9000); });
+    presence(22);
+    act(() => { vi.advanceTimersByTime(9000); });
+    expect(pane.querySelector(".agent-presence-caret")).not.toBeNull();
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(pane.querySelector(".agent-presence-caret")).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});

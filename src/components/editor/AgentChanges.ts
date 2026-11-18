@@ -36,6 +36,8 @@ interface ChangeState {
   hunks: AgentChange[];
   focusRanges: FocusRange[];
   presence: Record<string, { from: number; to: number }>;
+  /** Counts the agent's moves, so the idle caret's fade restarts with each one. */
+  presenceMoves: number;
   arrival: TextArrival | null;
   lineChanges: AgentLineChange[];
 }
@@ -183,6 +185,9 @@ function textArrival(doc: ProseMirrorNode, ranges: Array<{ from: number; to: num
   }
   return positions.length ? { ranges: textRanges, positions, revealed: 0 } : null;
 }
+
+/** How long the agent's caret stays after its last move. The CSS fade ends just before. */
+const PRESENCE_REST_MS = 10_500;
 
 function arrivalCaret(arrival: TextArrival): number {
   return arrival.revealed ? arrival.positions[arrival.revealed - 1] : arrival.ranges[0].from;
@@ -351,7 +356,7 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
       label.textContent = "Agent";
       caret.append(label);
       return caret;
-    }, { key: state.arrival ? "agent-presence-writing" : "agent-presence-idle", side: -1 }));
+    }, { key: state.arrival ? "agent-presence-writing" : `agent-presence-idle-${state.presenceMoves}`, side: -1 }));
   }
   
   return DecorationSet.create(doc, result);
@@ -564,10 +569,10 @@ export const AgentChanges = Extension.create({
       new Plugin<ChangeState>({
         key: agentChangesKey,
         state: {
-          init: () => ({ hunks: [], focusRanges: [], presence: {}, arrival: null, lineChanges: [] }),
+          init: () => ({ hunks: [], focusRanges: [], presence: {}, presenceMoves: 0, arrival: null, lineChanges: [] }),
           apply(tr, previous) {
             const meta = tr.getMeta(agentChangesKey) as ChangeMeta | undefined;
-            if (meta?.clear) return { hunks: [], focusRanges: [], presence: {}, arrival: null, lineChanges: [] };
+            if (meta?.clear) return { hunks: [], focusRanges: [], presence: {}, presenceMoves: 0, arrival: null, lineChanges: [] };
             if (meta?.reveal !== undefined && previous.arrival) {
               const arrival = meta.reveal >= previous.arrival.positions.length
                 ? null : { ...previous.arrival, revealed: meta.reveal };
@@ -625,6 +630,7 @@ export const AgentChanges = Extension.create({
               }
             }
             if (meta?.presence?.agent) presence.agent = meta.presence.agent;
+            const presenceMoves = previous.presenceMoves + (meta?.presence?.agent ? 1 : 0);
             if (presence.agent && (dismissSelection || focusRanges.some(range => range.dismissed)))
               presence.agent = { from: presence.agent.to, to: presence.agent.to };
             
@@ -650,19 +656,33 @@ export const AgentChanges = Extension.create({
                 lineChanges.push(earlier ? { ...change, before: earlier.before } : change);
               }
             }
-            return { hunks, focusRanges, presence, arrival, lineChanges };
+            return { hunks, focusRanges, presence, presenceMoves, arrival, lineChanges };
           },
         },
         view(view) {
           let timer: ReturnType<typeof setTimeout> | undefined;
           let positions: number[] | undefined;
           let startedAt = 0;
+          let idleTimer: ReturnType<typeof setTimeout> | undefined;
+          let presenceMoves = -1;
+          const rest = () => {
+            const changes = agentChangesKey.getState(view.state)!;
+            if (changes.presenceMoves === presenceMoves) return;
+            presenceMoves = changes.presenceMoves;
+            clearTimeout(idleTimer);
+            if (!changes.presence.agent) return;
+            idleTimer = setTimeout(() => {
+              if (agentChangesKey.getState(view.state)?.presence.agent)
+                view.dispatch(setChangeMeta(view.state.tr, { clearPresence: "agent" }).setMeta("addToHistory", false));
+            }, PRESENCE_REST_MS);
+          };
           const motion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
           const finish = () => {
             if (agentChangesKey.getState(view.state)?.arrival)
               view.dispatch(setChangeMeta(view.state.tr, { clearArrival: true }).setMeta("addToHistory", false));
           };
           const update = () => {
+            rest();
             const arrival = agentChangesKey.getState(view.state)!.arrival;
             clearTimeout(timer);
             if (!arrival) { positions = undefined; return; }
@@ -696,6 +716,7 @@ export const AgentChanges = Extension.create({
           update();
           return { update, destroy: () => {
             clearTimeout(timer);
+            clearTimeout(idleTimer);
             owner.removeEventListener("click", dismissOutsideEditor, true);
             owner.removeEventListener("keydown", dismissOutsideEditor, true);
             motion?.removeEventListener("change", onMotion);

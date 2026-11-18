@@ -1432,6 +1432,9 @@ table.not-prose th {
 .agent-follow:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
 .agent-follow-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .agent-presence-caret { position: relative; display: inline; border-left: 2px solid var(--color-accent); pointer-events: none; }
+/* Ten seconds after the agent's last move its caret fades; AgentChanges then clears it. */
+.agent-presence-caret[data-writing="false"] { animation: agent-presence-rest 2s ease-in 8s forwards; }
+@keyframes agent-presence-rest { to { opacity: 0; } }
 .agent-presence-label { position: absolute; left: -2px; bottom: 100%; padding: 1px 5px; border-radius: 3px 3px 3px 0; background: var(--color-accent); color: var(--color-bg); font: 500 10px/1.4 var(--font-sans); white-space: nowrap; user-select: none; }
 .agent-text-pending { display: none; }
 @media (prefers-reduced-motion: reduce) {
@@ -1572,6 +1575,6 @@ table.not-prose th {
 .agent-panel-messages > :is(.agent-panel-user, .agent-panel-tool, .agent-panel-markdown) { content-visibility: auto; contain-intrinsic-size: auto 48px; }
 @media (prefers-reduced-motion: reduce) {
   .agent-panel { transition: none; }
-  .agent-panel-caret, .agent-panel-prose [data-animated="true"] { animation: none; }
+  .agent-panel-caret, .agent-panel-prose [data-animated="true"], .agent-presence-caret[data-writing="false"] { animation: none; }
 }
 .agent-panel:has(.agent-panel-resizing) { transition: none; }
