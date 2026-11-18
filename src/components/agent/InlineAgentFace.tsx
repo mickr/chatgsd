@@ -2,6 +2,7 @@ import { useEffect, useId, useRef } from "react";
 import type { AgentExpression } from "../../services/agent";
 import faceShell from "../../assets/agent-face.png";
 import type { InlineActivityState } from "./InlineAgentActivity";
+import "./InlineAgentFace.css";
 
 // Runtime states outrank expressive metadata. A cheerful model response must
 // never leave the companion smiling through a failure or cancellation.

@@ -7,6 +7,27 @@ import { WritingSuggestionView } from "./writingOfferContext";
 /** Lets NoteLink open a note without the model wiring an action. */
 export const OpenNoteContext = createContext<(id: string) => void>(() => {});
 
+/**
+ * Sends a suggested next move as the user's message. Null leaves the buttons
+ * inert: only the latest reply's suggestions are live, and not during a run.
+ */
+export const SuggestionContext = createContext<((message: string) => void) | null>(null);
+const MAX_SUGGESTIONS = 4;
+
+function SuggestionsView({ items }: { items: string[] }) {
+  const send = useContext(SuggestionContext);
+  if (!items.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Suggested next steps">
+      {items.map((item) => (
+        <button key={item} type="button" className="agent-panel-chip" disabled={!send} onClick={() => send?.(item)}>
+          {item}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 const GAP = { sm: "gap-1.5", md: "gap-3", lg: "gap-4" } as const;
 const CALLOUT_TONE = {
   info: "border-border bg-bg-muted",
@@ -164,6 +185,10 @@ export const { registry } = defineRegistry(catalog, {
         title={text(props.title)}
         detail={props.detail ? text(props.detail) : null}
       />
+    ),
+    // What is shown is exactly what is sent: a suggestion carries no hidden prompt.
+    Suggestions: ({ props }) => (
+      <SuggestionsView items={list<unknown>(props.items).map(text).map((item) => item.trim()).filter(Boolean).slice(0, MAX_SUGGESTIONS)} />
     ),
     WritingSuggestion: ({ props }) => <WritingSuggestionView id={typeof props.id === "string" ? props.id : ""} />,
     Choice: ({ props, bindings }) => {

@@ -127,6 +127,35 @@ it("asks one question and sends the answer only after explicit submission", () =
   expect(props.onAnswer).toHaveBeenCalledExactlyOnceWith("Because the incentives changed.");
 });
 
+it("sends a question's answer with Cmd+Enter and keeps plain Enter for a new line", () => {
+  const props = controls({ ...base, kind: "question", question: "Why does this follow?" });
+  render(props);
+  type("Because the costs changed.");
+  const textarea = container.querySelector("textarea")!;
+  const press = (init: KeyboardEventInit) => {
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init });
+    act(() => { textarea.dispatchEvent(event); });
+    return event;
+  };
+  expect(press({}).defaultPrevented).toBe(false);
+  expect(props.onAnswer).not.toHaveBeenCalled();
+  expect(press({ metaKey: true }).defaultPrevented).toBe(true);
+  expect(props.onAnswer).toHaveBeenCalledExactlyOnceWith("Because the costs changed.");
+});
+
+it("answers a question with one click on a suggested answer, unless the passage has changed", () => {
+  const offer: WritingOffer = { ...base, kind: "question", question: "Why does this follow?", options: ["It's deliberate", "Cut it"] };
+  const props = controls(offer);
+  render(props);
+  click("Cut it");
+  expect(props.onAnswer).toHaveBeenCalledExactlyOnceWith("Cut it");
+  const stale = { ...controls(offer), stale: true };
+  render(stale);
+  expect(button("Cut it").disabled).toBe(true);
+  click("Cut it");
+  expect(stale.onAnswer).not.toHaveBeenCalled();
+});
+
 it("Add to chat only hands context to the composer callback", () => {
   const props = controls();
   render(props);

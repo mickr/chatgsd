@@ -13,6 +13,8 @@ interface OfferBase {
   destination: string | null;
   trace: string[];
   sources: WritingSource[];
+  /** Short answers the writer can pick for a question; absent when there are none. */
+  options?: string[];
 }
 export type WritingOffer = OfferBase & (
   | { kind: "rewrite"; replacement: string; question: null; destination: null }
@@ -37,10 +39,11 @@ export interface PreparedWritingOffer {
 const OFFER_FIELDS = ["kind", "quote", "explanation", "replacement", "question", "destination", "trace", "sources"];
 const MAX_PASSAGE = 6000;
 
-function object(value: unknown, fields: string[], label: string): Record<string, unknown> {
+function object(value: unknown, fields: string[], label: string, optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
   const result = value as Record<string, unknown>;
-  if (Object.keys(result).length !== fields.length || fields.some(field => !Object.prototype.hasOwnProperty.call(result, field)))
+  const required = Object.keys(result).filter(key => !optional.includes(key));
+  if (required.length !== fields.length || fields.some(field => !Object.prototype.hasOwnProperty.call(result, field)))
     throw new Error(`${label} has missing or unexpected fields.`);
   return result;
 }
@@ -57,8 +60,13 @@ function replacementText(value: unknown): string {
   return result;
 }
 
+const MAX_OPTIONS = 4;
+const MAX_OPTION_CHARS = 120;
+
 function parseOffer(args: unknown): WritingOffer {
-  const input = object(args, OFFER_FIELDS, "The writing offer");
+  // Suggested answers are optional: most offers have none.
+  const input = object(args, OFFER_FIELDS, "The writing offer", ["options"]);
+  const suggested = input.options ?? [];
   if (!["rewrite", "question", "evidence", "move"].includes(input.kind as string))
     throw new Error("Unknown writing offer kind.");
   const kind = input.kind as WritingOffer["kind"];
@@ -84,7 +92,11 @@ function parseOffer(args: unknown): WritingOffer {
       throw new Error("Sources must use an HTTP or HTTPS link without credentials.");
     return { title: text(source.title, 300, "The source title"), url, excerpt: text(source.excerpt, 2000, "The source excerpt") };
   });
-  return { kind, quote, explanation, replacement, question, destination, trace, sources } as WritingOffer;
+  if (!Array.isArray(suggested) || suggested.length > MAX_OPTIONS || (kind !== "question" && suggested.length))
+    throw new Error("Only a question may suggest up to four answers.");
+  const options = suggested.map(value => text(value, MAX_OPTION_CHARS, "A suggested answer").trim());
+  return { kind, quote, explanation, replacement, question, destination, trace, sources,
+    ...(options.length ? { options } : {}) } as WritingOffer;
 }
 
 interface LocatedPassage { text: WritingRange; block: WritingRange; node: ProseMirrorNode; topLevel: boolean }
@@ -141,6 +153,21 @@ export function refreshWritingOffer(editor: Editor, prepared: PreparedWritingOff
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || scope?.noteId !== prepared.noteId || scope?.session !== prepared.documentSession) return null;
   try { return prepareWritingOffer(editor, prepared.offer); } catch { return null; }
+}
+
+/** Longer rewrites are shown first: the writer should read them before they land. */
+const DIRECT_REWRITE_CHARS = 400;
+
+/**
+ * Whether the agent may make this change itself. Only a short rewrite, and never
+ * in text the writer has their cursor or selection in: that sentence is theirs.
+ */
+export function appliesDirectly(editor: Editor, prepared: PreparedWritingOffer): boolean {
+  const { offer, source } = prepared;
+  if (offer.kind !== "rewrite" || offer.quote.length > DIRECT_REWRITE_CHARS || offer.replacement.length > DIRECT_REWRITE_CHARS)
+    return false;
+  const { from, to } = editor.state.selection;
+  return to < source.from || from > source.to;
 }
 
 /** Human-readable context for a composer draft; this does not request or apply an edit. */

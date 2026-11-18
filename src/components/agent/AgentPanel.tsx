@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -30,7 +29,6 @@ import {
   type SelectionSummary,
 } from "../../lib/agent/selection";
 import {
-  AgentIcon,
   ChatGPTIcon,
   CheckIcon,
   HistoryIcon,
@@ -45,11 +43,33 @@ import { formatDate } from "../../lib/utils";
 import { AgentMessage } from "./AgentMessage";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "./ChatGPTAccount";
 import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
-import { OpenNoteContext } from "./ui/registry";
+import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
-import { writingOfferChatText } from "../../lib/agent/writingOffers";
+import { writingOfferChatText, type WritingOffer } from "../../lib/agent/writingOffers";
+import type { WritingScores } from "../../services/agent";
+import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
+import { agentPresence, displayInstruction } from "./InlineAgentActivity";
+import { InlineAgentFace } from "./InlineAgentFace";
+import { WritingCompanionPointer } from "./WritingCompanionPointer";
+
+/** Each way to work together, and which of the gate's scores says it fits this passage. */
+const STARTERS: Array<{ label: string; kind: WritingOffer["kind"]; fits: (scores: WritingScores) => number }> = [
+  { label: "Show a version", kind: "rewrite", fits: (scores) => scores.clarity },
+  { label: "Trace my argument", kind: "question", fits: (scores) => Math.max(scores.clarity, scores.development) },
+  { label: "Check a claim", kind: "evidence", fits: (scores) => scores.evidence },
+  { label: "Explore the order", kind: "move", fits: (scores) => scores.development },
+];
+/** A starter is marked as fitting once its score says help is more likely useful than not. */
+const FITTING_STARTER = 0.5;
+
+/** The same four starters, best fit first; ties keep their usual order. */
+export function orderedStarters(scores: WritingScores | null) {
+  const ranked = STARTERS.map((starter) => ({ ...starter, score: scores ? starter.fits(scores) : 0 }));
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.map((starter, index) => ({ ...starter, fitting: index === 0 && starter.score >= FITTING_STARTER }));
+}
 function ResizeHandle() {
   const { width, setWidth } = useAgent();
   const drag = useRef<{ x: number; width: number; current: number } | null>(
@@ -136,7 +156,13 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   const scroll = useRef<HTMLDivElement>(null);
   const status = agent.status;
   const conversation = agent.conversation;
-  const turns = useMemo(() => conversationTurns(conversation.items), [conversation.items]);
+  // A sent message carries note context for the model; show only what the user typed.
+  const turns = useMemo(() => conversationTurns(conversation.items).map((turn) => ({
+    ...turn,
+    items: turn.items.map((item) => item.type === "user" ? { ...item, text: displayInstruction(item.text) } : item),
+  })), [conversation.items]);
+  const home = useRef<HTMLSpanElement>(null);
+  const [pointerReplay, setPointerReplay] = useState(0);
   const offerInTranscript = useMemo(() => !!agent.writingOffer && hasWritingOfferCard(conversation.items, agent.writingOffer.id), [conversation.items, agent.writingOffer?.id]);
   const running = conversation.runId !== null;
   const contextTitle = running
@@ -231,7 +257,7 @@ export function AgentPanel({ visible }: { visible: boolean }) {
   useLayoutEffect(() => {
     if (visible && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [visible, conversation.items, conversation.error, conversation.computerUnavailable, conversation.cancelled, running, agent.writingOffer?.id]);
+  }, [visible, conversation.items, conversation.error, conversation.computerUnavailable, conversation.cancelled, running, agent.writingOffer?.id, agent.writingSuggestion]);
   useEffect(() => {
     setReviewIndex(-1);
   }, [currentNote?.id]);
@@ -259,17 +285,43 @@ export function AgentPanel({ visible }: { visible: boolean }) {
       await answerQuestion(text);
       return;
     }
-    if (running) return;
+    // A background writing check gives way to a message; any other run does not.
+    if (running && !agent.companionChecking) return;
     const text = draft;
-    setSending(true);
     setDrafts((previous) => ({ ...previous, [id]: "" }));
+    await deliver(text, () => setDrafts((previous) => ({ ...previous, [id]: previous[id] || text })));
+  };
+  /** Route and send one message; `restore` puts it back if it never left. */
+  const deliver = async (text: string, restore: () => void) => {
+    const editor = agent.editor;
+    setSending(true);
     try {
-      if (!(await agent.send(text)))
-        setDrafts((previous) => ({ ...previous, [id]: previous[id] || text }));
+      if (!editor) {
+        if (!(await agent.send(text))) restore();
+        return;
+      }
+      const session = editor.storage.scratchDocument.session;
+      agent.prepareCompanionMessage();
+      const decision = await routeMessage(editor, text, conversation.items);
+      // The note changed while routing: this message was never meant for the new one.
+      if (editor.isDestroyed || editor.storage.scratchDocument.session !== session) {
+        restore();
+        return;
+      }
+      const sent = await agent.send(inlineAgentPrompt(editor, text, confidentIntent(decision)), undefined, "coedit",
+        { route: decision?.route, openRequest: leavesRequestOpen(decision) });
+      if (!sent) restore();
     } finally {
       setSending(false);
     }
   };
+  // A suggestion goes out as its own message and leaves a half-written draft alone.
+  const sendSuggestion = !reason && !sending && !running && !waiting
+    ? (message: string) => { void deliver(message, () => {}); }
+    : null;
+  const starters = useMemo(() => orderedStarters(agent.writingScores), [agent.writingScores]);
+  const presence = agentPresence(agent, sending);
+  const suggestion = agent.writingSuggestion;
   const navigate = (direction: number) => {
     const next =
       reviewIndex < 0
@@ -305,9 +357,18 @@ export function AgentPanel({ visible }: { visible: boolean }) {
       inert={!visible}
     >
       {visible && <ResizeHandle />}
+      {visible && agent.editor && agent.writingFocus && agent.writingTarget && (
+        <WritingCompanionPointer
+          key={offer?.id ?? "writing-finding"}
+          editor={agent.editor} range={agent.writingTarget} kind={agent.writingFocus}
+          preparedOffer={offer && !offer.stale ? offer.prepared : null}
+          originRef={home} replayTrigger={pointerReplay + agent.writingOfferReplay} />
+      )}
       <div className="agent-panel-inner" style={{ width: agent.width }}>
         <header className="agent-panel-header">
-          <AgentIcon className="w-4 h-4 shrink-0 text-text-muted" />
+          <span ref={home} className="shrink-0">
+            <InlineAgentFace state={presence.state} expression={presence.expression} />
+          </span>
           <div className="min-w-0 flex-1">
             {/* pl-2 matches the inset WebKit gives the native model <select> text below. */}
             <h2 className="text-sm font-medium pl-2 py-0.5">ChatGPT</h2>
@@ -406,12 +467,8 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             />
           )}
           <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-            <span role="status" className="text-text-muted">
-              {agent.companionActive
-                ? agent.companionChecking ? "Writing companion · Reviewing" : "Writing companion · Following your edits"
-                : agent.coediting
-                ? running ? "Coediting · Working" : "Coediting · Following your edits"
-                : running ? "Finishing current turn" : "Coediting paused"}
+            <span role="status" aria-live="polite" className="text-text-muted">
+              {presence.label}
             </span>
             <button
               type="button"
@@ -419,10 +476,10 @@ export function AgentPanel({ visible }: { visible: boolean }) {
               disabled={!running && !agent.coediting && !!reason}
               onClick={() => {
                 if (agent.coediting || running) void agent.stop();
-                else agent.resumeCoediting();
+                else void agent.startCompanion();
               }}
             >
-              {agent.coediting || running ? "Pause" : "Start coediting"}
+              {agent.coediting || running ? "Pause" : "Write with me"}
             </button>
           </div>
         </div>
@@ -435,18 +492,17 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             aria-label="Conversation"
             aria-busy={running}
           >
-            {!conversation.items.length && !offer && (
+            {!conversation.items.length && !offer && !suggestion && (
               <div className="agent-panel-empty">
-                <AgentIcon className="w-7 h-7 text-text-muted/50" />
                 <h2 className="text-sm font-medium">A second pair of eyes.</h2>
                 <p className="text-xs leading-relaxed text-text-muted">
                   Ask a question, refine a passage, or work through an idea.
-                  Edits land directly. The agent follows your changes while coediting is active.
+                  Edits land directly, and the agent follows your changes as you write.
                 </p>
               </div>
             )}
             {turns.map((turn, turnIndex) => (
-              <Fragment key={turn.id}>
+              <SuggestionContext.Provider key={turn.id} value={turnIndex === turns.length - 1 ? sendSuggestion : null}>
                 {turn.items.map((item, index) => (
                   <AgentMessage
                     key={item.id}
@@ -464,9 +520,32 @@ export function AgentPanel({ visible }: { visible: boolean }) {
                   />
                 ))}
                 <AgentTurnChanges changes={turn.changes} turn={turnIndex + 1} />
-              </Fragment>
+              </SuggestionContext.Provider>
             ))}
           {visible && offerControls && !offerInTranscript && <WritingOfferCard {...offerControls} />}
+          {!offer && suggestion && (
+            <section className="agent-panel-observation" aria-label="Suggestion for your writing">
+              <p>{suggestion.applied ? `I changed this: ${suggestion.text}` : suggestion.text}</p>
+              <div>
+                {suggestion.applied && <button type="button" onClick={agent.undoAppliedSuggestion}>Undo</button>}
+                {agent.editor && agent.writingTarget && (
+                  <button type="button" onClick={() => {
+                    // Settle the viewport before the cursor starts its gesture.
+                    scrollPositionIntoView(agent.editor!, agent.writingTarget!.from + 1, "instant");
+                    setPointerReplay((value) => value + 1);
+                  }}>Show passage</button>
+                )}
+                {!suggestion.applied && <button type="button" disabled={sending || running || !currentNote} onClick={() => {
+                  if (!currentNote) return;
+                  const prompt = `Let's explore this suggestion: ${suggestion.text}\n\nOffer ideas or wording without editing the note.`;
+                  setDrafts((previous) => ({ ...previous, [currentNote.id]: prompt }));
+                  agent.dismissWritingSuggestion();
+                  composer.current?.focus({ preventScroll: true });
+                }}>Explore this</button>}
+                <button type="button" onClick={agent.dismissWritingSuggestion}>{suggestion.applied ? "Keep" : "Dismiss suggestion"}</button>
+              </div>
+            </section>
+          )}
           {running &&
             !waiting &&
             conversation.items[conversation.items.length - 1]?.type !==
@@ -605,6 +684,18 @@ export function AgentPanel({ visible }: { visible: boolean }) {
             >
               Try again
             </button>
+          )}
+          {!waiting && !draft && !offer && !reason && (
+            <div className="agent-panel-starters" aria-label="Ways to work together">
+              {/* Once the agent has read the note, its own next moves replace the standing four. */}
+              {agent.writingStarters.length > 0 ? agent.writingStarters.map((starter) => (
+                <button type="button" key={starter} disabled={sending || (running && !agent.companionChecking)}
+                  onClick={() => { void deliver(starter, () => {}); }}>{starter}</button>
+              )) : starters.map(({ label, kind, fitting }) => (
+                <button type="button" key={label} data-fitting={fitting || undefined} disabled={sending || (running && !agent.companionChecking)}
+                  onClick={() => { void agent.requestWritingHelp(kind); }}>{label}</button>
+              ))}
+            </div>
           )}
           <div className="agent-panel-input-wrap">
             <textarea

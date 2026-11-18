@@ -44,3 +44,5 @@
 .writing-offer-ghost > span { margin-bottom: 5px; }
 .writing-offer-before { padding-left: 10px; }
 .writing-offer-stale { color: var(--color-text-muted); font-size: 12px; }
+.writing-offer-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-panel-chip:disabled { opacity: .5; cursor: default; }

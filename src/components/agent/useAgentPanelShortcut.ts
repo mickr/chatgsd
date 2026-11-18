@@ -2,7 +2,8 @@ import { useEffect } from "react";
 
 /**
  * ⌘J and ⌘⌥B toggle the agent panel. ⌘⌥→ moves focus into it and ⌘⌥← back to
- * the note, so focus only crosses between them when the user asks.
+ * the note, so focus only crosses between them when the user asks. ⌘⌥Enter asks
+ * about the current selection or cursor, so it only works from the note.
  */
 export function useAgentPanelShortcut(
   enabled: boolean,
@@ -20,8 +21,10 @@ export function useAgentPanelShortcut(
         ArrowRight: focusPanel,
         ArrowLeft: focusNote,
       };
+      const fromNote = event.code === "Enter" && !event.repeat && !event.isComposing &&
+        !!document.activeElement?.closest("[data-writing-workspace]");
       const action = event.altKey
-        ? withOption[event.code]
+        ? fromNote ? focusPanel : withOption[event.code]
         : event.key.toLowerCase() === "j" ? toggle : undefined;
       if (!action) return;
       event.preventDefault();

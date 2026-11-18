@@ -6,10 +6,12 @@ import StarterKit from "@tiptap/starter-kit";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AgentChanges, ScratchDocument } from "../editor/AgentChanges";
 import { TooltipProvider } from "../ui";
-import { AgentPanel } from "./AgentPanel";
+import { AgentPanel, orderedStarters } from "./AgentPanel";
 import { useAgentPanelShortcut } from "./useAgentPanelShortcut";
 import type * as AgentContext from "../../context/AgentContext";
 import { prepareWritingOffer } from "../../lib/agent/writingOffers";
+import { AgentLauncher } from "./AgentLauncher";
+import { invoke } from "@tauri-apps/api/core";
 
 const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown> }));
 vi.mock("../../context/AgentContext", async (original) => ({
@@ -19,6 +21,8 @@ vi.mock("../../context/AgentContext", async (original) => ({
 vi.mock("../../context/NotesContext", () => ({
   useNotes: () => ({ currentNote: { id: "note", title: "Note" }, selectNote: vi.fn() }),
 }));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root;
@@ -63,6 +67,7 @@ beforeEach(() => {
   const editorElement = document.body.appendChild(document.createElement("div"));
   editor = new Editor({ element: editorElement, extensions: [StarterKit, ScratchDocument, AgentChanges], content: "<p>A note that must not become a quote.</p>" });
   editor.storage.scratchDocument.noteId = "note";
+  vi.mocked(invoke).mockReset().mockResolvedValue({ intent: "discuss", confidence: 0.95, route: "fast" });
   container = document.body.appendChild(document.createElement("div"));
   root = createRoot(container);
   state.agent = {
@@ -74,7 +79,10 @@ beforeEach(() => {
     writingOffer: null, writingOfferDraft: "", writingOfferReplay: 0,
     setWritingOfferDraft: vi.fn(), requestWritingHelp: vi.fn().mockResolvedValue(undefined),
     acceptWritingOffer: vi.fn(), showWritingOffer: vi.fn(), dismissWritingSuggestion: vi.fn(),
-    send: vi.fn().mockResolvedValue(true),
+    send: vi.fn().mockResolvedValue(true), prepareCompanionMessage: vi.fn(),
+    stop: vi.fn().mockResolvedValue(undefined), startCompanion: vi.fn().mockResolvedValue(undefined),
+    pendingQuestion: null, coediting: true, openRequest: false, companionChecking: false,
+    writingFocus: null, writingTarget: null, writingSuggestion: null, writingStarters: [],
   };
   act(() => root.render(<Workspace />));
 });
@@ -241,8 +249,8 @@ it("does not steal editor focus when a pending send finishes", async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Help with this note");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
-  expect(state.agent.send).toHaveBeenCalledWith("Help with this note");
+  await act(async () => { container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click(); });
+  expect(state.agent.send).toHaveBeenCalledWith(expect.stringContaining("Help with this note"), undefined, "coedit", expect.anything());
   act(() => editor.view.focus());
   await act(async () => { finishSend(true); });
   nextFrame();
@@ -316,4 +324,240 @@ it("offers a runtime retry rather than sign-in when Codex cannot start", () => {
   const retry = buttons.find(button => button.textContent === "Try again")!;
   act(() => retry.click());
   expect(refreshStatus).toHaveBeenCalledOnce();
+});
+
+function openPanel() {
+  act(() => container.querySelector("button")!.click());
+  nextFrame();
+  return container.querySelector<HTMLTextAreaElement>('[aria-label="Message agent"]')!;
+}
+function type(input: HTMLTextAreaElement, text: string) {
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+async function send() {
+  await act(async () => { container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click(); });
+}
+const button = (label: string) => [...container.querySelectorAll("button")].find(item => item.textContent === label)!;
+
+it("routes an edit request to the classifier's model and leaves it open for the writer's later edits", async () => {
+  vi.mocked(invoke).mockResolvedValue({ intent: "edit", confidence: 0.95, route: "fast" });
+  const input = openPanel();
+  type(input, "Tighten this paragraph");
+  await send();
+  expect(state.agent.prepareCompanionMessage).toHaveBeenCalledOnce();
+  const [prompt, computer, mode, options] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(prompt).toContain("Response mode: edit.");
+  expect(prompt).toContain("User instruction:\n\nTighten this paragraph");
+  // Computer access follows the user's setting, not the surface the message came from.
+  expect(computer).toBeUndefined();
+  expect(mode).toBe("coedit");
+  expect(options).toEqual({ route: "fast", openRequest: true });
+  expect(input.value).toBe("");
+});
+
+it("keeps a question from turning the writer's next edits into agent edits", async () => {
+  const input = openPanel();
+  type(input, "Does this argument hold?");
+  await send();
+  expect(state.agent.send).toHaveBeenCalledWith(expect.stringContaining("Response mode: discuss."), undefined, "coedit",
+    { route: "fast", openRequest: false });
+});
+
+it.each([
+  ["the classifier fails", () => vi.mocked(invoke).mockRejectedValue(new Error("Offline")), "Help me anyway"],
+  ["the classifier is slow", () => vi.mocked(invoke).mockReturnValue(new Promise(() => {})), "Help me anyway"],
+  ["the message is too long to classify", () => {}, "x".repeat(8001)],
+])("sends the message unrouted on the selected model when %s", async (_case, arrange, text) => {
+  arrange();
+  const input = openPanel();
+  type(input, text);
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
+  const [prompt, , , options] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(prompt).toContain(text);
+  expect(prompt).not.toContain("Response mode:");
+  expect(options).toEqual({ route: undefined, openRequest: true });
+});
+
+it("does not send a message to a note that was opened while it was being routed", async () => {
+  let classify!: (decision: unknown) => void;
+  vi.mocked(invoke).mockReturnValue(new Promise(resolve => { classify = resolve; }));
+  const input = openPanel();
+  type(input, "Tighten this paragraph");
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
+  editor.storage.scratchDocument.session++;
+  await act(async () => { classify({ intent: "edit", confidence: 0.95, route: "fast" }); });
+  expect(state.agent.send).not.toHaveBeenCalled();
+  expect(input.value).toBe("Tighten this paragraph");
+});
+
+it("keeps a message that could not be sent", async () => {
+  state.agent.send = vi.fn().mockResolvedValue(false);
+  const input = openPanel();
+  type(input, "Tighten this paragraph");
+  await send();
+  expect(input.value).toBe("Tighten this paragraph");
+});
+
+it("shows what the writer typed, not the context sent with it", () => {
+  state.agent.conversation = { runId: null, items: [{ id: "u", type: "user",
+    text: "Inline agent request. Respond to the user's instruction.\n\nUser instruction:\n\nTighten this paragraph" }] };
+  openPanel();
+  const log = container.querySelector('[role="log"]')!;
+  expect(log.textContent).toContain("Tighten this paragraph");
+  expect(log.textContent).not.toContain("Inline agent request");
+});
+
+it("offers the four ways to work together until the writer starts typing", () => {
+  const input = openPanel();
+  act(() => button("Check a claim").click());
+  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("evidence");
+  expect(state.agent.send).not.toHaveBeenCalled();
+  type(input, "My own question");
+  expect(button("Check a claim")).toBeUndefined();
+});
+
+it("shows the face with the reason for a concern, and lets the writer explore or dismiss the suggestion", () => {
+  state.agent.writingFocus = "evidence";
+  state.agent.writingSuggestion = { id: "s", text: "This claim needs a source.", documentSession: 0 };
+  const input = openPanel();
+  const face = container.querySelector(".agent-panel-header .inline-agent-face")!;
+  expect(face.getAttribute("data-expression")).toBe("concerned");
+  expect(container.querySelector('[role="status"]')!.textContent).toBe("A claim worth checking");
+  act(() => button("Explore this").click());
+  expect(input.value).toContain("This claim needs a source.");
+  expect(state.agent.dismissWritingSuggestion).toHaveBeenCalledOnce();
+  expect(state.agent.send).not.toHaveBeenCalled();
+});
+
+it("shows the model's expression while it works and a paused face after Pause", () => {
+  state.agent.conversation = { runId: "run", items: [{ id: "u", type: "user", text: "Hi" }],
+    expression: { expression: "pleased", sentiment: 0.6, intensity: 0.7 } };
+  openPanel();
+  const face = () => container.querySelector(".agent-panel-header .inline-agent-face")!;
+  expect(face().getAttribute("data-expression")).toBe("pleased");
+  act(() => button("Pause").click());
+  expect(state.agent.stop).toHaveBeenCalledOnce();
+  state.agent.conversation = { runId: null, items: [], cancelled: true };
+  state.agent.coediting = false;
+  act(() => root.render(<Workspace />));
+  expect(face().getAttribute("data-state")).toBe("paused");
+  expect(container.querySelector('[role="status"]')!.textContent).toBe("Paused");
+  act(() => button("Write with me").click());
+  expect(state.agent.startCompanion).toHaveBeenCalledOnce();
+});
+
+it("sends an uncertain classification without a response mode, so the agent reads the message itself", async () => {
+  vi.mocked(invoke).mockResolvedValue({ intent: "suggest", confidence: 0.6, route: "deep" });
+  const input = openPanel();
+  type(input, "Rewrite this paragraph");
+  await send();
+  const [prompt, , , options] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(prompt).not.toContain("Response mode:");
+  expect(options).toEqual({ route: "deep", openRequest: true });
+});
+
+it("tells the writer what the agent changed on its own and offers the way back", () => {
+  state.agent.writingSuggestion = { id: "s", text: "Tightened the opening.", documentSession: 0, applied: true };
+  state.agent.undoAppliedSuggestion = vi.fn();
+  openPanel();
+  expect(container.querySelector(".agent-panel-observation")!.textContent).toContain("I changed this: Tightened the opening.");
+  expect(button("Explore this")).toBeUndefined();
+  act(() => button("Undo").click());
+  expect(state.agent.undoAppliedSuggestion).toHaveBeenCalledOnce();
+});
+
+it("says when an earlier request is still open for the writer's edits", () => {
+  state.agent.openRequest = true;
+  openPanel();
+  expect(container.querySelector('[role="status"]')!.textContent).toBe("Coediting with you");
+});
+
+it("opens the composer with Cmd+Option+Enter from the note, and nowhere else", () => {
+  const press = (target: Element) => act(() => {
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", metaKey: true, altKey: true, bubbles: true, cancelable: true }));
+  });
+  const panel = container.querySelector("aside")!;
+  const unrelated = document.body.appendChild(document.createElement("input"));
+  unrelated.focus();
+  press(unrelated);
+  nextFrame();
+  expect(panel.getAttribute("aria-hidden")).toBe("true");
+
+  editor.view.dom.parentElement!.setAttribute("data-writing-workspace", "");
+  act(() => { editor.view.focus(); editor.commands.setTextSelection(5); });
+  const before = editor.getJSON();
+  press(editor.view.dom);
+  nextFrame();
+  expect(panel.getAttribute("aria-hidden")).toBe("false");
+  expect(document.activeElement).toBe(container.querySelector("textarea"));
+  expect(editor.state.selection.from).toBe(5);
+  expect(editor.getJSON()).toEqual(before);
+});
+
+it("keeps the face and what it is doing on a launcher while the panel is hidden", () => {
+  state.agent.writingFocus = "clarity";
+  state.agent.refreshStatus = vi.fn();
+  const onOpen = vi.fn();
+  act(() => root.render(<AgentLauncher onOpen={onOpen} />));
+  const launcher = container.querySelector<HTMLButtonElement>(".agent-launcher")!;
+  expect(launcher.querySelector(".inline-agent-face")!.getAttribute("data-expression")).toBe("uncertain");
+  expect(launcher.textContent).toContain("A passage worth another look");
+  // Showing the launcher costs nothing: no account check, no review.
+  expect(state.agent.refreshStatus).not.toHaveBeenCalled();
+  expect(state.agent.startCompanion).not.toHaveBeenCalled();
+  act(() => launcher.click());
+  expect(onOpen).toHaveBeenCalledOnce();
+});
+
+const suggestions = (id: string, ...items: string[]) => ({ id, type: "text", text: [
+  "Done.", "```spec", '{"op":"add","path":"/root","value":"next"}',
+  JSON.stringify({ op: "add", path: "/elements/next", value: { type: "Suggestions", props: { items }, children: [] } }), "```",
+].join("\n") });
+
+it("sends a suggested next step exactly as shown, from the latest reply only, and leaves the draft alone", async () => {
+  state.agent.conversation = { runId: null, items: [
+    { id: "u1", type: "user", text: "First" }, suggestions("a1", "Old idea"),
+    { id: "u2", type: "user", text: "Second" }, suggestions("a2", "Tighten the ending", "Check the dates"),
+  ] };
+  const input = openPanel();
+  type(input, "A half-written thought");
+  expect(button("Old idea").disabled).toBe(true);
+  await act(async () => { button("Tighten the ending").click(); });
+  const [prompt] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(prompt).toContain("User instruction:\n\nTighten the ending");
+  expect(state.agent.send).toHaveBeenCalledOnce();
+  expect(input.value).toBe("A half-written thought");
+});
+
+it("holds suggested next steps while the agent is working", () => {
+  state.agent.conversation = { runId: "run", items: [{ id: "u", type: "user", text: "Go" }, suggestions("a", "Check the dates")] };
+  openPanel();
+  expect(button("Check the dates").disabled).toBe(true);
+});
+
+it("puts the help that fits the passage first and marks it, without changing which help is on offer", () => {
+  expect(orderedStarters(null).map(starter => starter.kind)).toEqual(["rewrite", "question", "evidence", "move"]);
+  expect(orderedStarters(null).some(starter => starter.fitting)).toBe(false);
+  // A weak lead reorders nothing worth pointing at.
+  expect(orderedStarters({ clarity: 0.1, evidence: 0.4, development: 0.2 })[0]).toMatchObject({ kind: "evidence", fitting: false });
+  state.agent.writingScores = { clarity: 0.2, evidence: 0.8, development: 0.3 };
+  openPanel();
+  const starters = [...container.querySelectorAll(".agent-panel-starters button")];
+  expect(starters.map(item => item.textContent)).toEqual(["Check a claim", "Trace my argument", "Explore the order", "Show a version"]);
+  expect(starters.map(item => item.hasAttribute("data-fitting"))).toEqual([true, false, false, false]);
+});
+
+it("replaces the standing starters with the agent's own next moves for this note and sends one as a message", async () => {
+  state.agent.writingStarters = ["Connect Venus to the opening", "Find a source for the Venus day"];
+  openPanel();
+  const starters = [...container.querySelectorAll(".agent-panel-starters button")];
+  expect(starters.map(item => item.textContent)).toEqual(["Connect Venus to the opening", "Find a source for the Venus day"]);
+  await act(async () => { button("Connect Venus to the opening").click(); });
+  expect(state.agent.requestWritingHelp).not.toHaveBeenCalled();
+  const [prompt] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(prompt).toContain("User instruction:\n\nConnect Venus to the opening");
 });

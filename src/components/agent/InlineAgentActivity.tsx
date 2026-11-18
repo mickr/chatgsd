@@ -1,4 +1,4 @@
-import type { Conversation, TranscriptItem } from "../../context/AgentContext";
+import type { AgentContextValue, Conversation, TranscriptItem } from "../../context/AgentContext";
 import { splitReply } from "../../lib/agent/ui/content";
 import type { AgentExpression, WritingFocus } from "../../services/agent";
 
@@ -74,3 +74,20 @@ export function inlineActivity(conversation: Conversation, waiting: boolean, sta
     : { state: "thinking", label: "Thinking" };
 }
 
+
+/** The face and status line, the same wherever the agent is shown. */
+export function agentPresence(
+  agent: Pick<AgentContextValue, "conversation" | "pendingQuestion" | "writingFocus" | "companionChecking" | "coediting" | "openRequest">,
+  sending = false,
+) {
+  const running = agent.conversation.runId !== null;
+  const waiting = !!agent.pendingQuestion;
+  const activity = inlineActivity(agent.conversation, waiting, sending, false);
+  const feedback = agent.writingFocus ? writingFeedback[agent.writingFocus] : null;
+  const label = agent.companionChecking ? "Reading with you…"
+    : running || waiting || sending || agent.conversation.error ? activity.label
+    : feedback ? feedback.label
+    : agent.coediting ? (agent.openRequest ? "Coediting with you" : "Writing with you")
+    : agent.conversation.cancelled ? "Paused" : "Ready when you are";
+  return { state: activity.state, expression: feedback?.expression ?? agent.conversation.expression, label, feedback };
+}

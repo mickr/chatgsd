@@ -92,6 +92,24 @@ async function settle() {
   });
 }
 
+/**
+ * Open the panel and let the note's starters run come and go, as it does before
+ * anything else. Leaves real timers and a clean record of started runs.
+ */
+async function openPanel(starters = "") {
+  vi.useFakeTimers();
+  act(() => current.toggle());
+  await settle();
+  await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+  act(() => {
+    if (starters) mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text: starters } });
+    mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+  });
+  await settle();
+  vi.mocked(agent.startRun).mockClear();
+  vi.useRealTimers();
+}
+
 async function startRunAndAsk(args: Record<string, unknown>) {
   act(() => current.toggle());
   await settle();
@@ -219,6 +237,7 @@ it("keeps Markdown source focused when Cmd+Option+← follows → within one fra
   function Panel() {
     return <TooltipProvider><AgentPanel visible={useAgent().open} /></TooltipProvider>;
   }
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
   const source = document.createElement("textarea");
   source.dataset.noteSource = "";
   const host = document.createElement("div");
@@ -542,6 +561,7 @@ describe("AgentProvider expressions", () => {
     emit({ type: "done", stopReason: "completed" });
     await settle();
     vi.mocked(agent.startRun).mockResolvedValueOnce({ runId: "check-in" });
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: null, anchor: null, route: "fast", request: "continue" });
     vi.useFakeTimers();
 
     act(() => editor.commands.insertContent("Saturday "));
@@ -684,9 +704,12 @@ describe("AgentProvider conversation history", () => {
 });
 
 describe("AgentProvider coediting", () => {
+  // The cheap gate decides whether an edit continues the open request; here it always does.
+  beforeEach(() => {
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: null, anchor: null, route: "fast", request: "continue" });
+  });
   async function begin() {
-    act(() => current.toggle());
-    await settle();
+    await openPanel();
     await act(async () => { await current.send("Plan the trip"); });
   }
   async function complete() {
@@ -800,6 +823,62 @@ describe("AgentProvider coediting", () => {
     expect(agent.startRun).toHaveBeenCalledTimes(1);
   });
 
+  it("asks the cheap gate before every continuation and runs nothing when the edit does not call for one", async () => {
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: null, anchor: null, route: "fast", request: "open" });
+    await begin();
+    await complete();
+    expect(current.openRequest).toBe(true);
+    vi.useFakeTimers();
+    act(() => editor.commands.insertContent("Walking "));
+    await advance(2000);
+    expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ openRequest: true }));
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
+    expect(current.openRequest).toBe(true);
+  });
+
+  it("closes a finished request and falls back to the slower offer cadence", async () => {
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: null, anchor: null, route: "fast", request: "done" });
+    await begin();
+    await complete();
+    vi.useFakeTimers();
+    // Opening the panel took its one look at the whole note.
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(1);
+    act(() => editor.commands.insertContent("Walking "));
+    await advance(2000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+    expect(current.openRequest).toBe(false);
+    expect(current.coediting).toBe(true);
+    act(() => editor.commands.insertContent("Saturday "));
+    await advance(10000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+    await advance(5000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(3);
+    expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ openRequest: false }));
+    expect(agent.startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a question or suggestion request closed so later edits only bring offers", async () => {
+    act(() => current.toggle());
+    await settle();
+    await act(async () => { await current.send("What do you think of this?", undefined, "coedit", { openRequest: false }); });
+    await complete();
+    expect(current.coediting).toBe(true);
+    expect(current.openRequest).toBe(false);
+  });
+
+  it("keeps following from the launcher after the panel closes, and stops on Pause", async () => {
+    act(() => current.toggle());
+    await settle();
+    expect(current.coediting).toBe(true);
+    act(() => current.close());
+    expect(current.coediting).toBe(true);
+    expect(agent.cancelRun).not.toHaveBeenCalled();
+    await act(async () => { await current.stop(); });
+    expect(current.coediting).toBe(false);
+    act(() => current.focusPanel());
+    expect(current.coediting).toBe(false);
+  });
+
   it("drops a pending check-in when the document is replaced", async () => {
     await begin();
     await complete();
@@ -900,6 +979,116 @@ describe("AgentProvider research and skill offers", () => {
   });
 });
 
+describe("first look and moving around", () => {
+  async function advance(ms: number) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
+  it("reads the whole note once when the panel opens, without waiting for an edit", async () => {
+    await openPanel();
+    expect(agent.reviewWriting).toHaveBeenCalledOnce();
+    expect(agent.reviewWriting).toHaveBeenCalledWith(expect.objectContaining({ passage: "[p0] Trip plan", openRequest: false }));
+    act(() => current.close());
+    act(() => current.focusPanel());
+    await settle();
+    expect(agent.reviewWriting).toHaveBeenCalledOnce();
+    expect(agent.startRun).not.toHaveBeenCalled();
+  });
+  const reply = (text: string) => {
+    act(() => {
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text } });
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+    });
+    return settle();
+  };
+  it("writes this note's starters before anything else, in one turn on the fast model, and says nothing", async () => {
+    vi.mocked(agent.listModels).mockResolvedValue([{ id: "gpt-x", label: "GPT X" }, { id: "gpt-6-luna", label: "Luna" }]);
+    act(() => current.reloadModels());
+    await settle();
+    vi.useFakeTimers();
+    act(() => current.toggle());
+    await settle();
+    await advance(799);
+    expect(agent.startRun).not.toHaveBeenCalled();
+    await advance(1);
+    expect(agent.startRun).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ readOnly: true, model: "gpt-6-luna", sessionId: null }));
+    // The note is in the request, so the model has nothing to fetch.
+    expect(vi.mocked(agent.startRun).mock.calls[0][0].prompt).toContain("[p0] Trip plan");
+    expect(agent.reviewWriting).not.toHaveBeenCalled();
+    await reply("Starters:\nPick the walking route\nBudget the train fare\nList what to pack");
+    expect(current.writingStarters).toEqual(["Pick the walking route", "Budget the train fare", "List what to pack"]);
+    expect(current.writingSuggestion).toBeNull();
+    expect(current.conversation.items).toEqual([]);
+    // Then its one look at the whole note, and no more starter runs however long the writer stays.
+    expect(agent.reviewWriting).toHaveBeenCalledOnce();
+    act(() => editor.commands.insertContent("More "));
+    await advance(20000);
+    expect(agent.startRun).toHaveBeenCalledOnce();
+  });
+  it("lets a message go first and writes the starters after its reply", async () => {
+    vi.useFakeTimers();
+    act(() => current.toggle());
+    await settle();
+    await advance(500);
+    await act(async () => { await current.send("What do you think?", undefined, "coedit", { openRequest: false }); });
+    await advance(10000);
+    expect(agent.startRun).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ readOnly: false }));
+    await reply("It reads well.");
+    await advance(800);
+    expect(agent.startRun).toHaveBeenCalledTimes(2);
+    expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ readOnly: true }));
+  });
+  it("shows a note's last starters at once when the writer returns to it", async () => {
+    await openPanel("Starters:\nPick the walking route\nBudget the train fare");
+    expect(current.writingStarters).toEqual(["Pick the walking route", "Budget the train fare"]);
+    // The same note loaded again is a new document session with nothing written for it yet.
+    act(() => { editor.storage.scratchDocument.session++; current.close(); });
+    expect(current.writingStarters).toEqual(["Pick the walking route", "Budget the train fare"]);
+  });
+  it("asks once more for starters alone when neither the first run nor a check-in brought any", async () => {
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "evidence", anchor: 0, route: "fast" });
+    await openPanel();
+    // The first look raised a concern, so its observation run is already under way.
+    vi.useFakeTimers();
+    await reply("This claim needs a source.");
+    expect(current.writingSuggestion?.text).toBe("This claim needs a source.");
+    expect(current.writingStarters).toEqual([]);
+    await advance(800);
+    expect(agent.startRun).toHaveBeenCalledOnce();
+    expect(vi.mocked(agent.startRun).mock.calls[0][0].prompt).toContain("starters only");
+    // A second silence is accepted: the standing starters stay.
+    await reply("");
+    await advance(60000);
+    expect(agent.startRun).toHaveBeenCalledOnce();
+  });
+  it("keeps the starters out of an observation that arrives with them", async () => {
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "evidence", anchor: 0, route: "fast" });
+    await openPanel();
+    await reply("This claim needs a source.\n\nStarters:\nFind a source\nCut the claim");
+    expect(current.writingSuggestion?.text).toBe("This claim needs a source.");
+    expect(current.writingStarters).toEqual(["Find a source", "Cut the claim"]);
+  });
+  it("samples a long note from start to finish, then looks again where the writer moves to", async () => {
+    const paragraphs = Array.from({ length: 60 }, (_, index) => `<p>Paragraph ${index} ${"word ".repeat(80)}</p>`).join("");
+    act(() => editor.commands.setContent(paragraphs));
+    await openPanel();
+    const opening = vi.mocked(agent.reviewWriting).mock.calls[0][0];
+    expect(opening.paragraphCount).toBe(24);
+    expect(opening.passage).toContain("[p0] Paragraph 0 ");
+    expect(opening.passage).toContain("[p23] Paragraph 57 ");
+    expect(opening.passage.length).toBeLessThanOrEqual(6000);
+    vi.useFakeTimers();
+    act(() => editor.commands.setTextSelection(editor.state.doc.content.size - 1));
+    await advance(2999);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(agent.reviewWriting).mock.calls[1][0].passage).toContain("Paragraph 59 ");
+    // Staying put costs nothing more.
+    await advance(60000);
+    expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("writing companion", () => {
   async function ready() {
     await act(async () => { await current.refreshStatus(); });
@@ -920,7 +1109,7 @@ describe("writing companion", () => {
     await ready();
     await act(async () => { await current.startCompanion(); });
     expect(current.open).toBe(false);
-    expect(current.companionActive).toBe(true);
+    expect(current.coediting).toBe(true);
     expect(agent.reviewWriting).toHaveBeenCalledOnce();
     expect(agent.startRun).not.toHaveBeenCalled();
     await act(async () => { await current.stop(); await current.startCompanion(); });
@@ -946,7 +1135,7 @@ describe("writing companion", () => {
     expect(current.conversation.sessionId).toBeNull();
     expect(agent.saveConversation).not.toHaveBeenCalled();
     act(() => { current.focusPanel(); current.close(); });
-    expect(current.companionActive).toBe(true);
+    expect(current.coediting).toBe(true);
     expect(agent.cancelRun).not.toHaveBeenCalled();
     act(() => current.dismissWritingSuggestion());
     expect(current.writingFocus).toBeNull();
@@ -963,16 +1152,16 @@ describe("writing companion", () => {
     await act(async () => { await current.startCompanion(); });
     vi.useFakeTimers();
     act(() => editor.commands.insertContent("First "));
-    await advance(4000);
+    await advance(2000);
     act(() => editor.commands.insertContent("Second "));
-    await advance(4999);
+    await advance(2999);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(1);
     await advance(1);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
     act(() => editor.commands.insertContent("Third "));
-    await advance(5000);
+    await advance(3000);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
-    await advance(25000);
+    await advance(12000);
     expect(agent.reviewWriting).toHaveBeenCalledTimes(3);
     act(() => editor.view.dispatch(setChangeMeta(editor.state.tr.insertText("Agent "), { source: "agent" })));
     await advance(40000);
@@ -1017,7 +1206,7 @@ describe("writing companion", () => {
     act(() => editor.commands.insertContent("Revised "));
     await act(async () => { fail(new Error("Offline")); await pending; });
     expect(current.conversation.error).toBeNull();
-    expect(current.companionActive).toBe(true);
+    expect(current.coediting).toBe(true);
   });
 
   it("does not turn an API failure into criticism or an expensive fallback", async () => {
@@ -1026,14 +1215,14 @@ describe("writing companion", () => {
     await act(async () => { await current.startCompanion(); });
     expect(current.conversation.error?.message).toContain("Offline");
     expect(current.conversation.error?.kind).toBe("writing_review");
-    expect(current.companionActive).toBe(false);
+    expect(current.coediting).toBe(false);
     expect(current.writingFocus).toBeNull();
     expect(agent.startRun).not.toHaveBeenCalled();
     await act(async () => { await current.startCompanion(); });
     expect(agent.reviewWriting).toHaveBeenCalledTimes(2);
     expect(current.conversation.error).toBeNull();
     expect(current.conversation.items).toEqual([]);
-    expect(current.companionActive).toBe(true);
+    expect(current.coediting).toBe(true);
   });
 
   it("keeps explicit requests on the normal agent path and guards background edits", async () => {
@@ -1041,9 +1230,11 @@ describe("writing companion", () => {
     await act(async () => { await current.send("Please tighten this paragraph", false, "companion"); });
     expect(agent.reviewWriting).not.toHaveBeenCalled();
     expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ readOnly: false, prompt: "Please tighten this paragraph" }));
+    // Once the reply lands, the agent turns to the note on its own, and only to read it.
+    vi.useFakeTimers();
     await finish("Tightened the paragraph.");
-    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
-    await act(async () => { await current.startCompanion(); });
+    await advance(800);
+    expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ readOnly: true }));
     await act(async () => { await mocks.toolHandler?.({ runId: "run-1", requestId: "forbidden", name: "edit_document", args: { edits: [] } }); });
     expect(executeDocumentTool).not.toHaveBeenCalled();
     expect(agent.toolRespond).toHaveBeenCalledWith("forbidden", false, expect.stringContaining("only read"));
@@ -1133,6 +1324,58 @@ describe("structured writing offers", () => {
     expect(current.writingOffer).toBeNull();
     act(() => editor.commands.undo());
     expect(editor.getText()).toBe("Trip plan");
+  });
+  async function backgroundOffer(args: typeof offer) {
+    await readyWithModels();
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "clarity", anchor: 0, route: "fast" });
+    await act(async () => { await current.startCompanion(); });
+    await deliver(args);
+  }
+  it("makes a short unrequested rewrite itself, away from the writer's cursor, and takes it back on Undo", async () => {
+    act(() => { editor.commands.setContent("<p>Trip plan</p><p>Pack light.</p>"); editor.commands.setTextSelection(14); });
+    await backgroundOffer(offer);
+    expect(editor.getText()).toBe("A quieter trip\n\nPack light.");
+    expect(current.writingOffer).toBeNull();
+    expect(current.writingSuggestion).toMatchObject({ applied: true, text: "Give the opening a clearer direction." });
+    // The writer's cursor stays where they left it.
+    expect(editor.state.doc.textBetween(editor.state.selection.from, editor.state.doc.content.size)).toBe("ck light.");
+    act(() => current.undoAppliedSuggestion());
+    expect(editor.getText()).toBe("Trip plan\n\nPack light.");
+    expect(current.writingSuggestion).toBeNull();
+    // An undone change is remembered, so the agent does not make it again.
+    vi.useFakeTimers();
+    act(() => editor.commands.insertContent("x"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ dismissed: ["Give the opening a clearer direction."] }));
+  });
+  it("only offers a rewrite of the sentence the writer is in", async () => {
+    act(() => editor.commands.setTextSelection(3));
+    await backgroundOffer(offer);
+    expect(editor.getText()).toBe("Trip plan");
+    expect(current.writingOffer?.prepared.offer).toEqual(offer);
+    expect(current.writingSuggestion?.applied).toBeUndefined();
+  });
+  it("only offers a rewrite too long to land unread", async () => {
+    const long = { ...offer, replacement: "A quieter trip ".repeat(30).trim() };
+    act(() => { editor.commands.setContent("<p>Trip plan</p><p>Pack light.</p>"); editor.commands.setTextSelection(14); });
+    await backgroundOffer(long);
+    expect(editor.getText()).toBe("Trip plan\n\nPack light.");
+    expect(current.writingOffer?.prepared.offer).toEqual(long);
+  });
+  it("lets a newer check replace an unread offer, but not one the writer has started rewording", async () => {
+    act(() => editor.commands.setTextSelection(3));
+    await backgroundOffer(offer);
+    vi.useFakeTimers();
+    const pause = async () => { await act(async () => { await vi.advanceTimersByTimeAsync(15000); }); };
+    const reviews = () => vi.mocked(agent.reviewWriting).mock.calls.length;
+    const before = reviews();
+    act(() => { editor.commands.setTextSelection(editor.state.doc.content.size - 1); editor.commands.insertContent(" More."); });
+    await pause();
+    expect(reviews()).toBe(before + 1);
+    act(() => current.setWritingOfferDraft("My own wording"));
+    act(() => editor.commands.insertContent(" Again."));
+    await pause();
+    expect(reviews()).toBe(before + 1);
   });
   it("uses the selected model for heavy work and the same model for delegated research", async () => {
     await readyWithModels();

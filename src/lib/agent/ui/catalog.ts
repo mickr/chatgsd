@@ -82,6 +82,11 @@ export const componentDefinitions = {
     description:
       "An existing writing offer with its grounded passage and native actions: accept or edit a rewrite, answer a question, inspect sources, preview or apply a paragraph move, and Add to chat. Use only the id returned by offer_writing_help. The application owns these actions; inventing an id cannot create an offer.",
   },
+  Suggestions: {
+    props: z.object({ items: z.array(z.string()) }),
+    description:
+      "Replies only. Two to four next moves the user might want, shown as buttons under your reply. Each item is the complete message sent as the user when clicked, in their voice and under 60 characters, such as \"Tighten the second paragraph\". Use it when clear next steps exist, at most once per reply and as its last block.",
+  },
   Choice: {
     props: z.object({
       label: z.string(),
@@ -164,6 +169,7 @@ A spec block is a fenced block tagged spec with one JSON Patch operation per lin
 {"op":"add","path":"/elements/table","value":{"type":"Table","props":{"columns":["Option","Cost"],"rows":[["Train","$40"],["Drive","$25"]]},"children":[]}}
 \`\`\`
 Every element needs type, props (all listed props, null when unused) and children (element IDs, [] for none).
+When a reply leaves clear next moves, end it with a spec block holding one Suggestions element; the user sends one with a click. Leave it out when nothing obvious follows.
 For ask_user, pass form as a complete spec object {root, elements, state} instead of patch lines. Bind each input's value to {"$bindState":"/answers/<key>"} and seed state.answers with an initial value per key. Scratch adds the send button and returns the answers object. Use a form when the question has several parts or needs context alongside it; for one simple choice, options alone are enough.
 For a writing proposal, call offer_writing_help first. Its returned id can be shown in either companion surface with {"type":"WritingSuggestion","props":{"id":"<returned id>"},"children":[]}. That card includes the proposal, source links or question, and the appropriate user actions. Do not recreate its action buttons in prose or fabricate offer ids. Add to chat prepares context for the user's next message; it does not send a message or accept an edit.
 Components:

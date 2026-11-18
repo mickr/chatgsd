@@ -1,0 +1,33 @@
+.inline-agent-face {
+  --inline-expression: 220ms;
+  --inline-gaze-cycle: 2400ms;
+  --inline-blink-cycle: 4200ms;
+  --inline-breathe-cycle: 2200ms;
+  --inline-writing-cycle: 1100ms;
+  width: 40px; height: 40px; flex-shrink: 0; overflow: visible; color: var(--color-text);
+}
+.inline-agent-eye { fill: currentColor; transform-box: fill-box; transform-origin: center; transition: transform var(--inline-expression); }
+.inline-agent-signal { fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: round; transform-box: fill-box; transform-origin: center; }
+.inline-agent-gaze { transition: transform var(--inline-expression); }
+.inline-agent-attention { transition: transform 140ms ease-out; }
+.inline-agent-emotion { transform-box: fill-box; transform-origin: center; transition: transform var(--inline-expression); }
+.inline-agent-face[data-state="thinking"] .inline-agent-gaze { animation: inline-agent-think var(--inline-gaze-cycle) ease-in-out infinite; }
+.inline-agent-face:is([data-state="reading"], [data-state="researching"]) .inline-agent-gaze { animation: inline-agent-read var(--inline-gaze-cycle) ease-in-out infinite; }
+.inline-agent-face[data-state="editing"] .inline-agent-gaze { transform: translateY(2px); }
+.inline-agent-face[data-state="editing"] .inline-agent-eye { animation: inline-agent-write var(--inline-writing-cycle) ease-in-out infinite; }
+.inline-agent-face[data-state="responding"] .inline-agent-signal { animation: inline-agent-speak var(--inline-writing-cycle) ease-in-out infinite; }
+.inline-agent-face[data-state="waiting"] { animation: inline-agent-breathe var(--inline-breathe-cycle) ease-in-out infinite; }
+.inline-agent-face[data-state="waiting"] .inline-agent-emotion:last-child .inline-agent-eye { transform: scaleY(1.3); }
+.inline-agent-face[data-state="done"] .inline-agent-gaze { transform: translateY(-1px); }
+.inline-agent-face[data-state="done"] .inline-agent-eye { animation: inline-agent-blink var(--inline-blink-cycle) ease-in-out infinite; }
+.inline-agent-face[data-state="paused"] { opacity: .6; }
+.inline-agent-face[data-state="paused"] .inline-agent-eye { transform: scaleY(.3); }
+@keyframes inline-agent-think { 0%, 100% { transform: translate(0, 0); } 35%, 65% { transform: translate(2px, -2px); } }
+@keyframes inline-agent-read { 0%, 100% { transform: translateX(-2px); } 45%, 65% { transform: translateX(2px); } }
+@keyframes inline-agent-write { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.5); } }
+@keyframes inline-agent-speak { 0%, 100% { transform: scaleX(1); opacity: .45; } 50% { transform: scaleX(2); opacity: 1; } }
+@keyframes inline-agent-blink { 0%, 44%, 50%, 100% { transform: scaleY(1); } 47% { transform: scaleY(.15); } }
+@keyframes inline-agent-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+@media (prefers-reduced-motion: reduce) {
+  .inline-agent-face, .inline-agent-face * { animation: none !important; transition: none !important; }
+}

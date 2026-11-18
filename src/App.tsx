@@ -18,7 +18,7 @@ import { AgentProvider, useAgent } from "./context/AgentContext";
 import { SkillsProvider } from "./context/SkillsContext";
 import { AgentPanel } from "./components/agent/AgentPanel";
 import { useAgentPanelShortcut } from "./components/agent/useAgentPanelShortcut";
-import { InlineAgentPrompt } from "./components/agent/InlineAgentPrompt";
+import { AgentLauncher } from "./components/agent/AgentLauncher";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
 import {
@@ -229,7 +229,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
         return;
       }
 
-      if (target.closest(".agent-panel, .inline-agent-prompt") && !e.metaKey && !e.ctrlKey) {
+      if (target.closest(".agent-panel, .agent-launcher-dock") && !e.metaKey && !e.ctrlKey) {
         if (e.key === "Escape") {
           e.preventDefault();
           editorRef.current?.commands.focus();
@@ -239,7 +239,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
 
       // Trap Tab/Shift+Tab in notes view only - prevent focus navigation
       // TipTap handles indentation internally before event bubbles up
-      if (e.key === "Tab" && !target.closest(".agent-panel, .inline-agent-prompt")) {
+      if (e.key === "Tab" && !target.closest(".agent-panel, .agent-launcher-dock")) {
         e.preventDefault();
         return;
       }
@@ -454,8 +454,8 @@ function AppWorkspace({ editorRef, onEditorReady }: {
                 agentPanelOpen={agent.open && !focusMode}
                 onToggleAgentPanel={toggleAgentPanel}
               />
-              {currentNote && (
-                <InlineAgentPrompt key={currentNote.id} onContinue={focusAgentPanel} />
+              {currentNote && !(agent.open && !focusMode) && (
+                <AgentLauncher onOpen={focusAgentPanel} />
               )}
             </div>
             <AgentPanel visible={agent.open && !focusMode} />

@@ -100,9 +100,19 @@ function OfferView(controls: WritingOfferControls) {
       if (!unavailable && draft.trim()) onAnswer(draft.trim());
     }}>
       <blockquote>{offer.quote}</blockquote>
+      {!!offer.options?.length && <div className="writing-offer-options" role="group" aria-label="Suggested answers">
+        {offer.options.map((option) => <button type="button" key={option} className="agent-panel-chip" disabled={unavailable}
+          onClick={() => { if (!unavailable) onAnswer(option); }}>{option}</button>)}
+      </div>}
       <label className="writing-offer-field"><span>{offer.question}</span>
         <textarea aria-label="Answer the writing question" rows={2} maxLength={4000} value={draft}
-          placeholder="Think it through here…" onChange={(event) => updateDraft(event.target.value)} />
+          placeholder="Think it through here…" onChange={(event) => updateDraft(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter stays a newline for thinking aloud; ⌘Enter sends.
+            if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }} />
       </label>
       <button type="submit" className="agent-panel-primary" disabled={unavailable || !draft.trim()}>Send answer</button>
     </form>}

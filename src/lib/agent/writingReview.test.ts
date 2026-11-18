@@ -2,7 +2,7 @@
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { expect, it } from "vitest";
-import { writingPassage } from "./writingReview";
+import { splitStarters, writingPassage } from "./writingReview";
 
 it("sends valid Unicode when the passage budget lands inside an emoji", () => {
   const editor = new Editor({ extensions: [StarterKit], content: `<p>${"A".repeat(5994)}😀</p>` });
@@ -28,4 +28,14 @@ it("bounds context and anchor counts while preserving the text around a distant 
   editor.commands.setContent("<p>Example</p>".repeat(100));
   expect(writingPassage(editor).ranges.length).toBeLessThanOrEqual(24);
   editor.destroy();
+});
+
+it("separates the agent's observation from the next moves it proposes for the note", () => {
+  expect(splitStarters("This claim needs a source.\n\nStarters:\nConnect Venus to the opening\n- Find a source for the Venus day\n2. \"Cut the calendar claim\"\n"))
+    .toEqual({ advice: "This claim needs a source.\n\n", starters: ["Connect Venus to the opening", "Find a source for the Venus day", "Cut the calendar claim"] });
+  // A reply without the block is all observation.
+  expect(splitStarters("Starters: are a good idea here.")).toEqual({ advice: "Starters: are a good idea here.", starters: [] });
+  expect(splitStarters("**Starters**\nFind a source\nCut the claim").starters).toEqual(["Find a source", "Cut the claim"]);
+  // At most four, no repeats, and nothing too long to be a button.
+  expect(splitStarters(`Starters:\na\na\nb\n${"x".repeat(81)}\nc\nd\ne`).starters).toEqual(["a", "b", "c", "d"]);
 });

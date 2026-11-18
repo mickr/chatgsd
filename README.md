@@ -26,7 +26,7 @@ ChatGSD is a fork of [Scratch](https://github.com/erictli/scratch) by Eric Li.
 - **Wikilinks** - Type `[[` to link between notes with autocomplete
 - **Slash commands** - Type `/` to quickly insert headings, lists, code blocks, diagrams, and more
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
-- **Agent panel** - Co-edit with Codex through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret and subtle working-range highlight show where it is working without taking your selection. Follow agent keeps its work in view until you scroll or type. During an active coediting session, it observes your edits and checks in after you pause typing. Each note keeps its conversation history
+- **Agent panel** - Co-edit with Codex through Sign in with ChatGPT (`Cmd+J`). Edits apply directly to the live note or other notes in the workspace, without approval cards. A separate agent caret and subtle working-range highlight show where it is working without taking your selection. Follow agent keeps its work in view until you scroll or type. While the panel is open it follows your edits: a cheap classifier decides after each pause whether to stay quiet, offer a suggestion, or continue an edit you asked for. Its face shows what it is doing and stays on a launcher when the panel is closed. Each note keeps its conversation history
 - **Web research** - With internet access on, the agent hands questions your notes can't answer to a researcher: a separate Codex role that searches the web, reads pages and reports back with sources. Its model and brief are yours to change in Settings → Integrations
 - **Skills** - Save [Agent Skills](https://agentskills.io) for the agent to follow. When a site the researcher reads publishes a skill that fits your work, the agent offers it on a card with its full instructions, and you decide whether to save it. Manage, switch off, remove or add skills by address in Settings → Skills
 - **Works with other AI agents** - Changes made to an open note on disk merge in live, and conflicting edits show up as changes to review
@@ -124,38 +124,47 @@ Keyboard focus only crosses between the note and the sidebar when you move it:
 `Cmd+Option+←` returns to the note where you left your cursor. Account checks,
 coediting check-ins, and agent edits never move focus.
 
-In the formatted editor, **Writing companion** opens one expanding interface
-beside the document, or below it in a narrow workspace. Drag the six-dot grip
-to dock it left, right, or below; drag the inner edge to resize it. With the grip
-focused, Left/Right/Down Arrow choose a dock. With the resize handle focused,
-arrow keys resize, Shift makes larger steps, and Home/End choose the size limits.
-The position and size are remembered. Its space is reserved in the layout, so
-neither the compact bubble nor the conversation covers your writing. `Cmd+Option+Enter` opens it
-with the current selection or cursor as context. Enter sends; Shift+Enter adds
-a newline; Escape minimizes. Closing keeps the draft and conversation and
-restores the launcher. It does not pause assistance. **Pause companion** stops
-assistance; **Write with me** resumes it. The sidebar is optional.
+The panel is the one place to talk to the agent. Its header carries the
+agent's face and a status line, and **Pause** stops assistance in the current
+note until **Write with me** or your next message resumes it. `Cmd+Option+Enter`
+in the note opens the composer with the current selection or cursor as context.
+Enter sends; Shift+Enter adds a newline. Closing the panel keeps the draft, the
+conversation and any work in progress, and leaves the face on a small launcher
+below the note that reports what the agent is doing and reopens the panel. The
+launcher also shows in focus mode.
 
-Opening the companion starts quiet writing check-ins. After a five-second pause
-in local typing, at most once every thirty seconds, a cheap `gpt-6-luna`
-Decisions request evaluates clarity, evidence, and development. A fourth question
-identifies the paragraph, and a routing question chooses fast or deep work. These questions share one bounded context: up to
-6,000 characters of labelled nearby prose, six recent messages, and eight
-previously offered or dismissed suggestions. Unchanged passages reuse the recent result. Blank notes,
-agent edits, selection moves, and unread suggestions do not start extra reviews.
+Opening the panel starts writing check-ins, which continue from the launcher
+after it closes. The agent takes one look at the whole note as soon as it is
+following: a short note is read in full, a long one as up to 24 paragraph
+openings spread from start to finish. After that it checks three seconds after
+you stop typing or move to another part of the note, at most once every fifteen
+seconds. Each check is one cheap `gpt-6-luna` Decisions request that evaluates
+clarity, evidence, and development. A fourth question identifies the paragraph,
+and a routing question chooses fast or deep work. These questions share one
+bounded context: up to 6,000 characters of labelled prose, six recent messages,
+and eight previously offered or dismissed suggestions. Unchanged passages reuse
+the recent result, so staying put costs nothing. Blank notes and agent edits do
+not start reviews.
 
-Only an actionable concern with probability at least 0.85 and a valid paragraph
-anchor starts the writing agent. The classifier result is a lead, not a verified
-finding. The agent reads the live note and offers one brief contextual suggestion,
-or stays silent if it finds nothing worth adding. These background runs are
-read-only and use fresh ephemeral threads. They cannot edit notes, access other
-apps, or block on questions. Evidence checks may use the enabled internet access,
-with one research task limited to six search/fetch steps and a sixty-second
-research deadline. They do not fill the chat history.
+A concern with probability at least 0.65 and a valid paragraph anchor starts the
+writing agent. The classifier result is a lead, not a verified finding. The agent
+reads the live note and makes one brief contextual offer, or stays silent if it
+finds nothing worth adding. A newer offer replaces one you haven't touched; an
+offer you have started answering or rewording stays. These background runs use
+fresh ephemeral threads. They cannot access other apps or block on questions.
+Evidence checks may use the enabled internet access, with one research task
+limited to six search/fetch steps and a sixty-second research deadline. They do
+not fill the chat history.
 
-A concern changes the companion's expression and labels the reason: a claim
+The agent makes a short rewrite itself when it finds one on its own: up to 400
+characters, in text your cursor and selection are not in. It lands with the same
+typing reveal as any agent edit, as one undo step, and the panel says what
+changed with **Undo** and **Keep**. An undone change is not made again. Longer
+rewrites, the sentence you are in, questions, moves and evidence stay offers.
+
+A concern changes the face's expression and labels the reason: a claim
 worth checking, a passage worth another look, or an idea to explore. A small
-agent cursor glides from the companion to the prose gutter beside the identified paragraph.
+agent cursor glides from the face in the panel to the prose gutter beside the identified paragraph.
 It never moves the user's mouse, typing cursor, or scroll position. **Show
 passage** scrolls there and replays the gesture on request. Reduced motion skips the travel. Offscreen pointers hide instead of pointing
 at unrelated text. Findings and pointers clear when the note changes or the
@@ -163,10 +172,24 @@ suggestion is dismissed. Results from an older document snapshot are discarded.
 
 Four actions make the collaboration tangible: propose an editable rewrite,
 trace an argument to one useful question, research a claim with opened sources,
-and preview moving a paragraph earlier. Shared json-render cards appear in both
-the companion and sidebar. Rewrite and answer drafts stay in sync. **Add to
-chat** stages the card's context in that surface's composer without sending it.
-Only explicit acceptance changes the document, in one undoable transaction.
+and preview moving a paragraph earlier. Each appears as a json-render card in
+the conversation. **Add to chat** stages the card's context in the composer
+without sending it.
+A question card can carry up to four suggested answers as pills; one click sends
+it, and `Cmd+Enter` sends what you typed. A reply can end with suggested next
+steps as pills too. Each pill sends exactly the text it shows, only the latest
+reply's pills are live, and none can be clicked while the agent is working. The
+starters above the composer are written for the note. As soon as the agent is
+following a note, before its first look, one read-only Luna run proposes three or
+four next moves. The note's text travels with the request, so that run takes one
+model turn and no tool call. Any later check that raises something refreshes
+them. Clicking one sends it as your message. A note you return to shows its last
+starters at once while fresh ones are written. Until a note has any, four
+standing starters show, ordered by the latest check's scores with the best fit
+marked once it is more likely useful than not. A message you send first is never
+queued behind that run.
+
+An offer changes the document only when you accept it, in one undoable transaction.
 Accepted rewrites and moves use the same progressive typing reveal and agent
 caret as other agent edits; reduced motion shows the complete change immediately.
 Changed or ambiguous passages disable acceptance until a fresh offer is made.
@@ -174,10 +197,13 @@ Changed or ambiguous passages disable acceptance until a fresh offer is made.
 A cheap Decisions classifier chooses Luna for straightforward work and the
 selected model for heavier reasoning. Low-confidence routing uses the selected
 model; if Luna is unavailable, the selected model is the fallback. Explicit
-messages also classify Discuss, Suggest, Edit, Research, and Clarify; confidence
-below 0.75 selects Discuss. Classification does not grant permission to edit.
-Messages are limited to 8,000 characters, and failed classification retains the
-draft for retry. Computer access stays disabled for inline requests.
+messages also classify Discuss, Suggest, Edit, Research, and Clarify. Telling the
+agent to change the text (rewrite, tighten, fix, shorten, move) is an edit and
+is made in the note right away; it shows a version first only when you ask to
+see one. Below 0.75 confidence no mode is sent and the agent reads the message
+itself. A message is never held back by the classifier: one that fails to
+classify, takes longer than 1.2 seconds, or exceeds 8,000 characters is sent as
+written on the selected model.
 
 The face combines an image-generated shell with animated LED eyes. The editing
 model chooses expressions, sentiment, and intensity through a bounded
@@ -202,14 +228,18 @@ The record excludes your own intervening edits; later typing or Undo does not
 rewrite it. This is an edit-time record, not an approval step or a new revision
 system. Conversations saved before change recording was added have no diff cards.
 
-Sending a message or choosing **Start coediting** activates observation for the
-current note. Local edits trigger a check-in after two seconds without typing,
-at most once every ten seconds. Changes made while the agent is working wait
-until that turn finishes. Agent edits, selection moves and document loading do
-not trigger more turns. If a question is waiting, a document edit tells the agent
-to read again rather than pretending you answered. These check-ins use your
-ChatGPT plan. **Pause**, closing the panel, switching notes, and errors stop
-automatic check-ins. Opening Scratch alone does not start model requests.
+A request to change the note stays open after the agent replies. While it is
+open, the check-in runs sooner: two seconds after you stop typing, at most once
+every ten seconds, and the same cheap classifier also judges whether your edit
+lets the agent continue. Only then does a full turn run, on Luna or the selected
+model as routed. If a question is waiting, that turn tells the agent to read
+again instead of pretending you answered. When the classifier is confident the
+request is finished, check-ins return to the slower cadence. Questions,
+suggestions and research never open a request. Changes made while the agent is
+working wait until that turn finishes. Agent edits, selection moves and document
+loading do not trigger check-ins. These check-ins use your ChatGPT plan.
+**Pause** and errors stop them for the current note. Opening ChatGSD with the
+panel closed does not start model requests.
 
 macOS installs and automatic updates include [Cua Driver](https://cua.ai/docs/cua-driver/quickstart)
 0.38.0, so computer use needs no separate driver installation. Computer use requires
@@ -257,7 +287,7 @@ ChatGSD is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Option+B`    | Toggle agent panel     |
 | `Cmd+Option+→`    | Focus agent sidebar    |
 | `Cmd+Option+←`    | Focus note             |
-| `Cmd+Option+Enter` | Open inline agent     |
+| `Cmd+Option+Enter` | Ask the agent about the selection |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |
 | `Cmd+\`           | Toggle sidebar         |

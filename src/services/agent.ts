@@ -124,10 +124,15 @@ export interface WritingReviewContext {
   paragraphCount: number;
   recent: string[];
   dismissed: string[];
+  /** Also ask whether the user's edit lets an earlier edit request continue. */
+  openRequest?: boolean;
 }
+/** `continue` runs the request, `done` closes it, `open` leaves it waiting. */
+export type RequestState = "continue" | "open" | "done";
 export type WritingFocus = "clarity" | "evidence" | "development";
+export type WritingScores = Record<WritingFocus, number>;
 export const reviewWriting = (context: WritingReviewContext) =>
-  invoke<{ focus: WritingFocus | null; anchor: number | null; route: ModelRoute }>("agent_review_writing", { context });
+  invoke<{ focus: WritingFocus | null; anchor: number | null; route: ModelRoute; request?: RequestState | null; scores?: WritingScores }>("agent_review_writing", { context });
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const setupComputerPermissions = (permission: ComputerPermission) =>

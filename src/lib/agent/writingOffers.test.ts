@@ -294,3 +294,17 @@ it("skips acceptance animation for reduced motion while retaining agent presence
   editor.commands.undo();
   expect(editor.getJSON()).toEqual(before);
 });
+
+it("accepts up to four suggested answers for a question and for nothing else", () => {
+  const editor = open("<p>A rough sentence.</p>");
+  const question = { ...rewrite(), kind: "question", replacement: null, question: "Why does this follow?" };
+  expect(prepareWritingOffer(editor, { ...question, options: [" It's deliberate ", "Cut it"] }).offer.options)
+    .toEqual(["It's deliberate", "Cut it"]);
+  // No options is the common case and leaves the offer as it was.
+  expect(prepareWritingOffer(editor, { ...question, options: [] }).offer).not.toHaveProperty("options");
+  expect(prepareWritingOffer(editor, question).offer).not.toHaveProperty("options");
+  expect(() => prepareWritingOffer(editor, { ...question, options: ["a", "b", "c", "d", "e"] })).toThrow(/four answers/);
+  expect(() => prepareWritingOffer(editor, { ...question, options: [""] })).toThrow(/suggested answer/);
+  expect(() => prepareWritingOffer(editor, { ...rewrite(), options: ["Yes"] })).toThrow(/four answers/);
+  expect(() => prepareWritingOffer(editor, { ...question, extra: true })).toThrow(/unexpected fields/);
+});
