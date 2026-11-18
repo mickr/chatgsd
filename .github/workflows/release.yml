@@ -241,7 +241,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: scripts/retry.sh gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
       # A failed or cancelled run withdraws its version, so no tag points at a
       # build that never shipped and the next run reuses the number. A
@@ -251,7 +251,7 @@ jobs:
         if: failure() || cancelled()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: scripts/withdraw-release.sh "v$VERSION" "$COMMIT"
+        run: scripts/retry.sh scripts/withdraw-release.sh "v$VERSION" "$COMMIT"
 
       - name: Remove signing identity
         if: always()
