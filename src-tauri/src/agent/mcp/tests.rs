@@ -186,7 +186,7 @@ impl Home {
         store::update(&root, |store| {
             store.servers.push(ServerConfig {
                 id: id.clone(), name: "127.0.0.1".into(), url: url.into(), enabled: true, local, auto_name: true,
-                client_id: None, tools: Vec::new(), policies: HashMap::new(), added_at: 0,
+                client_id: None, launch: None, tools: Vec::new(), policies: HashMap::new(), added_at: 0,
             });
             Ok(())
         }).await.unwrap();
@@ -298,6 +298,41 @@ async fn a_server_saved_as_public_cannot_reach_this_machine() {
     assert_eq!(fixture.fixture.lock().unwrap().session, 0, "no request reached the server");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_program_in_mcp_json_is_started_listed_called_and_restarted_when_the_file_changes() {
+    let root = std::env::temp_dir().join(format!("chatgsd-mcp-{}", uuid::Uuid::new_v4()));
+    let home = Home(root.clone());
+    let define = |target: &'static str| {
+        let entry = serde_json::to_value(stdio::tests::launch(target)).unwrap();
+        config::change(&home.0, move |servers| { servers.insert("greeter".into(), entry); Ok(()) })
+    };
+    define("world").await.unwrap();
+    let id = program_id("greeter");
+    let state = McpState::default();
+
+    connect_in(&state, &root, &id).await.unwrap();
+    let server = home.server(&id).await;
+    assert_eq!(server.name, "greeter", "a program is called what the file calls it");
+    assert_eq!(server.tools.iter().map(|tool| (tool.name.as_str(), tool.read_only)).collect::<Vec<_>>(), [("greet", true)]);
+    let greeted = invoke(&state, &root, &server, "greet", &json!({})).await.unwrap();
+    assert_eq!(text(&greeted), "hello world, refused");
+
+    // The program stops: the next call starts it again. The call it stopped in is not repeated.
+    assert!(matches!(invoke(&state, &root, &server, "crash", &json!({})).await, Err(Failure::Other(message)) if message.contains("out of memory")));
+    assert_eq!(text(&invoke(&state, &root, &server, "greet", &json!({})).await.unwrap()), "hello world, refused");
+
+    // The file now starts it differently: the next call runs what the file says.
+    define("moon").await.unwrap();
+    let server = home.server(&id).await;
+    assert_eq!(text(&invoke(&state, &root, &server, "greet", &json!({})).await.unwrap()), "hello moon, refused");
+
+    std::fs::write(config::path(&root), "{ mid-edit").unwrap();
+    let server = home.server(&id).await;
+    assert!(matches!(invoke(&state, &root, &server, "greet", &json!({})).await, Err(Failure::Other(message)) if message.contains("mcp.json")));
+    assert!(matches!(connect_in(&state, &root, &id).await, Err(Failure::Other(_))));
+}
+
 /// Explicitly opt in: CHATGSD_MCP_URL=https://mcp.example.com/mcp cargo test live_server -- --ignored --nocapture
 /// Sends the handshake only: no sign-in, no registration, no tool calls.
 #[tokio::test]
@@ -319,4 +354,16 @@ async fn live_server_answers_the_handshake_or_says_where_to_sign_in() {
         }
         Err(error) => panic!("{error}"),
     }
+}
+
+/// Explicitly opt in: CHATGSD_MCP_COMMAND="npx -y a-server" cargo test live_program -- --ignored --nocapture
+/// Starts the program and lists its tools: no tool is called.
+#[tokio::test]
+#[ignore = "runs an explicitly selected program"]
+async fn live_program_answers_the_handshake_and_lists_its_tools() {
+    let command = std::env::var("CHATGSD_MCP_COMMAND").expect("select a program with CHATGSD_MCP_COMMAND");
+    let launch = config::Launch::parse(&command, "").unwrap();
+    let process = stdio::Process::start(&launch).await.unwrap_or_else(|error| panic!("{error}"));
+    let tools = client::list_tools(&process).await.unwrap();
+    println!("{} lists {} tools: {:?}", launch.line(), tools.len(), tools.iter().map(|tool| &tool.name).collect::<Vec<_>>());
 }

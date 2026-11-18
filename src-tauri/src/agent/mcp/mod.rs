@@ -6,11 +6,14 @@
 //! tool catalog. A tool that may change something outside ChatGSD asks the
 //! user first, unless they chose otherwise for that tool.
 //!
-//! Servers are remote (Streamable HTTP). Adding one takes only its address:
-//! the transport, the server's name, its tools and its OAuth sign-in are all
-//! read from the server.
+//! A remote server (Streamable HTTP) is added by its address alone: its name,
+//! its tools and its OAuth sign-in are all read from the server. A server
+//! that runs on this Mac is a program defined in `mcp.json`, which ChatGSD
+//! starts and talks to over stdio.
 mod client;
+mod config;
 mod oauth;
+mod stdio;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -19,6 +22,7 @@ use super::{tools::ToolOutput, web, AgentState};
 use client::Endpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -40,6 +44,7 @@ const ALLOW_ONCE: &str = "Allow once";
 const ALWAYS_ALLOW: &str = "Always allow";
 const DENY: &str = "Don't allow";
 const SETTINGS: &str = "Settings → MCP Servers";
+const PROGRAM_ID: &str = "program-";
 
 /// Whether the agent may call a tool: freely, after asking the user, or never.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -80,6 +85,10 @@ pub struct ServerConfig {
     /// An OAuth client the user registered, for services without dynamic registration.
     #[serde(default)]
     pub client_id: Option<String>,
+    /// How a server that runs on this Mac is started. Read from `mcp.json`
+    /// each time and never saved with the rest.
+    #[serde(skip)]
+    pub launch: Option<config::Launch>,
     /// The server's tools as of the last connection.
     #[serde(default)]
     pub tools: Vec<Tool>,
@@ -106,6 +115,33 @@ impl ServerConfig {
     fn fetcher(&self) -> web::Fetcher {
         if self.local { web::ANY } else { web::PUBLIC }
     }
+
+    /// A program `mcp.json` defines, as first seen: on, with nothing known about it yet.
+    fn program(id: String) -> Self {
+        Self {
+            id, name: String::new(), url: String::new(), enabled: true, local: true, auto_name: false, client_id: None,
+            launch: None, tools: Vec::new(), policies: HashMap::new(), added_at: chrono::Utc::now().timestamp_millis(),
+        }
+    }
+
+    fn is_program(&self) -> bool {
+        self.id.starts_with(PROGRAM_ID)
+    }
+
+    /// How to start this server when it is a program; `None` for a remote one.
+    fn launch(&self) -> Result<Option<&config::Launch>, Failure> {
+        match &self.launch {
+            None if self.is_program() => Err(Failure::Other(format!("Fix {} to start this server again", config::FILE))),
+            launch => Ok(launch.as_ref()),
+        }
+    }
+}
+
+/// A program is known by its name in `mcp.json`, so what is saved about it
+/// outlives edits to the file.
+fn program_id(name: &str) -> String {
+    let digest: String = Sha256::digest(name.as_bytes()).iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+    format!("{PROGRAM_ID}{digest}")
 }
 
 fn slug(name: &str) -> String {
@@ -151,6 +187,10 @@ struct Status {
 #[derive(Default)]
 pub struct McpState {
     sessions: tokio::sync::Mutex<HashMap<String, client::Session>>,
+    /// The programs running for servers on this Mac. Dropping one stops it.
+    processes: tokio::sync::Mutex<HashMap<String, Arc<stdio::Process>>>,
+    /// How each program was last started, to tell when `mcp.json` has changed.
+    tried: Mutex<HashMap<String, config::Launch>>,
     status: Mutex<HashMap<String, Status>>,
     /// Sign-ins in progress, by server, so a new one or Cancel can end them.
     logins: Mutex<HashMap<String, Arc<Notify>>>,
@@ -168,6 +208,7 @@ impl McpState {
 
     async fn forget(&self, id: &str) {
         self.sessions.lock().await.remove(id);
+        self.processes.lock().await.remove(id);
     }
 }
 
@@ -189,6 +230,10 @@ pub struct ServerView {
     /// What the agent calls the server.
     key: String,
     url: String,
+    /// The command a server on this Mac runs as, without its variables.
+    command: Option<String>,
+    /// `stdio` for a program on this Mac, `http` for a server at an address.
+    transport: &'static str,
     enabled: bool,
     local: bool,
     client_id: Option<String>,
@@ -205,11 +250,17 @@ fn view(server: &ServerConfig, credentials: Option<&store::Credentials>, status:
         Some(credentials) if credentials.token.is_some() => "token",
         _ => "none",
     };
+    let status = match server.launch() {
+        Err(Failure::Other(message)) => Status { connection: Connection::Error, detail: Some(message) },
+        _ => status,
+    };
     ServerView {
         id: server.id.clone(),
         name: server.name.clone(),
         key: server.key(),
         url: server.url.clone(),
+        command: server.launch.as_ref().map(config::Launch::line),
+        transport: if server.is_program() { "stdio" } else { "http" },
         enabled: server.enabled,
         local: server.local,
         client_id: server.client_id.clone(),
@@ -339,19 +390,43 @@ async fn open(root: &Path, server: &ServerConfig) -> Result<(Endpoint, client::H
     }
 }
 
+/// The server's program, started if it isn't running or `mcp.json` now
+/// starts it differently.
+async fn running(state: &McpState, server: &ServerConfig, launch: &config::Launch) -> Result<Arc<stdio::Process>, Failure> {
+    let current = state.processes.lock().await.get(&server.id)
+        .filter(|process| process.alive() && &process.launch == launch).cloned();
+    if let Some(process) = current {
+        return Ok(process);
+    }
+    let process = Arc::new(stdio::Process::start(launch).await.map_err(|error| Failure::Other(error.to_string()))?);
+    state.processes.lock().await.insert(server.id.clone(), process.clone());
+    Ok(process)
+}
+
 /// Connects and saves what the server says about itself: its tools, and its
 /// name while the user hasn't chosen one.
 async fn connect_in(state: &McpState, root: &Path, id: &str) -> Result<(), Failure> {
     let server = store::read(root).await.map_err(Failure::Other)?.server(id).map_err(Failure::Other)?.clone();
     state.forget(id).await;
-    let (endpoint, hello) = open(root, &server).await?;
-    let tools = match endpoint.list_tools(&hello.session).await {
-        Ok(tools) => tools,
-        Err(client::Error::Unauthorized(_)) => return Err(Failure::NeedsAuth),
-        Err(error) => return Err(Failure::Other(error.to_string())),
+    let (named, tools, session) = match server.launch()? {
+        Some(launch) => {
+            state.tried.lock().expect("mcp tried mutex").insert(id.to_owned(), launch.clone());
+            let process = running(state, &server, launch).await?;
+            let tools = client::list_tools(&*process).await.map_err(|error| Failure::Other(error.to_string()))?;
+            (None, tools, None)
+        }
+        None => {
+            let (endpoint, hello) = open(root, &server).await?;
+            let tools = match endpoint.list_tools(&hello.session).await {
+                Ok(tools) => tools,
+                Err(client::Error::Unauthorized(_)) => return Err(Failure::NeedsAuth),
+                Err(error) => return Err(Failure::Other(error.to_string())),
+            };
+            (hello.name, tools, Some(hello.session))
+        }
     };
     store::update(root, |store| {
-        let named = hello.name.as_deref().map(|name| unique_name(&store.servers, name, Some(id)));
+        let named = named.as_deref().map(|name| unique_name(&store.servers, name, Some(id)));
         let server = store.server_mut(id)?;
         server.policies.retain(|name, _| tools.iter().any(|tool| &tool.name == name));
         server.tools = tools;
@@ -361,7 +436,9 @@ async fn connect_in(state: &McpState, root: &Path, id: &str) -> Result<(), Failu
         }
         Ok(())
     }).await.map_err(Failure::Other)?;
-    state.sessions.lock().await.insert(id.to_owned(), hello.session);
+    if let Some(session) = session {
+        state.sessions.lock().await.insert(id.to_owned(), session);
+    }
     Ok(())
 }
 
@@ -375,6 +452,24 @@ async fn connect(app: &tauri::AppHandle, id: &str) {
         Err(Failure::NeedsAuth) => state.set(id, Connection::NeedsAuth, None),
         Err(Failure::Other(message)) => state.set(id, Connection::Error, Some(message)),
     }
+    announce(app).await;
+}
+
+/// Brings the running programs in line with `mcp.json` after it may have
+/// changed: stops those it no longer has, and starts what is new or is now
+/// started differently.
+async fn sync(app: &tauri::AppHandle, root: &Path) {
+    let Ok(store) = store::read(root).await else { return };
+    let state = app.state::<McpState>();
+    state.processes.lock().await
+        .retain(|id, _| store.servers.iter().any(|server| &server.id == id && server.enabled));
+    let changed: Vec<&ServerConfig> = {
+        let tried = state.tried.lock().expect("mcp tried mutex");
+        store.servers.iter()
+            .filter(|server| server.enabled && server.launch.is_some() && tried.get(&server.id) != server.launch.as_ref())
+            .collect()
+    };
+    futures_util::future::join_all(changed.iter().map(|server| connect(app, &server.id))).await;
     announce(app).await;
 }
 
@@ -392,6 +487,10 @@ pub fn start(app: &tauri::AppHandle) {
 /// Calls a tool, starting a session if there is none. A call the server never
 /// ran (its session or sign-in had lapsed) is retried once; nothing else is.
 async fn invoke(state: &McpState, root: &Path, server: &ServerConfig, tool: &str, arguments: &Value) -> Result<Value, Failure> {
+    if let Some(launch) = server.launch()? {
+        let process = running(state, server, launch).await?;
+        return client::call_tool(&*process, tool, arguments).await.map_err(|error| Failure::Other(error.to_string()));
+    }
     let mut retried = false;
     loop {
         let existing = state.sessions.lock().await.get(&server.id).cloned();
@@ -452,6 +551,10 @@ fn clean(value: Option<String>, limit: usize) -> Option<String> {
     value.map(|value| value.trim().chars().take(limit).collect::<String>()).filter(|value| !value.is_empty())
 }
 
+fn full() -> String {
+    format!("ChatGSD keeps up to {MAX_SERVERS} servers. Remove one first.")
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInput {
@@ -491,7 +594,7 @@ pub async fn mcp_add_server(app: tauri::AppHandle, request: ServerInput) -> Resu
             return Err("This server is already added".into());
         }
         if store.servers.len() >= MAX_SERVERS {
-            return Err(format!("ChatGSD keeps up to {MAX_SERVERS} servers. Remove one first."));
+            return Err(full());
         }
         store.servers.push(ServerConfig {
             id: id.clone(),
@@ -501,6 +604,7 @@ pub async fn mcp_add_server(app: tauri::AppHandle, request: ServerInput) -> Resu
             local,
             auto_name: name.is_none(),
             client_id: clean(request.client_id, 400),
+            launch: None,
             tools: Vec::new(),
             policies: HashMap::new(),
             added_at: chrono::Utc::now().timestamp_millis(),
@@ -514,8 +618,118 @@ pub async fn mcp_add_server(app: tauri::AppHandle, request: ServerInput) -> Resu
     one_view(&app, &id).await
 }
 
+/// Writes a program into `mcp.json` and starts it.
+async fn add_program(app: &tauri::AppHandle, name: String, launch: config::Launch) -> Result<ServerView, String> {
+    let root = store::root(app)?;
+    let store = store::read(&root).await?;
+    if store.servers.len() >= MAX_SERVERS {
+        return Err(full());
+    }
+    if store.servers.iter().any(|server| server.key() == slug(&name)) {
+        return Err(format!("Another server is already called {name}"));
+    }
+    let entry = serde_json::to_value(&launch).map_err(|error| error.to_string())?;
+    config::change(&root, |servers| {
+        if servers.contains_key(&name) {
+            return Err(format!("{} already has a server called {name}", config::FILE));
+        }
+        servers.insert(name.clone(), entry);
+        Ok(())
+    }).await?;
+    let id = program_id(&name);
+    connect(app, &id).await;
+    one_view(app, &id).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalServerInput {
+    name: String,
+    /// The command line that starts the server.
+    command: String,
+    /// `NAME=value` lines.
+    env: Option<String>,
+}
+
+#[tauri::command]
+pub async fn mcp_add_local_server(app: tauri::AppHandle, request: LocalServerInput) -> Result<ServerView, String> {
+    let name = clean(Some(request.name), MAX_NAME_CHARS).ok_or("Give the server a name")?;
+    let launch = config::Launch::parse(&request.command, request.env.as_deref().unwrap_or_default())?;
+    add_program(&app, name, launch).await
+}
+
+/// A server found in another app's configuration, not yet added here.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundView {
+    name: String,
+    /// The command it runs, or its address.
+    detail: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigView {
+    /// What is wrong with `mcp.json`, in words for the user.
+    problem: Option<String>,
+    /// Servers Codex is set up with that ChatGSD doesn't have.
+    found: Vec<FoundView>,
+}
+
+fn known(store: &store::Store, found: &config::Found) -> bool {
+    store.servers.iter().any(|server| match &found.source {
+        config::Source::Program(launch) => server.launch.as_ref() == Some(launch) || server.id == program_id(&found.name),
+        config::Source::Address(address) => Url::parse(address).is_ok_and(|url| server.url == url.as_str()),
+    })
+}
+
+/// Follows `mcp.json` as it is now, and says what else could be added.
+/// Settings calls this when it opens and when the window is returned to.
+#[tauri::command]
+pub async fn mcp_load_config(app: tauri::AppHandle) -> Result<ConfigView, String> {
+    let root = store::root(&app)?;
+    sync(&app, &root).await;
+    let store = store::read(&root).await?;
+    let found = config::codex().await.into_iter().filter(|found| !known(&store, found)).map(|found| FoundView {
+        name: found.name,
+        detail: match found.source {
+            config::Source::Program(launch) => launch.line(),
+            config::Source::Address(address) => address,
+        },
+    }).collect();
+    Ok(ConfigView { problem: store.problem, found })
+}
+
+/// Adds a server Codex is set up with. It is read again from Codex's
+/// configuration here, so its variables never pass through the window.
+#[tauri::command]
+pub async fn mcp_add_found_server(app: tauri::AppHandle, name: String) -> Result<ServerView, String> {
+    let found = config::codex().await.into_iter().find(|found| found.name == name)
+        .ok_or("Codex no longer has this server")?;
+    match found.source {
+        config::Source::Program(launch) => add_program(&app, found.name, launch).await,
+        config::Source::Address(url) => {
+            mcp_add_server(app, ServerInput { url, name: Some(found.name), token: None, client_id: None }).await
+        }
+    }
+}
+
+/// Shows `mcp.json` in Finder, creating it if there is none to edit yet.
+#[tauri::command]
+pub async fn mcp_reveal_config(app: tauri::AppHandle) -> Result<(), String> {
+    let root = store::root(&app)?;
+    let path = config::path(&root);
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        config::change(&root, |_| Ok(())).await?;
+    }
+    tauri_plugin_opener::reveal_item_in_dir(&path).map_err(|error| format!("Couldn't show {}: {error}", config::FILE))
+}
+
 #[tauri::command]
 pub async fn mcp_update_server(app: tauri::AppHandle, id: String, request: ServerInput) -> Result<ServerView, String> {
+    if id.starts_with(PROGRAM_ID) {
+        return Err(format!("This server is defined in {}. Edit it there.", config::FILE));
+    }
     let (url, local) = server_address(&request.url).await?;
     let name = clean(request.name, MAX_NAME_CHARS);
     let client_id = clean(request.client_id, 400);
@@ -572,6 +786,14 @@ pub async fn mcp_remove_server(app: tauri::AppHandle, id: String) -> Result<(), 
     let state = app.state::<McpState>();
     end_login(&state, &id);
     let server = store::read(&root).await?.servers.into_iter().find(|server| server.id == id);
+    if server.as_ref().is_some_and(ServerConfig::is_program) {
+        config::change(&root, |servers| {
+            servers.retain(|name, _| program_id(name) != id);
+            Ok(())
+        }).await?;
+    }
+    state.processes.lock().await.remove(&id);
+    state.tried.lock().expect("mcp tried mutex").remove(&id);
     let session = state.sessions.lock().await.remove(&id);
     if let (Some(server), Some(session)) = (server, session) {
         if let Ok(endpoint) = endpoint(&root, &server, false).await {
@@ -947,7 +1169,7 @@ mod unit {
     fn server(name: &str, tools: Vec<Tool>) -> ServerConfig {
         ServerConfig {
             id: format!("id-{name}"), name: name.into(), url: format!("https://{}.example.com/mcp", slug(name)),
-            enabled: true, local: false, auto_name: false, client_id: None, tools, policies: HashMap::new(), added_at: 0,
+            enabled: true, local: false, auto_name: false, client_id: None, launch: None, tools, policies: HashMap::new(), added_at: 0,
         }
     }
 
@@ -1004,7 +1226,7 @@ mod unit {
     fn finds_enabled_servers_by_key_or_name() {
         let mut off = server("Wiki", vec![]);
         off.enabled = false;
-        let store = store::Store { servers: vec![server("Issue Tracker", vec![]), off], credentials: HashMap::new() };
+        let store = store::Store { servers: vec![server("Issue Tracker", vec![]), off], ..Default::default() };
         assert_eq!(find_server(&store, "issue-tracker").map(|server| server.name.clone()).ok().as_deref(), Some("Issue Tracker"));
         assert!(find_server(&store, " Issue Tracker ").is_ok());
         let missing = find_server(&store, "wiki").err().unwrap();

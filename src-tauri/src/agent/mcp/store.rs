@@ -1,8 +1,8 @@
 //! Where MCP servers are kept: `servers.json` holds what the settings page
-//! shows, `credentials.json` holds tokens and never leaves the backend. Both
-//! live in app data, so they apply in every notes folder and are never synced
-//! with one.
-use super::{oauth, ServerConfig};
+//! shows, `credentials.json` holds tokens and never leaves the backend, and
+//! `mcp.json` defines the servers that run on this Mac. All three live in app
+//! data, so they apply in every notes folder and are never synced with one.
+use super::{config, oauth, ServerConfig};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ pub struct Credentials {
 pub struct Store {
     pub servers: Vec<ServerConfig>,
     pub credentials: HashMap<String, Credentials>,
+    /// What is wrong with `mcp.json`, when it can't be followed as written.
+    pub problem: Option<String>,
 }
 
 impl Store {
@@ -55,7 +57,7 @@ async fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
 }
 
 /// Writes beside the file and renames over it, readable by this user only.
-async fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+pub(super) async fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let failed = |error: std::io::Error| format!("Couldn't save the MCP servers: {error}");
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -70,10 +72,42 @@ async fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     tokio::fs::rename(&temporary, path).await.map_err(failed)
 }
 
+/// The saved servers, with the programs as `mcp.json` has them now. A program
+/// keeps what was saved about it (on or off, its tools, the user's choices
+/// for them) for as long as the file names it.
+fn with_programs(saved: Vec<ServerConfig>, programs: Vec<(String, config::Launch)>) -> Vec<ServerConfig> {
+    let (mut known, mut servers): (Vec<_>, Vec<_>) = saved.into_iter().partition(ServerConfig::is_program);
+    for (name, launch) in programs {
+        if servers.len() >= super::MAX_SERVERS {
+            break;
+        }
+        let id = super::program_id(&name);
+        let mut server = match known.iter().position(|server| server.id == id) {
+            Some(index) => known.swap_remove(index),
+            None => ServerConfig::program(id),
+        };
+        server.name = super::unique_name(&servers, &name, None);
+        server.launch = Some(launch);
+        servers.push(server);
+    }
+    servers
+}
+
 async fn read_in(root: &Path) -> Result<Store, String> {
-    Ok(Store {
-        servers: load(&root.join(SERVERS_FILE)).await?,
-        credentials: load(&root.join(CREDENTIALS_FILE)).await?,
+    let saved = load(&root.join(SERVERS_FILE)).await?;
+    let credentials = load(&root.join(CREDENTIALS_FILE)).await?;
+    Ok(match config::read(root).await {
+        Ok(config) => Store {
+            servers: with_programs(saved, config.servers),
+            credentials,
+            problem: (!config.skipped.is_empty()).then(|| format!(
+                "{} lists servers ChatGSD can't start because they have no command: {}. Add a remote server by its address instead.",
+                config::FILE, config.skipped.join(", ")
+            )),
+        },
+        // The programs stay listed, with nothing to start them by, until the
+        // file can be read again.
+        Err(problem) => Store { servers: saved, credentials, problem: Some(problem) },
     })
 }
 
@@ -107,7 +141,7 @@ mod tests {
     fn server(id: &str) -> ServerConfig {
         ServerConfig {
             id: id.into(), name: "Tracker".into(), url: "https://mcp.example.com/mcp".into(), enabled: true,
-            local: false, auto_name: false, client_id: None, tools: Vec::new(), policies: HashMap::new(), added_at: 1,
+            local: false, auto_name: false, client_id: None, launch: None, tools: Vec::new(), policies: HashMap::new(), added_at: 1,
         }
     }
 
@@ -140,6 +174,47 @@ mod tests {
             let mode = std::fs::metadata(root.join(CREDENTIALS_FILE)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn programs_follow_the_file_and_keep_what_the_user_chose() {
+        let root = std::env::temp_dir().join(format!("chatgsd-mcp-store-{}", uuid::Uuid::new_v4()));
+        let write = |text: &str| std::fs::write(config::path(&root), text).unwrap();
+        update(&root, |store| { store.servers.push(server("remote")); Ok(()) }).await.unwrap();
+        write(r#"{"mcpServers":{"Tracker":{"command":"tracker-server"},"files":{"command":"npx","args":["files"],"env":{"KEY":"secret"}}}}"#);
+
+        let store = read(&root).await.unwrap();
+        let names: Vec<&str> = store.servers.iter().map(|server| server.name.as_str()).collect();
+        assert_eq!(names, ["Tracker", "Tracker 2", "files"], "a program can't take a name the agent already uses");
+        let files = store.servers.iter().find(|server| server.name == "files").unwrap().id.clone();
+        assert!(store.server(&files).unwrap().enabled, "a program in the file is on until the user turns it off");
+
+        update(&root, |store| {
+            let server = store.server_mut(&files)?;
+            server.enabled = false;
+            server.policies.insert("write".into(), crate::agent::mcp::Policy::Allow);
+            Ok(())
+        }).await.unwrap();
+        assert!(!std::fs::read_to_string(root.join(SERVERS_FILE)).unwrap().contains("secret"), "the file stays the only place a program is defined");
+
+        write(r#"{"mcpServers":{"files":{"command":"uvx","args":["files"]}}}"#);
+        let store = read(&root).await.unwrap();
+        assert_eq!(store.servers.len(), 2, "a program the file no longer names is gone");
+        let server = store.server(&files).unwrap();
+        assert_eq!(server.launch.as_ref().unwrap().line(), "uvx files");
+        assert!(!server.enabled);
+        assert_eq!(server.policies.len(), 1);
+
+        write("{ mid-edit");
+        let store = read(&root).await.unwrap();
+        assert!(store.problem.as_deref().unwrap().contains("isn't valid JSON"));
+        assert!(store.server(&files).unwrap().launch.is_none(), "nothing to start it by until the file reads again");
+        update(&root, |_| Ok(())).await.unwrap();
+        write(r#"{"mcpServers":{"files":{"command":"uvx"},"tracker":{"url":"https://mcp.example.com/mcp"}}}"#);
+        let store = read(&root).await.unwrap();
+        assert!(!store.server(&files).unwrap().enabled, "an unreadable file loses nothing that was saved");
+        assert!(store.problem.as_deref().unwrap().contains("tracker"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -25,6 +25,10 @@ export interface McpServer {
   /** What the agent calls the server. */
   key: string;
   url: string;
+  /** The command a server on this Mac runs as, without its variables. */
+  command: string | null;
+  /** `stdio` for a program on this Mac that ChatGSD starts, `http` for a server at an address. */
+  transport: "http" | "stdio";
   enabled: boolean;
   /** On this Mac or its network. */
   local: boolean;
@@ -43,6 +47,25 @@ export interface McpServerInput {
   token?: string;
   clientId?: string;
 }
+/** A server that runs on this Mac, as typed in settings and saved to `mcp.json`. */
+export interface McpLocalServerInput {
+  name: string;
+  /** The command line that starts it. */
+  command: string;
+  /** `NAME=value` lines. */
+  env?: string;
+}
+/** A server Codex is set up with that ChatGSD doesn't have. */
+export interface McpFoundServer {
+  name: string;
+  /** The command it runs, or its address. */
+  detail: string;
+}
+export interface McpConfig {
+  /** What is wrong with `mcp.json`, in words for the user. */
+  problem: string | null;
+  found: McpFoundServer[];
+}
 
 export const listServers = () => invoke<McpServer[]>("mcp_list_servers");
 /** The loopback address to register for a hand-made OAuth client. */
@@ -50,6 +73,15 @@ export const redirectUri = () => invoke<string>("mcp_redirect_uri");
 /** Saves the server and connects, reading its name and tools from it. */
 export const addServer = (request: McpServerInput) =>
   invoke<McpServer>("mcp_add_server", { request });
+/** Writes the server into `mcp.json` and starts it. */
+export const addLocalServer = (request: McpLocalServerInput) =>
+  invoke<McpServer>("mcp_add_local_server", { request });
+/** Follows `mcp.json` as it is now, and lists what Codex has that could be added. */
+export const loadConfig = () => invoke<McpConfig>("mcp_load_config");
+export const addFoundServer = (name: string) =>
+  invoke<McpServer>("mcp_add_found_server", { name });
+/** Shows `mcp.json` in Finder, creating it if there is none yet. */
+export const revealConfig = () => invoke<void>("mcp_reveal_config");
 export const updateServer = (id: string, request: McpServerInput) =>
   invoke<McpServer>("mcp_update_server", { id, request });
 export const removeServer = (id: string) =>

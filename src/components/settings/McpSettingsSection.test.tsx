@@ -16,6 +16,10 @@ vi.mock("../../services/mcp", async (original) => ({
   ...await original<typeof McpService>(),
   redirectUri: vi.fn(() => Promise.resolve("http://127.0.0.1:47823/callback")),
   addServer: vi.fn(),
+  addLocalServer: vi.fn(),
+  addFoundServer: vi.fn(),
+  loadConfig: vi.fn(() => Promise.resolve({ problem: null, found: [] })),
+  revealConfig: vi.fn(() => Promise.resolve()),
   updateServer: vi.fn(() => Promise.resolve()),
   removeServer: vi.fn(() => Promise.resolve()),
   setServerEnabled: vi.fn(() => Promise.resolve()),
@@ -32,7 +36,8 @@ let root: Root;
 let container: HTMLDivElement;
 
 const tracker: McpServer = {
-  id: "s1", name: "Tracker", key: "tracker", url: "https://mcp.tracker.example/mcp", enabled: true, local: false,
+  id: "s1", name: "Tracker", key: "tracker", url: "https://mcp.tracker.example/mcp", command: null, transport: "http",
+  enabled: true, local: false,
   clientId: null, auth: "oauth", status: "connected", detail: null,
   tools: [
     { name: "search_issues", title: null, description: "Find issues", readOnly: true, policy: "allow" },
@@ -47,9 +52,9 @@ async function render(servers: McpServer[]) {
 const settle = () => act(async () => { for (let tick = 0; tick < 5; tick++) await Promise.resolve(); });
 const button = (label: string, within: ParentNode = document.body) =>
   [...within.querySelectorAll("button")].find((item) => item.textContent?.trim() === label)!;
-function type(input: HTMLInputElement, text: string) {
+function type(input: HTMLInputElement | HTMLTextAreaElement, text: string) {
   act(() => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, text);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
@@ -160,4 +165,76 @@ it("removes a server only after confirming", async () => {
   const dialog = document.body.querySelector('[role="alertdialog"]')!;
   await act(async () => { button("Remove", dialog).click(); });
   expect(mcp.removeServer).toHaveBeenCalledWith("s1");
+});
+
+const files: McpServer = {
+  id: "program-1", name: "files", key: "files", url: "", command: "npx -y files-server ~/Documents", transport: "stdio",
+  enabled: true, local: true, clientId: null, auth: "none", status: "connected", detail: null,
+  tools: [{ name: "read_file", title: null, description: "Read a file", readOnly: true, policy: "allow" }],
+};
+
+it("adds a server that runs on this Mac from its command, under More options", async () => {
+  vi.mocked(mcp.addLocalServer).mockResolvedValue(files);
+  await render([]);
+  expect(container.querySelector("#mcp-local-command")).toBeNull();
+  act(() => button("More options").click());
+  expect(button("Add local server").disabled).toBe(true);
+  type(container.querySelector<HTMLInputElement>("#mcp-local-name")!, "files");
+  type(container.querySelector<HTMLInputElement>("#mcp-local-command")!, "npx -y files-server ~/Documents");
+  type(container.querySelector<HTMLTextAreaElement>("#mcp-local-env")!, "API_KEY=abc\n");
+  await act(async () => { button("Add local server").click(); });
+  await settle();
+
+  expect(mcp.addLocalServer).toHaveBeenCalledWith({ name: "files", command: "npx -y files-server ~/Documents", env: "API_KEY=abc" });
+  expect(toast.success).toHaveBeenCalledWith("Connected to files.");
+  expect(container.querySelector<HTMLInputElement>("#mcp-local-command")!.value).toBe("");
+  expect(mcp.addServer).not.toHaveBeenCalled();
+
+  vi.mocked(mcp.addLocalServer).mockRejectedValue("Close the quote in the command");
+  type(container.querySelector<HTMLInputElement>("#mcp-local-name")!, "notes");
+  type(container.querySelector<HTMLInputElement>("#mcp-local-command")!, "uvx 'notes");
+  await act(async () => { button("Add local server").click(); });
+  await settle();
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("Close the quote in the command");
+  expect(container.querySelector<HTMLInputElement>("#mcp-local-command")!.value).toBe("uvx 'notes");
+});
+
+it("shows a local server by its command and sends its edits to mcp.json", async () => {
+  await render([files]);
+  expect(container.textContent).toContain("npx -y files-server ~/Documents · runs on this Mac");
+  expect(button("Sign in again")).toBeUndefined();
+  expect(button("Edit")).toBeUndefined();
+  act(() => button("Edit in mcp.json").click());
+  expect(mcp.revealConfig).toHaveBeenCalled();
+
+  act(() => button("Remove", container).click());
+  expect(document.body.querySelector('[role="alertdialog"]')!.textContent).toContain("takes it out of mcp.json");
+});
+
+it("follows mcp.json on opening and on coming back, and says what it can't use", async () => {
+  vi.mocked(mcp.loadConfig).mockResolvedValue({ problem: "mcp.json isn't valid JSON: expected value at line 3", found: [] });
+  await render([files]);
+  await settle();
+  expect(mcp.loadConfig).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('[role="status"]')?.textContent).toContain("isn't valid JSON");
+
+  vi.mocked(mcp.loadConfig).mockResolvedValue({ problem: null, found: [] });
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  await settle();
+  expect(mcp.loadConfig).toHaveBeenCalledTimes(2);
+  expect(container.textContent).not.toContain("isn't valid JSON");
+});
+
+it("offers the servers Codex has and adds one when asked", async () => {
+  vi.mocked(mcp.loadConfig).mockResolvedValue({ problem: null, found: [{ name: "browser", detail: "/Applications/Browser.app/Contents/MacOS/browser mcp" }] });
+  vi.mocked(mcp.addFoundServer).mockResolvedValue({ ...files, id: "program-2", name: "browser" });
+  await render([]);
+  await settle();
+  expect(container.textContent).toContain("Already set up in Codex");
+  expect(mcp.addFoundServer).not.toHaveBeenCalled();
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Add browser from Codex"]')!.click(); });
+  await settle();
+  expect(mcp.addFoundServer).toHaveBeenCalledWith("browser");
+  expect(toast.success).toHaveBeenCalledWith("Connected to browser.");
+  expect(mcp.loadConfig).toHaveBeenCalledTimes(2);
 });

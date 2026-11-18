@@ -1,5 +1,7 @@
-//! The client side of MCP's Streamable HTTP transport: one POST per JSON-RPC
-//! message, answered with JSON or a short event stream.
+//! The MCP client: the handshake, the tool catalog and tool calls, and the
+//! Streamable HTTP transport that carries them to a remote server (one POST
+//! per JSON-RPC message, answered with JSON or a short event stream). A
+//! program on this Mac is reached through `stdio` instead.
 //!
 //! Requests go through `web::Fetcher`, so a server on the internet is held to
 //! public addresses with the connection pinned to the address that was
@@ -25,6 +27,10 @@ const MAX_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_SCHEMA_BYTES: usize = 20_000;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_id() -> u64 {
+    REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -56,6 +62,11 @@ pub struct Hello {
     pub session: Session,
     /// The server's own display name, when it gave one.
     pub name: Option<String>,
+}
+
+/// A connection that answers JSON-RPC requests, whatever carries them.
+pub(super) trait Rpc {
+    async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Error>;
 }
 
 pub struct Endpoint {
@@ -132,6 +143,75 @@ fn parse_tool(tool: &Value) -> Option<Tool> {
             .unwrap_or_else(|| json!({"type":"object"})),
         read_only: annotations["readOnlyHint"] == true,
     })
+}
+
+pub fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {},
+        "clientInfo": {"name":"chatgsd","title":"ChatGSD","version":env!("CARGO_PKG_VERSION")},
+    })
+}
+
+/// The protocol version a server chose on `initialize`, and its display name
+/// when it gave one.
+pub fn welcome(result: &Value, who: &str) -> Result<(String, Option<String>), Error> {
+    let version = result["protocolVersion"].as_str().unwrap_or_default();
+    if !SUPPORTED_VERSIONS.contains(&version) {
+        return Err(Error::Other(format!("{who} speaks a version of MCP that ChatGSD doesn't")));
+    }
+    let info = &result["serverInfo"];
+    let name = info["title"].as_str().or(info["name"].as_str())
+        .map(|name| clip(name.trim(), 60)).filter(|name| !name.is_empty());
+    Ok((version.to_owned(), name))
+}
+
+/// The result in a JSON-RPC response, or the error it carries instead.
+pub fn result_of(mut message: Value, who: &str) -> Result<Value, Error> {
+    if let Some(error) = message.get("error").filter(|error| !error.is_null()) {
+        let detail = error["message"].as_str().unwrap_or("the request failed");
+        return Err(Error::Other(format!("{who} answered: {}", clip(detail, 500))));
+    }
+    match message.get_mut("result") {
+        Some(result) => Ok(result.take()),
+        None => Err(Error::Other(format!("{who} didn't answer as an MCP server"))),
+    }
+}
+
+pub(super) async fn list_tools(server: &impl Rpc) -> Result<Vec<Tool>, Error> {
+    let mut tools: Vec<Tool> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_TOOL_PAGES {
+        let params = cursor.as_ref().map_or_else(|| json!({}), |cursor| json!({"cursor":cursor}));
+        let page = server.request("tools/list", params, CONNECT_TIMEOUT).await?;
+        for tool in page["tools"].as_array().into_iter().flatten().filter_map(parse_tool) {
+            if tools.len() < MAX_TOOLS && !tools.iter().any(|known| known.name == tool.name) {
+                tools.push(tool);
+            }
+        }
+        let next = page["nextCursor"].as_str().map(str::to_owned);
+        if next.is_none() || next == cursor || tools.len() >= MAX_TOOLS {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(tools)
+}
+
+pub(super) async fn call_tool(server: &impl Rpc, name: &str, arguments: &Value) -> Result<Value, Error> {
+    server.request("tools/call", json!({"name":name,"arguments":arguments}), CALL_TIMEOUT).await
+}
+
+/// An endpoint with the session its requests belong to.
+struct Open<'a> {
+    endpoint: &'a Endpoint,
+    session: &'a Session,
+}
+
+impl Rpc for Open<'_> {
+    async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Error> {
+        self.endpoint.request(Some(self.session), method, params, timeout).await.map(|(result, _)| result)
+    }
 }
 
 impl Endpoint {
@@ -218,62 +298,26 @@ impl Endpoint {
     }
 
     async fn request(&self, session: Option<&Session>, method: &str, params: Value, timeout: Duration) -> Result<(Value, Option<String>), Error> {
-        let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let id = next_id();
         let reply = self.post(session, &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}), timeout).await?;
-        let mut message = reply.message.unwrap_or_default();
-        if let Some(error) = message.get("error").filter(|error| !error.is_null()) {
-            let detail = error["message"].as_str().unwrap_or("the request failed");
-            return Err(Error::Other(format!("{} answered: {}", self.host(), clip(detail, 500))));
-        }
-        match message.get_mut("result") {
-            Some(result) => Ok((result.take(), reply.session)),
-            None => Err(Error::Other(format!("{} didn't answer as an MCP server", self.host()))),
-        }
+        Ok((result_of(reply.message.unwrap_or_default(), self.host())?, reply.session))
     }
 
     /// Opens a session and tells the server this client is ready.
     pub async fn initialize(&self) -> Result<Hello, Error> {
-        let params = json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name":"chatgsd","title":"ChatGSD","version":env!("CARGO_PKG_VERSION")},
-        });
-        let (result, id) = self.request(None, "initialize", params, CONNECT_TIMEOUT).await?;
-        let version = result["protocolVersion"].as_str().unwrap_or_default();
-        if !SUPPORTED_VERSIONS.contains(&version) {
-            return Err(Error::Other(format!("{} speaks a version of MCP that ChatGSD doesn't", self.host())));
-        }
-        let session = Session { id, version: version.to_owned() };
+        let (result, id) = self.request(None, "initialize", initialize_params(), CONNECT_TIMEOUT).await?;
+        let (version, name) = welcome(&result, self.host())?;
+        let session = Session { id, version };
         self.post(Some(&session), &json!({"jsonrpc":"2.0","method":"notifications/initialized"}), CONNECT_TIMEOUT).await?;
-        let info = &result["serverInfo"];
-        let name = info["title"].as_str().or(info["name"].as_str())
-            .map(|name| clip(name.trim(), 60)).filter(|name| !name.is_empty());
         Ok(Hello { session, name })
     }
 
     pub async fn list_tools(&self, session: &Session) -> Result<Vec<Tool>, Error> {
-        let mut tools: Vec<Tool> = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_TOOL_PAGES {
-            let params = cursor.as_ref().map_or_else(|| json!({}), |cursor| json!({"cursor":cursor}));
-            let (page, _) = self.request(Some(session), "tools/list", params, CONNECT_TIMEOUT).await?;
-            for tool in page["tools"].as_array().into_iter().flatten().filter_map(parse_tool) {
-                if tools.len() < MAX_TOOLS && !tools.iter().any(|known| known.name == tool.name) {
-                    tools.push(tool);
-                }
-            }
-            let next = page["nextCursor"].as_str().map(str::to_owned);
-            if next.is_none() || next == cursor || tools.len() >= MAX_TOOLS {
-                break;
-            }
-            cursor = next;
-        }
-        Ok(tools)
+        list_tools(&Open { endpoint: self, session }).await
     }
 
     pub async fn call_tool(&self, session: &Session, name: &str, arguments: &Value) -> Result<Value, Error> {
-        let params = json!({"name":name,"arguments":arguments});
-        self.request(Some(session), "tools/call", params, CALL_TIMEOUT).await.map(|(result, _)| result)
+        call_tool(&Open { endpoint: self, session }, name, arguments).await
     }
 
     /// Tells the server the session is over. Servers may refuse; that's fine.

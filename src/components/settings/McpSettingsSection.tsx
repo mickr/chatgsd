@@ -1,4 +1,4 @@
-import { memo, useEffect, useState, type FormEvent } from "react";
+import { memo, useCallback, useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -18,7 +18,7 @@ import { useMcp } from "../../context/McpContext";
 import { McpServerStatus } from "../agent/McpServerStatus";
 import { errorMessage } from "../../services/agent";
 import * as mcp from "../../services/mcp";
-import type { McpServer, McpTool, McpToolPolicy } from "../../services/mcp";
+import type { McpConfig, McpFoundServer, McpServer, McpTool, McpToolPolicy } from "../../services/mcp";
 
 interface Draft {
   url: string;
@@ -35,8 +35,25 @@ function signIn(server: Pick<McpServer, "id" | "name">) {
     .catch((reason) => toast.error(`Couldn't sign in to ${server.name}: ${errorMessage(reason)}`));
 }
 
+/** Says how a newly added server's first connection went, and opens its sign-in if it asked for one. */
+function announceAdded(server: McpServer) {
+  if (server.status === "needs_auth" && server.auth === "none") {
+    toast(`Finish signing in to ${server.name} in your browser.`);
+    signIn(server);
+  } else if (server.status === "error") {
+    toast.error(`Added ${server.name}, but couldn't connect: ${server.detail ?? "unknown error"}`);
+  } else if (server.status === "connected") {
+    toast.success(`Connected to ${server.name}.`);
+  }
+}
+
+function showConfig() {
+  void mcp.revealConfig().catch((reason) => toast.error(errorMessage(reason)));
+}
+
 const fieldLabel = "block text-xs font-medium";
 const fieldHint = "text-xs text-text-muted leading-relaxed";
+const quietLink = "text-xs text-text-muted hover:text-text";
 
 /** The optional fields: a name, a pasted token, and a hand-made OAuth client. */
 function OptionalFields({
@@ -239,10 +256,17 @@ const ServerRow = memo(function ServerRow({
             <h3 className="text-sm font-medium truncate">{server.name}</h3>
             <McpServerStatus server={server} />
           </div>
-          <p className="font-mono text-xs text-text-muted truncate" title={server.url}>
-            {server.url}
-            {server.local && <span className="font-sans"> · on this network</span>}
-          </p>
+          {server.transport === "stdio" ? (
+            <p className="font-mono text-xs text-text-muted truncate" title={server.command ?? undefined}>
+              {server.command}
+              <span className="font-sans">{server.command ? " · " : ""}runs on this Mac</span>
+            </p>
+          ) : (
+            <p className="font-mono text-xs text-text-muted truncate" title={server.url}>
+              {server.url}
+              {server.local && <span className="font-sans"> · on this network</span>}
+            </p>
+          )}
         </div>
         <label className="flex shrink-0 items-center gap-2 text-xs text-text-muted">
           {server.enabled ? "On" : "Off"}
@@ -320,7 +344,11 @@ const ServerRow = memo(function ServerRow({
               </button>
             </>
           )}
-          <button type="button" className={rowAction} onClick={() => setEditing(true)}>Edit</button>
+          {server.transport === "stdio" ? (
+            <button type="button" className={rowAction} onClick={showConfig}>Edit in mcp.json</button>
+          ) : (
+            <button type="button" className={rowAction} onClick={() => setEditing(true)}>Edit</button>
+          )}
           <button type="button" className={`${rowAction} ml-auto`} onClick={() => onRemove(server)}>Remove</button>
         </div>
       )}
@@ -328,8 +356,106 @@ const ServerRow = memo(function ServerRow({
   );
 });
 
+const emptyLocalDraft = { name: "", command: "", env: "" };
+
+/** Add a server that is a program on this Mac. It is written to `mcp.json`, which defines it from then on. */
+function AddLocalServer({ onAdded }: { onAdded: () => void }) {
+  const [draft, setDraft] = useState(emptyLocalDraft);
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ready = draft.name.trim() !== "" && draft.command.trim() !== "";
+  const add = async (event: FormEvent) => {
+    event.preventDefault();
+    if (adding || !ready) return;
+    setAdding(true);
+    setError(null);
+    try {
+      const server = await mcp.addLocalServer({ name: draft.name, command: draft.command, env: draft.env.trim() || undefined });
+      setDraft(emptyLocalDraft);
+      announceAdded(server);
+      onAdded();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setAdding(false);
+    }
+  };
+  const change = (field: keyof typeof emptyLocalDraft) => (event: { target: { value: string } }) =>
+    setDraft((current) => ({ ...current, [field]: event.target.value }));
+  return (
+    <form className="rounded-[10px] border border-border p-4 space-y-3" aria-labelledby="mcp-local-title" onSubmit={(event) => void add(event)}>
+      <div className="space-y-1">
+        <h3 id="mcp-local-title" className="text-sm font-medium">A server that runs on this Mac</h3>
+        <p className={fieldHint}>
+          For a server you start with a command instead of reaching at an address. ChatGSD runs the command as you
+          while the server is on. It is saved in <code className="font-mono bg-bg-muted px-1 py-0.5 rounded">mcp.json</code>,
+          in the format other MCP apps use, and changes you make to that file yourself are picked up when you come
+          back here.{" "}
+          <button type="button" className="underline hover:text-text" onClick={showConfig}>Show mcp.json</button>
+        </p>
+      </div>
+      <div className="space-y-1.5">
+        <label htmlFor="mcp-local-name" className={fieldLabel}>Name</label>
+        <Input
+          id="mcp-local-name"
+          value={draft.name}
+          maxLength={60}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          placeholder="files"
+          onChange={change("name")}
+          className="h-8.25"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label htmlFor="mcp-local-command" className={fieldLabel}>Command</label>
+        <Input
+          id="mcp-local-command"
+          value={draft.command}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          placeholder="npx -y @modelcontextprotocol/server-filesystem ~/Documents"
+          onChange={change("command")}
+          className="h-8.25 font-mono"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label htmlFor="mcp-local-env" className={fieldLabel}>Environment variables</label>
+        <textarea
+          id="mcp-local-env"
+          rows={2}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          value={draft.env}
+          placeholder="API_KEY=…"
+          onChange={change("env")}
+          aria-describedby="mcp-local-env-hint"
+          className="block w-full resize-y rounded-md border border-border bg-bg px-3 py-2 font-mono text-sm text-text placeholder:text-text-muted focus-visible:outline-none focus-visible:border-accent"
+        />
+        <p id="mcp-local-env-hint" className={fieldHint}>
+          Optional, one NAME=value per line. They are given to this server only and kept in mcp.json on this Mac.
+        </p>
+      </div>
+      {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+      <Button type="submit" variant="outline" size="md" disabled={adding || !ready}>
+        {adding ? (
+          <>
+            <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
+            Starting…
+          </>
+        ) : (
+          "Add local server"
+        )}
+      </Button>
+    </form>
+  );
+}
+
 /** Add a server from its address alone; the rest is read from the server. */
-function AddServer({ redirectUri }: { redirectUri: string }) {
+function AddServer({ redirectUri, onAdded }: { redirectUri: string; onAdded: () => void }) {
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [options, setOptions] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -348,14 +474,8 @@ function AddServer({ redirectUri }: { redirectUri: string }) {
       });
       setDraft(emptyDraft);
       setOptions(false);
-      if (server.status === "needs_auth" && server.auth === "none") {
-        toast(`Finish signing in to ${server.name} in your browser.`);
-        signIn(server);
-      } else if (server.status === "error") {
-        toast.error(`Added ${server.name}, but couldn't connect: ${server.detail ?? "unknown error"}`);
-      } else if (server.status === "connected") {
-        toast.success(`Connected to ${server.name}.`);
-      }
+      announceAdded(server);
+      onAdded();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -363,59 +483,92 @@ function AddServer({ redirectUri }: { redirectUri: string }) {
     }
   };
   return (
-    <form className="space-y-3" onSubmit={(event) => void add(event)}>
-      <div className="flex gap-2">
-        <Input
-          type="text"
-          inputMode="url"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          aria-label="Address of an MCP server"
-          placeholder="mcp.example.com/mcp"
-          value={draft.url}
-          onChange={(event) => setDraft((current) => ({ ...current, url: event.target.value }))}
-          className="h-8.25"
-        />
-        <Button type="submit" variant="outline" size="md" disabled={adding || !draft.url.trim()}>
-          {adding ? (
-            <>
-              <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
-              Connecting…
-            </>
-          ) : (
-            "Add server"
-          )}
-        </Button>
-      </div>
-      {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
-      <button
-        type="button"
-        className="text-xs text-text-muted hover:text-text"
-        aria-expanded={options}
-        onClick={() => setOptions((open) => !open)}
-      >
-        {options ? "Hide options" : "More options"}
-      </button>
-      {options && (
-        <div className="rounded-[10px] border border-border p-4">
-          <OptionalFields
-            idPrefix="mcp-add"
-            draft={draft}
-            onChange={(change) => setDraft((current) => ({ ...current, ...change }))}
-            redirectUri={redirectUri}
-            savedToken={false}
+    <div className="space-y-3">
+      <form className="space-y-3" onSubmit={(event) => void add(event)}>
+        <div className="flex gap-2">
+          <Input
+            type="text"
+            inputMode="url"
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            aria-label="Address of an MCP server"
+            placeholder="mcp.example.com/mcp"
+            value={draft.url}
+            onChange={(event) => setDraft((current) => ({ ...current, url: event.target.value }))}
+            className="h-8.25"
           />
+          <Button type="submit" variant="outline" size="md" disabled={adding || !draft.url.trim()}>
+            {adding ? (
+              <>
+                <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
+                Connecting…
+              </>
+            ) : (
+              "Add server"
+            )}
+          </Button>
         </div>
-      )}
-    </form>
+        {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+        <button type="button" className={quietLink} aria-expanded={options} onClick={() => setOptions((open) => !open)}>
+          {options ? "Hide options" : "More options"}
+        </button>
+        {options && (
+          <div className="rounded-[10px] border border-border p-4">
+            <OptionalFields
+              idPrefix="mcp-add"
+              draft={draft}
+              onChange={(change) => setDraft((current) => ({ ...current, ...change }))}
+              redirectUri={redirectUri}
+              savedToken={false}
+            />
+          </div>
+        )}
+      </form>
+      {options && <AddLocalServer onAdded={onAdded} />}
+    </div>
   );
 }
+
+const FoundRow = memo(function FoundRow({ found, onAdded }: { found: McpFoundServer; onAdded: () => void }) {
+  const [adding, setAdding] = useState(false);
+  const add = () => {
+    setAdding(true);
+    void mcp
+      .addFoundServer(found.name)
+      .then(announceAdded, (reason) => toast.error(`Couldn't add ${found.name}: ${errorMessage(reason)}`))
+      .finally(() => {
+        setAdding(false);
+        onAdded();
+      });
+  };
+  return (
+    <li className="flex items-center justify-between gap-4 px-4 py-2.5">
+      <div className="min-w-0 space-y-0.5">
+        <p className="text-sm font-medium truncate">{found.name}</p>
+        <p className="font-mono text-xs text-text-muted truncate" title={found.detail}>{found.detail}</p>
+      </div>
+      <Button variant="outline" size="sm" disabled={adding} aria-label={`Add ${found.name} from Codex`} onClick={add}>
+        {adding ? "Adding…" : "Add"}
+      </Button>
+    </li>
+  );
+});
 
 export function McpSettingsSection() {
   const { servers, error, refresh } = useMcp();
   const [removing, setRemoving] = useState<McpServer | null>(null);
   const [redirectUri, setRedirectUri] = useState("");
+  const [config, setConfig] = useState<McpConfig | null>(null);
+  const loadConfig = useCallback(() => {
+    void mcp.loadConfig().then(setConfig, () => {});
+  }, []);
+  // mcp.json may have been edited elsewhere: follow it on opening and on coming back.
+  useEffect(() => {
+    loadConfig();
+    window.addEventListener("focus", loadConfig);
+    return () => window.removeEventListener("focus", loadConfig);
+  }, [loadConfig]);
   useEffect(() => {
     let active = true;
     void mcp.redirectUri().then(
@@ -428,7 +581,9 @@ export function McpSettingsSection() {
     if (!removing) return;
     const { id, name } = removing;
     setRemoving(null);
-    void mcp.removeServer(id).catch((reason) => toast.error(`Couldn't remove ${name}: ${errorMessage(reason)}`));
+    void mcp
+      .removeServer(id)
+      .then(loadConfig, (reason) => toast.error(`Couldn't remove ${name}: ${errorMessage(reason)}`));
   };
   const on = servers?.filter((server) => server.enabled).length ?? 0;
   return (
@@ -448,6 +603,12 @@ export function McpSettingsSection() {
             </button>
           </div>
         )}
+        {config?.problem && (
+          <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-border bg-bg-muted p-3">
+            <p role="status" className="text-sm text-text-muted">{config.problem}</p>
+            <button type="button" className={`shrink-0 ${quietLink}`} onClick={showConfig}>Show mcp.json</button>
+          </div>
+        )}
         {servers === null && !error && (
           <div className="flex items-center gap-2 p-3 text-sm text-text-muted">
             <SpinnerIcon className="w-4 h-4 animate-spin" />
@@ -460,7 +621,7 @@ export function McpSettingsSection() {
             <h3 className="text-sm font-medium">No servers yet</h3>
             <p className="max-w-md text-sm leading-relaxed text-text-muted">
               Add a server by its address below. ChatGSD reads its name and tools from it and, if it asks,
-              opens your browser to sign in.
+              opens your browser to sign in. A server that runs on this Mac is under More options.
             </p>
           </div>
         )}
@@ -483,10 +644,27 @@ export function McpSettingsSection() {
       <section className="pb-2">
         <h2 className="text-xl font-medium mb-0.5">Add a server</h2>
         <p className="text-sm text-text-muted mb-4">
-          Paste the address of a remote MCP server. What the agent sends to a server leaves this Mac, and what
-          comes back is treated as information, never as instructions.
+          Paste the address of a remote MCP server, or open More options for one that runs on this Mac. What the
+          agent sends to a remote server leaves this Mac, and what any server sends back is treated as
+          information, never as instructions.
         </p>
-        <AddServer redirectUri={redirectUri} />
+        <AddServer redirectUri={redirectUri} onAdded={loadConfig} />
+        {config && config.found.length > 0 && (
+          <div className="mt-6 space-y-2.5">
+            <div className="space-y-1">
+              <h3 className="text-sm font-medium">Already set up in Codex</h3>
+              <p className={fieldHint}>
+                Servers from Codex's configuration on this Mac. Nothing here is used until you add it; a server
+                that runs on this Mac is copied into mcp.json with its variables.
+              </p>
+            </div>
+            <ul className="divide-y divide-border divide-dashed rounded-[10px] border border-border">
+              {config.found.map((found) => (
+                <FoundRow key={found.name} found={found} onAdded={loadConfig} />
+              ))}
+            </ul>
+          </div>
+        )}
       </section>
 
       <AlertDialog open={removing !== null} onOpenChange={(open) => { if (!open) setRemoving(null); }}>
@@ -494,8 +672,9 @@ export function McpSettingsSection() {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove this server?</AlertDialogTitle>
             <AlertDialogDescription>
-              The agent will stop using {removing?.name}, and ChatGSD forgets its sign-in and your choices for its
-              tools. Access you granted stays listed in your account with that service until you revoke it there.
+              {removing?.transport === "stdio"
+                ? `ChatGSD stops ${removing.name}, takes it out of mcp.json and forgets your choices for its tools.`
+                : `The agent will stop using ${removing?.name}, and ChatGSD forgets its sign-in and your choices for its tools. Access you granted stays listed in your account with that service until you revoke it there.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
