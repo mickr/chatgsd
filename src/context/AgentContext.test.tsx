@@ -1348,6 +1348,18 @@ describe("structured writing offers", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
     expect(agent.reviewWriting).toHaveBeenLastCalledWith(expect.objectContaining({ dismissed: ["Give the opening a clearer direction."] }));
   });
+  it("only offers a rewrite from a check that could read the web", async () => {
+    act(() => { editor.commands.setContent("<p>Trip plan</p><p>Pack light.</p>"); editor.commands.setTextSelection(14); });
+    await readyWithModels();
+    act(() => current.setWebAccess(true));
+    // An evidence check is the one background run allowed to research.
+    vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "evidence", anchor: 0, route: "fast" });
+    await act(async () => { await current.startCompanion(); });
+    expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ readOnly: true, webAccess: true }));
+    await deliver(offer);
+    expect(editor.getText()).toBe("Trip plan\n\nPack light.");
+    expect(current.writingOffer?.prepared.offer).toEqual(offer);
+  });
   it("only offers a rewrite of the sentence the writer is in", async () => {
     act(() => editor.commands.setTextSelection(3));
     await backgroundOffer(offer);

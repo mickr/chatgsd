@@ -146,7 +146,14 @@ interface ActiveRun {
   binding: RunBinding;
   noteId: string;
   cancelRequested: boolean;
-  suggestion?: { text: string; document: Editor["state"]["doc"]; requested: boolean; startersOnly?: true };
+  suggestion?: {
+    text: string;
+    document: Editor["state"]["doc"];
+    requested: boolean;
+    startersOnly?: true;
+    /** The run could read web pages, so nothing it proposes is applied unseen. */
+    web?: true;
+  };
   offer?: PreparedWritingOffer;
 }
 export interface WritingSuggestion {
@@ -596,7 +603,9 @@ export function AgentProvider({
             (run.offer ? !!prepared : editor.state.doc.eq(run.suggestion.document)) &&
             (run.suggestion.requested || !dismissedSuggestions.current.texts.includes(text.slice(0, 1200)));
         if (fresh) {
-          if (prepared && !run.suggestion.requested && appliesDirectly(editor, prepared)) applyOnOwnInitiative(payload.runId, editor, prepared);
+          // A page from the web can carry instructions. A run that could read one only ever offers.
+          if (prepared && !run.suggestion.requested && !run.suggestion.web && appliesDirectly(editor, prepared))
+            applyOnOwnInitiative(payload.runId, editor, prepared);
           else if (prepared) publishWritingOffer(payload.runId, prepared);
           else {
             setWritingSuggestion({ id: payload.runId, text, documentSession: run.binding.documentSession });
@@ -882,7 +891,8 @@ export function AgentProvider({
         noteId: binding.noteId,
         cancelRequested: false,
         ...(readOnly ? { suggestion: { text: "", document: editor.state.doc, requested: options.requested ?? false,
-          ...(options.startersOnly ? { startersOnly: true as const } : {}) } } : {}),
+          ...(options.startersOnly ? { startersOnly: true as const } : {}),
+          ...(options.research && webAccess ? { web: true as const } : {}) } } : {}),
       };
       runs.current.set(temporaryId, run);
       const sessionId =
