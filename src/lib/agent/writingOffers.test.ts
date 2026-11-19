@@ -19,6 +19,7 @@ function open(content: string | JSONContent) {
   editors.push(editor);
   return editor;
 }
+const step = (quote: string, reading = "This leads on.", sure = true) => ({ quote, reading, sure });
 const rewrite = (quote = "A rough sentence.", replacement = "A clearer sentence.") => ({
   kind: "rewrite", quote, replacement, explanation: "Make the thought easier to follow.",
   question: null, destination: null, trace: [], sources: [],
@@ -167,10 +168,53 @@ it("rejects accepting an offer in another note or another session of the same no
 it("grounds each argument-trace step and returns node ranges for the cursor", () => {
   const editor = open("<p>First premise.</p><p>Missing step.</p><p>Conclusion.</p>");
   const offer = prepareWritingOffer(editor, { ...rewrite("Missing step."), kind: "question", replacement: null,
-    question: "What connects the premise to the conclusion?", trace: ["First premise.", "Conclusion."] });
-  expect(offer.trace.map(range => editor.state.doc.textBetween(range.from, range.to))).toEqual(["First premise.", "Conclusion."]);
+    question: "What connects the premise to the conclusion?", trace: [step("First premise."), step("Conclusion.")] });
+  expect(offer.trace.map(range => editor.state.doc.textBetween(range!.from, range!.to))).toEqual(["First premise.", "Conclusion."]);
   expect(offer.traceBlocks.map(range => editor.state.doc.nodeAt(range.from)?.textContent)).toEqual(["First premise.", "Conclusion."]);
   expect(() => applyWritingOffer(editor, offer)).toThrow(/does not change/);
+});
+
+it("traces the reasoning behind any kind of offer, keeping what the agent read and where it was unsure", () => {
+  const editor = open("<p>First premise.</p><p>A rough sentence.</p>");
+  const offer = prepareWritingOffer(editor, { ...rewrite(), trace: [step("First premise.", "You set out the premise here.", false)] });
+  expect(offer.offer.trace).toEqual([{ quote: "First premise.", reading: "You set out the premise here.", sure: false }]);
+  expect(editor.state.doc.textBetween(offer.trace[0]!.from, offer.trace[0]!.to)).toBe("First premise.");
+  expect(writingOfferChatText(offer)).toContain('1. "First premise."\n(unsure) You set out the premise here.');
+  for (const trace of [
+    ["First premise."], [{ quote: "First premise.", reading: "Read." }], [{ ...step("First premise."), sure: "yes" }],
+    [step("First premise."), step("First premise."), step("First premise."), step("First premise."), step("First premise."), step("First premise.")],
+    [step("Not in the note.")],
+  ]) expect(() => prepareWritingOffer(editor, { ...rewrite(), trace })).toThrow();
+});
+
+it("lets a trace step cite the conversation ledger, but only with that entry's own text", () => {
+  const editor = open("<p>The bridge opened in May 1937.</p>");
+  const ledger = [{ id: "e2", kind: "web" as const, label: "Research: bridge", text: "It opened to traffic in May 1937.", urls: ["https://example.com/bridge"] }];
+  const traced = { ...rewrite("The bridge opened in May 1937.", "It opened in May 1937."),
+    trace: [{ ...step("opened to traffic in May 1937", "Research gave the date.", true), source: "e2" }] };
+  const offer = prepareWritingOffer(editor, traced, "outcome", ledger);
+  expect(offer.trace).toEqual([null]);
+  expect(offer.traceBlocks).toEqual([]);
+  expect(offer.provenance[0]?.kind).toBe("web");
+  expect(refreshWritingOffer(editor, offer)?.provenance[0]?.id).toBe("e2");
+  expect(writingOfferChatText(offer)).toContain('1. Research: bridge: "opened to traffic in May 1937"');
+  expect(() => prepareWritingOffer(editor, traced)).toThrow(/No context entry/);
+  expect(() => prepareWritingOffer(editor, { ...traced, trace: [{ ...traced.trace[0], quote: "opened in 1950" }] }, "outcome", ledger)).toThrow();
+});
+
+it("ends an outcome trace on the whole highlight while it still holds the text it was asked about", () => {
+  const editor = open("<p>First point.</p><p>Second point, the one I mean.</p>");
+  const block = { from: 0, to: editor.state.doc.content.size };
+  const text = editor.state.doc.textBetween(block.from, block.to, "\n");
+  const question = { ...rewrite("the one I mean"), kind: "question", replacement: null, question: "Which one?" };
+  expect(prepareWritingOffer(editor, question, "outcome", [], { ...block, text }).outcome).toEqual({ ...block, text, paragraphs: 2 });
+  expect(prepareWritingOffer(editor, question, "outcome", [], { ...block, text: "Different text" }).outcome).toBeUndefined();
+  expect(prepareWritingOffer(editor, question, "outcome", [], { from: 4, to: 4 }).outcome).toBeUndefined();
+  const prepared = prepareWritingOffer(editor, question, "outcome", [], { ...block, text });
+  expect(refreshWritingOffer(editor, prepared)?.outcome).toEqual({ ...block, text, paragraphs: 2 });
+  // Typing inside the highlight keeps it as the outcome.
+  editor.commands.insertContentAt(3, "x");
+  expect(refreshWritingOffer(editor, { ...prepared, outcome: { ...prepared.outcome!, to: block.to + 1 } })?.outcome?.text).toContain("Fixrst");
 });
 
 it("requires safe evidence links and rejects incompatible or oversized payloads", () => {
@@ -184,7 +228,6 @@ it("requires safe evidence links and rejects incompatible or oversized payloads"
     { ...rewrite(), extra: true }, { ...rewrite(), question: "Unexpected question?" },
     { ...rewrite(), replacement: "One paragraph.\nAnother paragraph." }, { ...rewrite(), quote: "x".repeat(6001) },
     { ...rewrite(), sources: evidence.sources }, { ...evidence, sources: [] },
-    { ...rewrite(), kind: "question", replacement: null, question: "Why?", trace: ["a", "b", "c", "d"] },
     { ...rewrite(), kind: "question", replacement: null, question: null },
   ]) expect(() => prepareWritingOffer(editor, invalid)).toThrow();
 });
@@ -194,7 +237,7 @@ it("stages all offer details as readable chat context without editing", () => {
   const before = editor.getJSON();
   for (const args of [
     rewrite(), move(),
-    { ...rewrite(), kind: "question", replacement: null, question: "What supports this?", trace: ["The argument."] },
+    { ...rewrite(), kind: "question", replacement: null, question: "What supports this?", trace: [step("The argument.")] },
     { ...rewrite(), kind: "evidence", replacement: null,
       sources: [{ title: "Source", url: "https://example.com/source", excerpt: "Relevant evidence." }] },
   ]) {
@@ -320,4 +363,17 @@ it("previews both versions in the surrounding paragraph before applying the sele
   expect(editor.state.doc.firstChild!.textContent).toBe("Before. Another approach. After.");
   editor.commands.undo();
   expect(editor.getJSON()).toEqual(before);
+});
+
+it("finds the block the cursor reads beside for each map step", async () => {
+  const { mapStepBlock } = await import("./writingOffers");
+  const editor = open("<p>First premise.</p><p>Second point.</p><p>The outcome.</p>");
+  const steps = [step("First premise."), { ...step("from the conversation"), source: "e1" }, step("Second point.")];
+  const ledger = [{ id: "e1", kind: "you" as const, label: "You said", text: "from the conversation" }];
+  const prepared = prepareWritingOffer(editor, { ...rewrite("The outcome."), trace: steps }, "outcome", ledger);
+  const text = (range: { from: number; to: number }) => editor.state.doc.nodeAt(range.from)?.textContent;
+  expect(text(mapStepBlock(editor.state.doc, prepared, 0))).toBe("First premise.");
+  // A step only in the conversation reads beside the passage it leads to.
+  expect(text(mapStepBlock(editor.state.doc, prepared, 1))).toBe("Second point.");
+  expect(text(mapStepBlock(editor.state.doc, prepared, 3))).toBe("The outcome.");
 });

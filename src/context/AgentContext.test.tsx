@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { ScratchDocument, setChangeMeta } from "../components/editor/AgentChanges";
+import { ArgumentMap } from "../components/editor/ArgumentMap";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as agent from "../services/agent";
 import * as notes from "../services/notes";
@@ -31,6 +32,8 @@ vi.mock("../services/agent", async (importOriginal) => ({
   reviewWriting: vi.fn(),
   returnThought: vi.fn(async () => {}),
   forgetMemory: vi.fn(async () => {}),
+  recordTraceMemory: vi.fn(async () => {}),
+  beginConversation: vi.fn(async () => "session-traced"),
   getNoteMemory: vi.fn(async () => ({ documentId: "test-document", revision: 0, entries: [] })),
   classifyInlineContext: vi.fn(),
   toolRespond: vi.fn(() => Promise.resolve()),
@@ -56,7 +59,7 @@ vi.mock("../services/notes", () => ({
   updateSettings: vi.fn(() => Promise.resolve()),
 }));
 vi.mock("./NotesContext", () => ({
-  useNotes: () => ({
+  useOptionalNotes: () => ({
     currentNote: mocks.currentNote,
     notesFolder: "/notes",
     selectNote: vi.fn(),
@@ -148,7 +151,7 @@ beforeEach(async () => {
   vi.mocked(agent.listModels).mockResolvedValue([{ id: "gpt-x", label: "GPT X" }]);
   vi.mocked(agent.startRun).mockResolvedValue({ runId: "run-1" });
   vi.mocked(agent.listConversations).mockResolvedValue([]);
-  editor = new Editor({ extensions: [StarterKit, ScratchDocument], content: "<p>Trip plan</p>" });
+  editor = new Editor({ extensions: [StarterKit, ScratchDocument, ArgumentMap], content: "<p>Trip plan</p>" });
   Object.assign(editor.storage.scratchDocument, { noteId: "trip", title: "Trip plan", session: 1 });
   root = createRoot(document.createElement("div"));
   await act(async () => {
@@ -1341,7 +1344,7 @@ describe("structured writing offers", () => {
     await act(async () => { await current.refreshStatus(); });
     await settle();
   }
-  async function deliver(args = offer) {
+  async function deliver(args: Record<string, unknown> = offer) {
     await act(async () => { await mocks.toolHandler?.({ runId: "run-1", requestId: "offer-1", name: "offer_writing_help", args }); });
     expect(current.writingOffer).toBeNull();
     act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
@@ -1455,6 +1458,110 @@ describe("structured writing offers", () => {
     vi.mocked(agent.classifyInlineContext).mockResolvedValueOnce({ intent: "research", confidence: 0.98, route: "deep" });
     await act(async () => { await current.requestWritingHelp("evidence"); });
     expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ model: "gpt-x", researchModel: "gpt-x", webAccess: true, readOnly: true }));
+  });
+  it("traces the argument in a highlighted passage and opens the map of the answer", async () => {
+    await readyWithModels();
+    Element.prototype.scrollIntoView = vi.fn();
+    const text = editor.getText();
+    const from = 1 + text.indexOf("Trip plan");
+    await act(async () => { await current.requestWritingHelp("outcome", { focus: { from, to: from + "Trip plan".length } }); });
+    const prompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(prompt).toContain("Work back from the passage I highlighted");
+    expect(prompt).toContain('"highlighted":"Trip plan"');
+    const traced = { ...offer, kind: "question", replacement: null, question: "Where does the trip go?",
+      trace: [{ quote: "Trip plan", reading: "You open with a plan.", sure: false }] };
+    vi.useFakeTimers();
+    await deliver(traced);
+    // It opens playing from the first step, one step at a time, and stops at the outcome.
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1400); });
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 1, playing: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(current.argumentMap?.active).toBe(1);
+    vi.useRealTimers();
+    // Picking a step takes over; closing and opening plays it again.
+    act(() => current.focusArgumentStep(0));
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: false });
+    act(() => current.toggleArgumentMap());
+    expect(current.argumentMap).toBeNull();
+    act(() => current.toggleArgumentMap());
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+  });
+  it("works back from a highlight through the conversation, accepting only steps the ledger holds", async () => {
+    await readyWithModels();
+    await act(async () => { await current.send("Make the trip plan quieter"); });
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+    const from = 1 + editor.getText().indexOf("Trip plan");
+    await act(async () => { await current.requestWritingHelp("outcome", { focus: { from, to: from + "Trip plan".length } }); });
+    const prompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(prompt).toContain('"ledger":[{"kind":"you","label":"You said","text":"Make the trip plan quieter","id":"e1"}]');
+    const runId = "run-1";
+    const traced = { ...offer, kind: "question", replacement: null, question: "Is quieter still the aim?",
+      trace: [{ quote: "trip plan quieter", reading: "You asked for a quieter trip.", sure: true, source: "e1" }] };
+    await act(async () => { await mocks.toolHandler?.({ runId, requestId: "offer-2", name: "offer_writing_help", args: traced }); });
+    expect(agent.toolRespond).toHaveBeenLastCalledWith("offer-2", true, expect.any(String));
+    act(() => mocks.eventHandler?.({ runId, event: { type: "done", stopReason: "completed" } }));
+    await settle();
+    expect(current.writingOffer?.prepared.provenance[0]?.kind).toBe("you");
+    expect(current.argumentMap).toEqual({ id: runId, active: 0, playing: true });
+    // The map joins the conversation, which gets a saved session to keep it in, and what it learned joins memory.
+    const record = current.conversation.items.find(item => item.type === "trace");
+    expect(record).toMatchObject({ id: `trace:${runId}`, requested: "outcome", outcome: { text: "Trip plan", paragraphs: 1 }, corrections: [] });
+    await settle();
+    expect(agent.beginConversation).toHaveBeenCalledWith("trip", "Traced: Trip plan");
+    expect(agent.saveConversation).toHaveBeenLastCalledWith("session-traced", expect.arrayContaining([expect.objectContaining({ type: "trace" })]));
+    expect(agent.recordTraceMemory).toHaveBeenCalledWith("/notes", "test-document", expect.any(String),
+      { kind: "insight", quote: "Trip plan", outcome: "Trip plan", learned: offer.explanation });
+
+    // Correcting a step keeps the writer's words on the map and as what they meant.
+    vi.mocked(agent.recordTraceMemory).mockClear();
+    await act(async () => { await current.requestWritingHelp("realign", { answer: "I meant a slow trip.", step: 0 }); });
+    expect(current.conversation.items.find(item => item.type === "trace")).toMatchObject({
+      corrections: [{ step: 0, quote: "trip plan quieter", readAs: "You asked for a quieter trip.", meant: "I meant a slow trip." }] });
+    expect(agent.recordTraceMemory).toHaveBeenCalledWith("/notes", "test-document", expect.any(String),
+      { kind: "meaning", quote: "trip plan quieter", meant: "I meant a slow trip.", read_as: "You asked for a quieter trip." });
+    act(() => mocks.eventHandler?.({ runId, event: { type: "done", stopReason: "completed" } }));
+    await settle();
+
+    // The next message to the main agent carries the map once.
+    await act(async () => { await current.send("Now tighten the opening"); });
+    const sent = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(sent).toContain("Since your last turn, the writer traced arguments");
+    expect(sent).toContain("The writer corrected step 1");
+    expect(sent).toContain("The writer's message:\nNow tighten the opening");
+    expect(current.conversation.items.find(item => item.type === "trace")).toMatchObject({ delivered: true });
+    expect([...current.conversation.items].reverse().find(item => item.type === "user")).toMatchObject({ text: "Now tighten the opening" });
+  });
+  it("takes Show passage to where the agent got lost, and tints it while the card is looked at", async () => {
+    await readyWithModels();
+    Element.prototype.scrollIntoView = vi.fn();
+    editor.commands.setContent("<p>First premise.</p><p>Trip plan</p>");
+    await act(async () => { await current.requestWritingHelp("question"); });
+    await deliver({ ...offer, kind: "question", replacement: null, question: "Why?",
+      trace: [{ quote: "First premise.", reading: "You start here.", sure: true, source: null }] });
+    const { offerPassageState } = await import("../components/editor/ArgumentMap");
+    act(() => current.highlightWritingOffer(true));
+    const source = current.writingOffer!.prepared.source;
+    expect(offerPassageState(editor)).toEqual({ ...source, flash: 0 });
+    act(() => current.showWritingOffer());
+    expect(offerPassageState(editor)).toMatchObject({ ...source, flash: expect.any(Number) });
+    expect(offerPassageState(editor)!.flash).toBeGreaterThan(0);
+    // The card's passage, not the first step of the trace.
+    expect(editor.state.doc.textBetween(source.from, source.to)).toBe("Trip plan");
+    act(() => current.highlightWritingOffer(false));
+    expect(offerPassageState(editor)).toBeNull();
+  });
+  it("sends a correction to a misread step with the earlier reasoning", async () => {
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("rewrite"); });
+    await deliver({ ...offer, trace: [{ quote: "Trip plan", reading: "You want a busy trip.", sure: true }] });
+    expect(current.argumentMap).toBeNull();
+    await act(async () => { await current.requestWritingHelp("realign", { answer: "I want a slow one.", step: 0 }); });
+    const prompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(prompt).toContain('you read "Trip plan" as: You want a busy trip.');
+    expect(prompt).toContain("I meant: I want a slow one.");
+    expect(prompt).toContain('"correctedStep":1');
   });
   it("marks an offer stale when its passage changes and prevents acceptance", async () => {
     await readyWithModels();

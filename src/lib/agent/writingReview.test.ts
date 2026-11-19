@@ -39,3 +39,11 @@ it("separates the agent's observation from the next moves it proposes for the no
   // At most four, no repeats, and nothing too long to be a button.
   expect(splitStarters(`Starters:\na\na\nb\n${"x".repeat(81)}\nc\nd\ne`).starters).toEqual(["a", "b", "c", "d"]);
 });
+
+it("never shows a starters-only reply as advice, even without the Starters: label", () => {
+  const reply = "Trace AX's testing role\nClarify the JSON-render comparison\nSummarize the bandwidth discussion\nPull out the design questions";
+  expect(splitStarters(reply, true)).toEqual({ advice: "", starters: [
+    "Trace AX's testing role", "Clarify the JSON-render comparison", "Summarize the bandwidth discussion", "Pull out the design questions",
+  ] });
+  expect(splitStarters(`Looks good.\nStarters:\n${reply}`, true)).toEqual({ advice: "", starters: reply.split("\n") });
+});

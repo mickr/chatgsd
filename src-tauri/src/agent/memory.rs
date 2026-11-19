@@ -7,7 +7,13 @@ pub enum Kind {
     Assignment,
     Thought,
     Choice,
+    /// What an argument trace learned: the agent's own reading, recorded by
+    /// the app, never the writer's words. The first to go when memory is full.
+    Insight,
 }
+
+/// A note keeps at most this many insights; a new one replaces the oldest.
+pub const MAX_INSIGHTS: usize = 4;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,8 +87,14 @@ impl WorkingMemory {
         if let Some(index) = existing {
             self.entries[index] = entry;
         } else {
-            if self.entries.len() >= 12 {
+            let insights = self.entries.iter().filter(|e| e.kind == Kind::Insight).count();
+            if entry.kind == Kind::Insight && insights >= MAX_INSIGHTS {
+                let oldest = self.entries.iter().position(|e| e.kind == Kind::Insight).expect("counted above");
+                self.entries.remove(oldest);
+            } else if self.entries.len() >= 12 {
+                // Finished work makes room first, then the agent's own insights.
                 let index = self.entries.iter().position(|e| e.status == Status::Done)
+                    .or_else(|| self.entries.iter().position(|e| e.kind == Kind::Insight))
                     .ok_or("This note already has twelve unfinished items. Keep existing commitments and ask the writer which to drop.")?;
                 self.entries.remove(index);
             }
@@ -149,5 +161,24 @@ mod tests {
         memory.update(update("new", 13, Status::Waiting)).unwrap();
         assert_eq!(memory.entries.len(), 12);
         assert!(!memory.entries.iter().any(|entry| entry.key == "task-7"));
+    }
+
+    fn insight(key: &str, revision: u64) -> Update {
+        let mut update = update(key, revision, Status::Open);
+        update.entry.kind = Kind::Insight;
+        update
+    }
+
+    #[test]
+    fn insights_replace_the_oldest_and_never_crowd_out_the_writers_work() {
+        let mut memory = WorkingMemory::default();
+        for i in 0..6 { memory.update(insight(&format!("insight-{i}"), i)).unwrap(); }
+        let keys: Vec<_> = memory.entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, ["insight-2", "insight-3", "insight-4", "insight-5"]);
+        for i in 0..8 { memory.update(update(&format!("task-{i}"), memory.revision, Status::Open)).unwrap(); }
+        assert_eq!(memory.entries.len(), 12);
+        memory.update(update("task-8", memory.revision, Status::Waiting)).unwrap();
+        assert!(!memory.entries.iter().any(|e| e.key == "insight-2"));
+        assert!(memory.entries.iter().any(|e| e.key == "task-0"));
     }
 }

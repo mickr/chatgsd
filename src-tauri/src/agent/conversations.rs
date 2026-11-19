@@ -292,6 +292,24 @@ fn readable_transcript(items: &[Value]) -> String {
                     let _ = write!(result, "Attached selection:\n{selection}\n");
                 }
             }
+            Some("trace") => {
+                if let Some(outcome) = item.pointer("/outcome/text").and_then(Value::as_str) {
+                    let _ = write!(result, "\nTraced back from:\n{outcome}\n");
+                }
+                if let Some(steps) = item.pointer("/offer/trace").and_then(Value::as_array) {
+                    for (index, step) in steps.iter().enumerate() {
+                        let _ = writeln!(result, "Step {}: \"{}\" {}", index + 1,
+                            step["quote"].as_str().unwrap_or_default(), step["reading"].as_str().unwrap_or_default());
+                    }
+                }
+                if let Some(learned) = item.pointer("/offer/explanation").and_then(Value::as_str) {
+                    let _ = write!(result, "What we learned:\n{learned}\n");
+                }
+                for correction in item["corrections"].as_array().into_iter().flatten() {
+                    let _ = write!(result, "User correction at step {}:\n{}\n",
+                        correction["step"].as_u64().map_or(0, |step| step + 1), correction["meant"].as_str().unwrap_or_default());
+                }
+            }
             Some("question") => {
                 for (field, label) in [("question", "Question"), ("answer", "User answer")] {
                     if let Some(text) = item.get(field).and_then(Value::as_str) {
@@ -736,7 +754,7 @@ pub async fn agent_note_memory(app: AppHandle, folder: PathBuf, note_id: String,
         let _lock = INDEX_LOCK.lock().await;
         let mut index = store.index().await?;
         let document = if let Some(id) = index.document_for(&note_id) { id.to_owned() } else {
-            let path = crate::abs_path_from_id(&folder, &note_id)?;
+            let path = super::document_path(&app, &folder, &note_id).await?;
             if !tokio::fs::try_exists(path).await.map_err(|e| e.to_string())? { return Err("The note was removed.".into()); }
             let id = index.ensure_document(&note_id);
             store.write(&store.index_path(), &index).await?;
@@ -802,9 +820,85 @@ pub async fn agent_observe_wording(app: AppHandle, folder: PathBuf, document_id:
     }).await
 }
 
+/// Starts a saved conversation for a note that has none, so a record made
+/// outside a message (an argument map) has somewhere to live. The first
+/// message sent in it starts a fresh Codex thread, as any new conversation does.
+#[tauri::command]
+pub async fn agent_begin_conversation(app: AppHandle, note_id: String, title: String) -> Result<String, String> {
+    let status = super::codex::account::status(&app).await;
+    let account = status.account.ok_or("Sign in to keep this conversation.")?.email;
+    let folder = super::notes_folder(&app).await?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    begin(&app, &folder, &note_id, &session_id, &title).await?;
+    initialize_codex(&app, &folder, &session_id, &account).await?;
+    Ok(session_id)
+}
+
+/// What an argument trace leaves in a note's memory: what the writer said they
+/// meant at a step (their words, kept as a choice), or what the trace learned
+/// (the agent's reading, kept as an insight).
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TraceMemory {
+    Meaning { quote: String, meant: String, read_as: String },
+    Insight { quote: Option<String>, outcome: String, learned: String },
+}
+
+fn clipped(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max { return text; }
+    format!("{}…", text.chars().take(max - 1).collect::<String>())
+}
+
+fn trace_entry(record: TraceMemory) -> Result<Entry, String> {
+    let key = |prefix: &str, value: &str| {
+        let digest = Sha256::digest(value.trim().as_bytes());
+        format!("{prefix}-{}", &format!("{digest:x}")[..24])
+    };
+    match record {
+        TraceMemory::Meaning { quote, meant, read_as } => {
+            if quote.trim().is_empty() || meant.trim().is_empty() { return Err("A correction needs the passage and what the writer meant.".into()); }
+            Ok(Entry { key: key("meaning", &quote), kind: Kind::Choice, status: Status::Open,
+                summary: clipped(&format!("The writer means: {meant}"), 400), quote: Some(clipped(&quote, 500)),
+                next: (!read_as.trim().is_empty()).then(|| clipped(&format!("It had been read as: {read_as}"), 400)) })
+        }
+        TraceMemory::Insight { quote, outcome, learned } => {
+            if outcome.trim().is_empty() || learned.trim().is_empty() { return Err("An insight needs its outcome and what was learned.".into()); }
+            Ok(Entry { key: key("insight", &outcome), kind: Kind::Insight, status: Status::Open,
+                summary: clipped(&learned, 400), quote: quote.filter(|q| !q.trim().is_empty()).map(|q| clipped(&q, 500)),
+                next: Some(clipped(&format!("Traced back from: {outcome}"), 400)) })
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn agent_record_trace_memory(app: AppHandle, folder: PathBuf, document_id: String, email: String,
+    record: TraceMemory) -> Result<(), String> {
+    let entry = trace_entry(record)?;
+    update_writer_memory(&app, &folder, &document_id, &email, |memory| {
+        memory.update(Update { revision: memory.revision, entry })
+    }).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_memory_keys_a_correction_by_its_passage_and_labels_insights_as_the_agents() {
+        let meaning = |meant: &str| trace_entry(TraceMemory::Meaning { quote: "Something to sit on.".into(),
+            meant: meant.into(), read_as: "A packing aid.".into() }).unwrap();
+        let first = meaning("A picnic rug");
+        assert_eq!(first.key, meaning("A cushion").key);
+        assert!(first.key.starts_with("meaning-"));
+        assert!(matches!(first.kind, Kind::Choice));
+        assert_eq!(first.summary, "The writer means: A picnic rug");
+        assert_eq!(first.next.as_deref(), Some("It had been read as: A packing aid."));
+        let insight = trace_entry(TraceMemory::Insight { quote: None, outcome: "x".repeat(600), learned: "The opening edit set the tone.".into() }).unwrap();
+        assert!(matches!(insight.kind, Kind::Insight));
+        assert!(insight.next.unwrap().chars().count() <= 400);
+        assert!(trace_entry(TraceMemory::Meaning { quote: " ".into(), meant: "m".into(), read_as: String::new() }).is_err());
+    }
 
     fn index() -> Index {
         let mut index = Index::default();

@@ -238,7 +238,7 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<Str
             };
             transcript.push_str(&format!("\nTool {name} {args}:\n{text}\n"));
             save_computer_context(app, ctx, &session_id, &account, saved.continuation.as_deref(), &transcript, &streamed).await?;
-            events::emit(app, &ctx.run_id, AgentEvent::ToolResult { call_id: call_id.into(), ok, output: text.chars().take(2000).collect() });
+            events::emit(app, &ctx.run_id, AgentEvent::ToolResult { call_id: call_id.into(), ok, output: shown_result(&text) });
             server.send(json!({"id":message["id"],"result":{"success":ok,"contentItems":content}})).await.map_err(other)?;
             continue;
         }
@@ -391,9 +391,32 @@ fn readable_item(item: &Value) -> Result<String, String> {
     Ok(format!("\n{text}\n"))
 }
 
+/// The part of a tool result the panel keeps. Long results keep their opening
+/// and their end, where research lists the pages it opened, so a later trace
+/// can still cite them.
+fn shown_result(text: &str) -> String {
+    const HEAD: usize = 1500;
+    const TAIL: usize = 1000;
+    let count = text.chars().count();
+    if count <= HEAD + TAIL { return text.to_owned(); }
+    let head: String = text.chars().take(HEAD).collect();
+    let tail: String = text.chars().skip(count - TAIL).collect();
+    format!("{head}\n…\n{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_tool_result_keeps_its_end_where_research_lists_sources() {
+        assert_eq!(shown_result("short"), "short");
+        let report = format!("{}\nSources:\nhttps://example.com/study", "a".repeat(4000));
+        let shown = shown_result(&report);
+        assert!(shown.starts_with(&"a".repeat(1500)));
+        assert!(shown.ends_with("https://example.com/study"));
+        assert!(shown.chars().count() < 2600);
+    }
 
     #[test]
     fn structured_window_rows_reach_both_the_agent_and_the_text_transcript() {

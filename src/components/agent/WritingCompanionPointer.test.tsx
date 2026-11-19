@@ -185,16 +185,17 @@ function multiParagraphOffer(kind: "question" | "move"): PreparedWritingOffer {
   const sourceBlock = blocks[2];
   return { noteId: "note", documentSession: 1, source: sourceBlock, sourceBlock,
     destination: kind === "move" ? blocks[0] : null,
-    trace: blocks.slice(0, 2), traceBlocks: blocks.slice(0, 2),
+    trace: blocks.slice(0, 2), traceBlocks: blocks.slice(0, 2), provenance: [null, null],
     offer: kind === "move" ? { kind, quote: "Final conclusion.", explanation: "Lead with this.",
       destination: "First premise.", replacement: null, question: null, trace: [], sources: [] }
       : { kind, quote: "Final conclusion.", explanation: "The conclusion needs a connection.",
         question: "How does the premise establish this?", replacement: null, destination: null,
-        trace: ["First premise.", "Missing connection."], sources: [] } };
+        trace: [{ quote: "First premise.", reading: "The premise.", sure: true },
+          { quote: "Missing connection.", reading: "Then a jump.", sure: false }], sources: [] } };
 }
-function renderOffer(offer: PreparedWritingOffer, replayTrigger = 0) {
+function renderOffer(offer: PreparedWritingOffer, replayTrigger = 0, followTarget: PreparedWritingOffer["sourceBlock"] | null = null) {
   act(() => root.render(<WritingCompanionPointer editor={editor} range={offer.sourceBlock} kind="clarity"
-    originRef={originRef} preparedOffer={offer} replayTrigger={replayTrigger} />));
+    originRef={originRef} preparedOffer={offer} replayTrigger={replayTrigger} followTarget={followTarget} />));
   pointer().animate = animate;
   flush();
 }
@@ -220,6 +221,29 @@ it("traces argument waypoints with a reading pause before settling at the questi
   finishLeg(2);
   expect(pointer().dataset.motion).toBe("settled");
   expect(editor.getJSON()).toEqual(before);
+});
+
+it("follows the map's active step from the opposite margin, hopping from step to step and staying put", () => {
+  const offer = multiParagraphOffer("move");
+  renderOffer(offer, 0, offer.traceBlocks[0]);
+  // It flies in from the companion once, to the right of the text, flipped to point back at it.
+  expect(animate).toHaveBeenCalledOnce();
+  expect(animate.mock.calls[0][1]).toMatchObject({ duration: 1100 });
+  expect(Number.parseFloat(pointer().style.left)).toBeGreaterThanOrEqual(740);
+  expect(pointer().dataset.direction).toBe("rtl");
+  expect(Number.parseFloat(pointer().style.top) + 2).toBe(170);
+  finishLeg(0);
+  expect(pointer().dataset.motion).toBe("settled");
+  // The next step is a short hop from where it rests, not another flight from the panel.
+  renderOffer(offer, 0, offer.traceBlocks[1]);
+  expect(animate).toHaveBeenCalledTimes(2);
+  expect(animate.mock.calls[1][1]).toMatchObject({ duration: 620 });
+  const [first] = animate.mock.calls[1][0] as Keyframe[];
+  expect(first.transform).toBe("translate(0px, -80px)");
+  expect(Number.parseFloat(pointer().style.top) + 2).toBe(250);
+  finishLeg(1);
+  expect(pointer().hidden).toBe(false);
+  expect(pointer().querySelector(".writing-companion-pointer-ghost")).toBeNull();
 });
 
 it("picks up a paragraph ghost and previews an earlier position entirely in the gutter", () => {

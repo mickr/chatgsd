@@ -9,11 +9,16 @@ export const SelectionCard = memo(function SelectionCard({
   running,
   onReveal,
   onClear,
+  onTrace,
+  tracing = false,
 }: {
   summary: SelectionSummary;
   running: boolean;
   onReveal: () => void;
   onClear: () => void;
+  /** Ask the agent to map the argument in this selection; absent when it can't be asked now. */
+  onTrace?: () => void;
+  tracing?: boolean;
 }) {
   const words = `${summary.words.toLocaleString()} ${summary.words === 1 ? "word" : "words"}`;
   return (
@@ -33,6 +38,16 @@ export const SelectionCard = memo(function SelectionCard({
           {running ? "Working on" : "Selection"} · {words}
           {summary.section && <> · in {summary.section}</>}
         </span>
+        {!running && onTrace && (
+          <button
+            type="button"
+            className="agent-selection-trace"
+            disabled={tracing}
+            onClick={onTrace}
+          >
+            Trace this argument
+          </button>
+        )}
         {!running && (
           <button
             type="button"

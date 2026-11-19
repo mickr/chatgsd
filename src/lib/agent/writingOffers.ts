@@ -3,8 +3,15 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { closeHistory } from "@tiptap/pm/history";
 import { TextSelection } from "@tiptap/pm/state";
 import { setChangeMeta } from "../../components/editor/AgentChanges";
+import { citedEntry, type ProvenanceEntry } from "./provenance";
 
 export interface WritingSource { title: string; url: string; excerpt: string }
+/**
+ * One step of the reasoning that led to an offer: a passage and what the agent
+ * took from it. source is null for the open note, or the id of a ledger entry
+ * (something the writer said, research, a connected service, another note, an edit).
+ */
+export interface WritingTraceStep { quote: string; reading: string; sure: boolean; source?: string | null }
 interface OfferBase {
   quote: string;
   explanation: string;
@@ -12,7 +19,7 @@ interface OfferBase {
   alternative?: string | null;
   question: string | null;
   destination: string | null;
-  trace: string[];
+  trace: WritingTraceStep[];
   sources: WritingSource[];
   /** Short answers the writer can pick for a question; absent when there are none. */
   options?: string[];
@@ -23,7 +30,9 @@ export type WritingOffer = OfferBase & (
   | { kind: "evidence"; replacement: null; question: null; destination: null }
   | { kind: "move"; replacement: null; question: null; destination: string }
 );
-export type WritingRequest = WritingOffer["kind"] | "compare" | "readback";
+/** realign: the writer corrected one step of a trace and asked the agent to think again.
+ * outcome: the writer highlighted a passage to work back from to how it got there. */
+export type WritingRequest = WritingOffer["kind"] | "compare" | "readback" | "realign" | "outcome";
 export interface WritingRange { from: number; to: number }
 export interface PreparedWritingOffer {
   offer: WritingOffer;
@@ -36,9 +45,19 @@ export interface PreparedWritingOffer {
   /** Whole node positions, suitable for the companion cursor. */
   sourceBlock: WritingRange;
   destination: WritingRange | null;
-  trace: WritingRange[];
+  /** Each trace step's text in the note, or null for a ledger step whose text isn't in the note. */
+  trace: (WritingRange | null)[];
+  /** The note steps' whole nodes, in order, for the companion cursor. */
   traceBlocks: WritingRange[];
+  /** Each trace step's ledger entry, or null for a step in the note. */
+  provenance: (ProvenanceEntry | null)[];
+  /** The ledger the offer was made against, kept so a refresh checks it the same way. */
+  ledger?: ProvenanceEntry[];
+  /** For an outcome trace, the whole highlight the trace works back from, its opening text and how many paragraphs it spans. */
+  outcome?: WritingRange & { text: string; paragraphs: number };
 }
+/** The highlight an outcome trace started from; text is checked when the offer is first prepared. */
+export interface WritingOutcome { from: number; to: number; text?: string }
 
 const OFFER_FIELDS = ["kind", "quote", "explanation", "replacement", "question", "destination", "trace", "sources"];
 const MAX_PASSAGE = 6000;
@@ -65,6 +84,7 @@ function replacementText(value: unknown): string {
 }
 
 const MAX_OPTIONS = 4;
+const MAX_TRACE = 5;
 const MAX_OPTION_CHARS = 120;
 
 function parseOffer(args: unknown): WritingOffer {
@@ -84,9 +104,16 @@ function parseOffer(args: unknown): WritingOffer {
   const destination = kind === "move" ? text(input.destination, MAX_PASSAGE, "The destination paragraph") : null;
   if ((kind !== "rewrite" && input.replacement !== null) || (kind !== "question" && input.question !== null) ||
       (kind !== "move" && input.destination !== null)) throw new Error("The writing offer mixes incompatible actions.");
-  if (!Array.isArray(input.trace) || input.trace.length > 3 || (kind !== "question" && input.trace.length))
-    throw new Error("Only a question may trace up to three passages.");
-  const trace = input.trace.map(value => text(value, MAX_PASSAGE, "A traced passage"));
+  if (!Array.isArray(input.trace) || input.trace.length > MAX_TRACE)
+    throw new Error(`Trace the reasoning in at most ${MAX_TRACE} steps.`);
+  const trace = input.trace.map(value => {
+    const step = object(value, ["quote", "reading", "sure"], "A trace step", ["source"]);
+    if (typeof step.sure !== "boolean") throw new Error("A trace step's sure must be true or false.");
+    if (step.source != null && typeof step.source !== "string") throw new Error("A trace step's source must be a ledger id or null.");
+    return { quote: text(step.quote, MAX_PASSAGE, "A traced passage"),
+      reading: text(step.reading, 400, "A trace step's reading").trim(), sure: step.sure,
+      ...(step.source ? { source: step.source as string } : {}) };
+  });
   if (!Array.isArray(input.sources) || input.sources.length > 3 ||
       (kind === "evidence" ? !input.sources.length : input.sources.length))
     throw new Error("An evidence offer needs one to three sources; other offers cannot include sources.");
@@ -135,13 +162,34 @@ function locate(doc: ProseMirrorNode, quote: string): LocatedPassage {
   return matches[0];
 }
 
+/**
+ * The highlight still where it was, holding the text it held when the trace was
+ * asked for. A highlight that has moved or gone ends the map at the offer's own passage.
+ */
+function outcomeRange(doc: ProseMirrorNode, outcome?: WritingOutcome): { outcome: NonNullable<PreparedWritingOffer["outcome"]> } | null {
+  if (!outcome || outcome.from < 0 || outcome.to > doc.content.size || outcome.from >= outcome.to) return null;
+  const text = doc.textBetween(outcome.from, outcome.to, "\n").trim();
+  // The request sends at most the highlight's opening, so that is what is checked.
+  if (!text || (outcome.text !== undefined && !text.startsWith(outcome.text.trim()))) return null;
+  let paragraphs = 0;
+  doc.nodesBetween(outcome.from, outcome.to, node => {
+    if (node.isTextblock) { paragraphs++; return false; }
+  });
+  return { outcome: { from: outcome.from, to: outcome.to, text: text.slice(0, 4000), paragraphs: Math.max(1, paragraphs) } };
+}
+
+function tryLocate(doc: ProseMirrorNode, quote: string): LocatedPassage | null {
+  try { return locate(doc, quote); } catch { return null; }
+}
+
 /** Memory can refer to a passage without moving either caret. */
 export function validateMemoryAnchor(editor: Editor, quote: unknown): void {
   locate(editor.state.doc, text(quote, 500, "The memory anchor"));
 }
 
 /** Preparing an offer is read-only. It cannot select, focus, scroll, or edit the note. */
-export function prepareWritingOffer(editor: Editor, args: unknown, requested?: WritingRequest): PreparedWritingOffer {
+export function prepareWritingOffer(editor: Editor, args: unknown, requested?: WritingRequest,
+  ledger?: ProvenanceEntry[], outcome?: WritingOutcome): PreparedWritingOffer {
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || !scope?.noteId) throw new Error("Open a note before reviewing a writing offer.");
   const offer = parseOffer(args);
@@ -159,7 +207,9 @@ export function prepareWritingOffer(editor: Editor, args: unknown, requested?: W
     if (target.block.from >= source.block.from) throw new Error("Choose an earlier paragraph as the move destination.");
     destination = target.block;
   }
-  const trace = offer.trace.map(quote => locate(editor.state.doc, quote));
+  const provenance = offer.trace.map(step => step.source ? citedEntry(ledger ?? [], step.source, step.quote) : null);
+  // A step from the conversation is also anchored in the note when its text is there, like a sentence an edit wrote.
+  const trace = offer.trace.map((step, index) => provenance[index] ? tryLocate(editor.state.doc, step.quote) : locate(editor.state.doc, step.quote));
   const offset = source.text.from - source.block.from - 1;
   const previewContext = offer.alternative ? {
     before: source.node.textContent.slice(Math.max(0, offset - 350), offset),
@@ -167,14 +217,33 @@ export function prepareWritingOffer(editor: Editor, args: unknown, requested?: W
     following: editor.state.doc.nodeAt(source.block.to)?.textContent.slice(0, 350) ?? "",
   } : undefined;
   return { offer, requested, previewContext, noteId: scope.noteId, documentSession: scope.session, source: source.text,
-    sourceBlock: source.block, destination, trace: trace.map(item => item.text), traceBlocks: trace.map(item => item.block) };
+    sourceBlock: source.block, destination, trace: trace.map(item => item?.text ?? null),
+    traceBlocks: trace.flatMap(item => item ? [item.block] : []), provenance, ...(ledger ? { ledger } : {}),
+    ...(outcomeRange(editor.state.doc, outcome) ?? {}) };
 }
 
 /** Unrelated typing can move anchors; changed or ambiguous passages invalidate them. */
 export function refreshWritingOffer(editor: Editor, prepared: PreparedWritingOffer): PreparedWritingOffer | null {
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || scope?.noteId !== prepared.noteId || scope?.session !== prepared.documentSession) return null;
-  try { return prepareWritingOffer(editor, prepared.offer, prepared.requested); } catch { return null; }
+  // The highlight was checked when the offer was made; the writer may since have edited inside it.
+  const outcome = prepared.outcome && { from: prepared.outcome.from, to: prepared.outcome.to };
+  try { return prepareWritingOffer(editor, prepared.offer, prepared.requested, prepared.ledger, outcome); } catch { return null; }
+}
+
+/**
+ * The block the cursor reads beside for one map step: the step's own passage, or
+ * for a step only in the conversation, the next passage it leads to, and for the
+ * outcome, the passage the offer is about.
+ */
+export function mapStepBlock(doc: ProseMirrorNode, prepared: PreparedWritingOffer, active: number | null): WritingRange {
+  for (let index = active ?? 0; index < prepared.trace.length; index++) {
+    const range = prepared.trace[index];
+    if (!range) continue;
+    const $pos = doc.resolve(range.from);
+    return { from: $pos.before($pos.depth), to: $pos.after($pos.depth) };
+  }
+  return prepared.sourceBlock;
 }
 
 /** Longer rewrites are shown first: the writer should read them before they land. */
@@ -198,11 +267,14 @@ export function writingOfferChatText(prepared: PreparedWritingOffer, draft?: str
   const parts = ["Writing companion suggestion", `Passage:\n${offer.quote}`, offer.explanation];
   if (offer.kind === "rewrite") parts.push(`Proposed wording:\n${draft ?? offer.replacement}`);
   if (offer.kind === "question") {
-    if (offer.trace.length) parts.push(`Argument passages:\n${offer.trace.join("\n\n")}`);
     parts.push(`Question:\n${offer.question}`);
     if (draft?.trim()) parts.push(`My answer:\n${draft.trim()}`);
   }
   if (offer.kind === "move") parts.push(`Proposed position: before this paragraph:\n${offer.destination}`);
+  if (offer.trace.length) parts.push(`How you got there:\n${offer.trace.map((step, index) => {
+    const entry = prepared.provenance[index];
+    return `${index + 1}. ${entry ? `${entry.label}: ` : ""}"${step.quote}"\n${step.sure ? "" : "(unsure) "}${step.reading}`;
+  }).join("\n")}`);
   if (offer.kind === "evidence") parts.push(`Sources:\n${offer.sources.map(source =>
     `${source.title}\n${source.url}\n${source.excerpt}`).join("\n\n")}`);
   return parts.join("\n\n");

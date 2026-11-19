@@ -13,14 +13,17 @@ const MAX_STARTER_CHARS = 80;
 /**
  * Split a check-in reply into its observation and the next moves the agent
  * proposes for this note. Anything that isn't a short plain line is dropped.
+ * A reply asked for starters only is never advice, even when the model leaves
+ * out the Starters: label.
  */
-export function splitStarters(reply: string): { advice: string; starters: string[] } {
+export function splitStarters(reply: string, startersOnly = false): { advice: string; starters: string[] } {
   const mark = STARTERS_MARK.exec(reply);
-  if (!mark) return { advice: reply, starters: [] };
-  const starters = reply.slice(mark.index + mark[0].length).split("\n")
+  if (!mark && !startersOnly) return { advice: reply, starters: [] };
+  const start = mark ? mark.index + mark[0].length : 0;
+  const starters = reply.slice(start).split("\n")
     .map((line) => line.replace(/^[\s\-*•\d.)]+/, "").replace(/^["“]|["”]$/g, "").trim())
     .filter((line) => line && line.length <= MAX_STARTER_CHARS);
-  return { advice: reply.slice(0, mark.index), starters: [...new Set(starters)].slice(0, MAX_STARTERS) };
+  return { advice: startersOnly || !mark ? "" : reply.slice(0, mark.index), starters: [...new Set(starters)].slice(0, MAX_STARTERS) };
 }
 
 const MAX_PARAGRAPHS = 24;
@@ -31,7 +34,8 @@ const MAX_PASSAGE = 5900;
  * the cursor, or with `whole` an overview of the note. A note that fits is sent
  * as it is either way, so the two views of a short note are the same passage.
  */
-export function writingPassage(editor: Editor, whole = false) {
+/** around centres the passage on a position other than the writer's selection, such as an attached highlight. */
+export function writingPassage(editor: Editor, whole = false, around?: number) {
   const { doc, selection } = editor.state;
   const ranges: Array<{ from: number; to: number }> = [];
   let passage = "";
@@ -58,8 +62,9 @@ export function writingPassage(editor: Editor, whole = false) {
       return { passage, ranges };
     }
   }
-  const start = Math.max(0, selection.to - 3000);
-  const end = Math.min(doc.content.size, selection.to + 3000);
+  const centre = Math.min(around ?? selection.to, doc.content.size);
+  const start = Math.max(0, centre - 3000);
+  const end = Math.min(doc.content.size, centre + 3000);
   doc.nodesBetween(start, end, (node, pos) => {
     if (!node.isTextblock) return;
     if (ranges.length >= 24 || passage.length >= 5900) return false;

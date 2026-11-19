@@ -1,0 +1,107 @@
+.argument-map-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 5;
+  overflow: visible;
+  pointer-events: none;
+  color: var(--color-text);
+}
+.argument-map-arrow {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  opacity: .4;
+  transition: opacity 160ms ease;
+}
+.argument-map-arrow[data-unsure] { stroke-dasharray: 3 3; }
+.argument-map-arrow[data-active] { opacity: .85; }
+#argument-map-arrowhead path { fill: var(--color-text); opacity: .6; }
+.argument-map-node {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.argument-map-node circle, .argument-map-node rect {
+  fill: var(--color-bg);
+  stroke: currentColor;
+  stroke-width: 1.4;
+  transition: fill 160ms ease;
+}
+.argument-map-node[data-unsure] circle { stroke-dasharray: 2.5 2; }
+.argument-map-node[data-decision] rect { fill: currentColor; }
+.argument-map-node[data-active] circle { fill: var(--color-text); }
+.argument-map-node text {
+  fill: currentColor;
+  font-size: 9px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.argument-map-node[data-active] text { fill: var(--color-bg); }
+
+.argument-map-step, .argument-map-decision {
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 160ms ease;
+}
+.argument-map-step { background: color-mix(in srgb, var(--color-selection) 45%, transparent); }
+.argument-map-step[data-unsure] {
+  background: none;
+  text-decoration: underline dashed color-mix(in srgb, var(--color-text) 55%, transparent);
+  text-underline-offset: 4px;
+}
+.argument-map-decision { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.argument-map-active { background: var(--color-selection); }
+
+@media (prefers-reduced-motion: reduce) {
+  .argument-map-arrow, .argument-map-node circle, .argument-map-step, .argument-map-decision { transition: none; }
+}
+.argument-map-via rect { fill: var(--color-bg); stroke: currentColor; stroke-width: 1; stroke-dasharray: 2 1.5; }
+.argument-map-via text { fill: currentColor; font-size: 7.5px; font-weight: 600; letter-spacing: .02em; user-select: none; }
+.argument-map-via { pointer-events: auto; }
+/* The outcome rail differs from arrows by weight and opacity, never dashes: dashes mean unsure. */
+.argument-map-rail path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; opacity: .5; }
+.argument-map-rail-focus { fill: currentColor; }
+.argument-map-rail[data-active] path { opacity: .8; }
+
+.argument-map-outcome {
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 160ms ease;
+}
+.argument-map-outcome-active { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.argument-map-focus {
+  text-decoration: underline solid color-mix(in srgb, var(--color-text) 70%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+  border-radius: 2px;
+}
+.argument-map-focus.argument-map-active { background: var(--color-selection); }
+@media (prefers-reduced-motion: reduce) { .argument-map-outcome { transition: none; } }
+
+/* The passage the open card is about: tinted while you look at the card, flashed when you jump to it. */
+.agent-offer-passage {
+  background: color-mix(in srgb, var(--color-selection) 55%, transparent);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.agent-offer-passage-flash { animation: agent-offer-passage-flash 1.6s ease-out forwards; }
+@keyframes agent-offer-passage-flash {
+  0%, 35% { background: var(--color-selection); box-shadow: 0 0 0 3px var(--color-selection); }
+  100% { background: color-mix(in srgb, var(--color-selection) 55%, transparent); box-shadow: 0 0 0 3px transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .agent-offer-passage-flash { animation: none; background: var(--color-selection); } }
+
+/* A diagram shows its drawing, not its source, so a passage inside one marks the whole drawing. */
+.mermaid-wrapper:has(.agent-offer-passage) .mermaid-preview { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-selection) 70%, transparent); }
+.mermaid-wrapper:has(.agent-offer-passage-flash) .mermaid-preview { animation: agent-offer-diagram-flash 1.6s ease-out forwards; }
+.mermaid-wrapper:has(:is(.argument-map-step, .argument-map-focus)) .mermaid-preview { box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-selection) 50%, transparent); }
+.mermaid-wrapper:has(.argument-map-active) .mermaid-preview { box-shadow: 0 0 0 3px var(--color-selection); }
+@keyframes agent-offer-diagram-flash {
+  0%, 35% { box-shadow: 0 0 0 5px var(--color-selection); }
+  100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-selection) 70%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .mermaid-wrapper:has(.agent-offer-passage-flash) .mermaid-preview { animation: none; } }

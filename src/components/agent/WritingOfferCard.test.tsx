@@ -23,7 +23,7 @@ const rewrite: WritingOffer = { ...base, kind: "rewrite", replacement: "A cleare
 function controls(offer: WritingOffer = rewrite): WritingOfferControls {
   const prepared: PreparedWritingOffer = { offer, noteId: "note", documentSession: 1,
     source: { from: 1, to: 24 }, sourceBlock: { from: 0, to: 25 }, destination: null,
-    trace: [], traceBlocks: [] };
+    trace: [], traceBlocks: [], provenance: offer.trace.map(() => null) };
   return { id: "writing-1", offer: prepared, stale: false, busy: false,
     onAccept: vi.fn(), onAnswer: vi.fn(), onShow: vi.fn(), onDismiss: vi.fn(), onAddToChat: vi.fn() };
 }
@@ -121,7 +121,7 @@ it("asks one question and sends the answer only after explicit submission", () =
   expect(button("Send answer").disabled).toBe(true);
   type("  Because the incentives changed.  ");
   expect(props.onAnswer).not.toHaveBeenCalled();
-  click("Trace argument");
+  click("Show passage");
   expect(props.onShow).toHaveBeenCalledOnce();
   click("Send answer");
   expect(props.onAnswer).toHaveBeenCalledExactlyOnceWith("Because the incentives changed.");
@@ -232,4 +232,72 @@ it("accepts the shared card in assistant specs without coercing malformed offer 
     <AgentSpec spec={malformed} />
   </WritingOfferContext.Provider>));
   expect(container.querySelectorAll("button")).toHaveLength(0);
+});
+
+it("maps how the agent got to an offer and sends a correction to the step it misread", () => {
+  const traced: WritingOffer = { ...rewrite, trace: [
+    { quote: "The premise.", reading: "You start from the premise.", sure: true },
+    { quote: "The leap.", reading: "I took this as a cause.", sure: false },
+  ] };
+  const map = { open: false, active: null, onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn() };
+  const props = { ...controls(traced), map };
+  render(props);
+  expect(container.querySelector(".argument-map-steps")).toBeNull();
+  click("How I got here");
+  expect(map.onToggle).toHaveBeenCalledOnce();
+  render({ ...props, map: { ...map, open: true, active: 1 } });
+  const steps = [...container.querySelectorAll(".argument-map-steps > li")];
+  expect(steps).toHaveLength(3);
+  expect(steps[1].hasAttribute("data-unsure")).toBe(true);
+  expect(steps[1].hasAttribute("data-active")).toBe(true);
+  expect(steps[1].textContent).toContain("I assumed this");
+  expect(steps[2].textContent).toContain("So: Make the connection concrete.");
+  act(() => steps[2].querySelector("button")!.click());
+  expect(map.onFocus).toHaveBeenCalledWith(2);
+  act(() => (steps[1].querySelector(".argument-map-steps-realign") as HTMLButtonElement).click());
+  expect(button("Re-think from here").disabled).toBe(true);
+  type("It's a correlation, not a cause.");
+  click("Re-think from here");
+  expect(map.onRealign).toHaveBeenCalledExactlyOnceWith(1, "It's a correlation, not a cause.");
+  expect(props.onAccept).not.toHaveBeenCalled();
+});
+
+it("offers no map when the agent recorded no reasoning", () => {
+  render({ ...controls(), map: { open: false, active: null, onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn() } });
+  expect(button("How I got here")).toBeUndefined();
+});
+
+it("ends an outcome trace on the whole highlight and names the sentence the question is about", () => {
+  const question: WritingOffer = { ...base, kind: "question", question: "Is this a packing aid?",
+    quote: "Something to sit on if we want it.", explanation: "The opening edit set the tone.",
+    trace: [{ quote: "Bring a blanket.", reading: "You started with comfort.", sure: true }] };
+  const props = controls(question);
+  const map = { open: true, active: 1, onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn() };
+  render({ ...props, map, offer: { ...props.offer, requested: "outcome",
+    outcome: { from: 0, to: 80, text: "Bring a blanket.\nSomething to sit on if we want it.", paragraphs: 2 } } });
+  const rows = container.querySelectorAll(".argument-map-steps > li");
+  const last = rows[rows.length - 1];
+  expect(last.textContent).toContain("Your highlight · 2 paragraphs");
+  expect(last.querySelector(".argument-map-steps-outcome")?.textContent).toBe("Bring a blanket.\nSomething to sit on if we want it.");
+  expect(last.textContent).toContain("What we learned: The opening edit set the tone.");
+  expect(last.querySelector(".argument-map-steps-focus")?.textContent).toBe("Something to sit on if we want it.");
+  expect(last.textContent).toContain("Is this a packing aid?");
+  act(() => (last.querySelector(".argument-map-steps-focus") as HTMLButtonElement).click());
+  expect(map.onFocus).toHaveBeenCalledWith(1);
+});
+
+it("connects the card to its passage: the quote takes you there, and looking at the card tints it", () => {
+  const props = { ...controls({ ...base, kind: "question", question: "What should the diagram show?" }), onHighlight: vi.fn() };
+  render(props);
+  const card = container.querySelector(".writing-offer-card")!;
+  act(() => { card.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body })); });
+  expect(props.onHighlight).toHaveBeenLastCalledWith(true);
+  const passage = container.querySelector<HTMLButtonElement>(".writing-offer-passage")!;
+  expect(passage.textContent).toContain(base.quote);
+  act(() => passage.click());
+  expect(props.onShow).toHaveBeenCalledOnce();
+  act(() => { card.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })); });
+  expect(props.onHighlight).toHaveBeenLastCalledWith(false);
+  render({ ...props, stale: true });
+  expect(container.querySelector<HTMLButtonElement>(".writing-offer-passage")!.disabled).toBe(true);
 });

@@ -24,6 +24,7 @@ import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
 import { AgentChanges, ScratchDocument, setChangeMeta } from "./AgentChanges";
+import { ArgumentMap } from "./ArgumentMap";
 import { AgentFollow } from "./AgentFollow";
 import {
   clearDocumentHistory,
@@ -441,6 +442,8 @@ function FormatBar({
 export interface PreviewModeData {
   content: string | null;
   title: string;
+  /** The document's ID: the file path, or a project file's `project:` ID. */
+  noteId: string;
   filePath: string;
   modified: number;
   externalChange: ExternalChange | null;
@@ -531,7 +534,7 @@ export function Editor({
   const currentNote = previewMode
     ? previewMode.content !== null
       ? {
-          id: previewMode.filePath,
+          id: previewMode.noteId,
           title: previewMode.title,
           content: previewMode.content,
           path: previewMode.filePath,
@@ -1099,6 +1102,7 @@ export function Editor({
     extensions: [
       ScratchDocument,
       AgentChanges,
+      ArgumentMap,
       StarterKit.configure({
         heading: {
           levels: [1, 2, 3, 4, 5, 6],

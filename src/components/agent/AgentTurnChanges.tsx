@@ -6,7 +6,8 @@ import type { NoteChange } from "../../lib/agent/turnChanges";
 export function conversationTurns(items: TranscriptItem[]) {
   const turns: Array<{ id: string; items: TranscriptItem[]; changes: NoteChange[] }> = [];
   for (const item of items) {
-    if (!turns.length || item.type === "user" || item.type === "activity")
+    // A map is a turn of its own: it came from a background run, not the turn before it.
+    if (!turns.length || item.type === "user" || item.type === "activity" || item.type === "trace")
       turns.push({ id: item.id, items: [], changes: [] });
     const turn = turns[turns.length - 1];
     if (item.type === "changes") turn.changes.push(item.change);

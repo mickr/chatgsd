@@ -1422,6 +1422,11 @@ table.not-prose th {
 :is(.agent-selection-preview, .agent-selection-quote) .agent-panel-prose :is(ul, ol) { padding-left: 15px; }
 .agent-selection-meta { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; color: var(--color-text-muted); }
 .agent-selection-clear { margin-left: auto; flex-shrink: 0; padding: 2px; border-radius: 4px; color: var(--color-text-muted); cursor: pointer; }
+.agent-selection-trace { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--color-text); cursor: pointer; }
+.agent-selection-trace:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.agent-selection-trace:disabled { opacity: .45; cursor: default; }
+.agent-selection-trace:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 3px; }
+.agent-selection-trace + .agent-selection-clear { margin-left: 0; }
 .agent-selection-clear:hover { background: var(--color-bg-muted); color: var(--color-text); }
 .agent-selection-quote { max-height: 5.5em; overflow: hidden; margin-bottom: 6px; padding: 1px 0 1px 8px; border-left: 2px solid color-mix(in srgb, var(--color-accent) 45%, transparent); color: var(--color-text-muted); mask-image: linear-gradient(to bottom, black 60%, transparent); }
 
@@ -1572,9 +1577,17 @@ table.not-prose th {
 .agent-panel-user > button { margin-top: 6px; }
 /* Long transcripts: skip layout and paint for messages scrolled out of view. Cards
    are left out because the containment would clip their focus rings. */
-.agent-panel-messages > :is(.agent-panel-user, .agent-panel-tool, .agent-panel-markdown) { content-visibility: auto; contain-intrinsic-size: auto 48px; }
+.agent-panel-messages > [data-transcript-item] > :is(.agent-panel-user, .agent-panel-tool, .agent-panel-markdown) { content-visibility: auto; contain-intrinsic-size: auto 48px; }
 @media (prefers-reduced-motion: reduce) {
   .agent-panel { transition: none; }
   .agent-panel-caret, .agent-panel-prose [data-animated="true"], .agent-presence-caret[data-writing="false"] { animation: none; }
 }
 .agent-panel:has(.agent-panel-resizing) { transition: none; }
+
+/* A conversation item a map step points back to. */
+.agent-transcript-flash { animation: agent-transcript-flash 1.6s ease-out; border-radius: 8px; }
+@keyframes agent-transcript-flash {
+  0%, 30% { box-shadow: 0 0 0 3px var(--color-selection); background-color: color-mix(in srgb, var(--color-selection) 35%, transparent); }
+  100% { box-shadow: 0 0 0 3px transparent; background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .agent-transcript-flash { animation: none; outline: 3px solid var(--color-selection); } }
