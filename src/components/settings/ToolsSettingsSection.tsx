@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Button, Select } from "../ui";
 import { AntigravityIcon, SpinnerIcon, ChatGPTIcon } from "../icons";
 import { useAgent } from "../../context/AgentContext";
+import { AboutYouSettings } from "./AboutYouSettings";
 import { AntigravitySignIn } from "../agent/AntigravitySignIn";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "../agent/ChatGPTAccount";
 import { ComputerPermissions } from "../agent/ComputerPermissions";
@@ -373,6 +374,7 @@ export function ToolsSettingsSection() {
           </div>
         )}
         <AntigravityIntegrationCard />
+        <AboutYouSettings />
         <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
           <label className="flex items-center justify-between gap-4 text-sm font-medium">
             Computer access

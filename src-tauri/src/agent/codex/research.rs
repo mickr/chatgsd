@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use url::Url;
 use super::{account, dynamic_tool, other, turn_result, transport::Server};
-use super::super::{events::{self, AgentEvent}, prompt, skills, tools::ToolOutput, web, AgentError, RunContext};
+use super::super::{events::{self, AgentEvent}, profile, prompt, skills, tools::ToolOutput, web, AgentError, RunContext};
 
 const MAX_SITES: usize = 6;
 const MAX_STEPS: usize = 80;
@@ -92,6 +92,7 @@ pub(super) async fn run(app: &tauri::AppHandle, ctx: &RunContext, model: Option<
     let question = if ctx.read_only {
         format!("{question}\n\nThis is a focused background writing check. Use at most six search/page-read steps. Open the primary pages with web_fetch before relying on them. Return a short report with source URLs, what each establishes, and what remains uncertain. Do not discover skills.")
     } else { question.to_owned() };
+    let question = format!("{}{question}", profile::context(app).await);
     let started = server.rpc("turn/start", json!({"threadId":thread,"input":[{"type":"text","text":question,"text_elements":[]}],"sandboxPolicy":{"type":"readOnly","networkAccess":false},"approvalPolicy":"on-request"})).await.map_err(other)?;
     let turn = started["turn"]["id"].as_str().ok_or_else(|| other("Codex returned no research turn ID"))?.to_owned();
     let mut pages = web::Pages::default();

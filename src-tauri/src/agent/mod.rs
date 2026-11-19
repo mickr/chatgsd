@@ -8,6 +8,7 @@ pub mod conversations;
 pub mod events;
 pub mod expression;
 pub mod note_edits;
+pub mod profile;
 pub mod projects;
 pub mod prompt;
 pub mod memory;

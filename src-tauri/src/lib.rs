@@ -3393,6 +3393,8 @@ pub fn run() {
             agent::agent_cancel_run,
             agent::agent_tool_respond,
             agent::agent_research_brief_default,
+            agent::profile::agent_profile,
+            agent::profile::agent_set_profile,
             agent::skills::agent_list_skills,
             agent::skills::agent_install_skill,
             agent::skills::agent_remove_skill,

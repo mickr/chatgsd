@@ -6,6 +6,7 @@ import { ToolsSettingsSection } from "./ToolsSettingsSection";
 
 const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown> }));
 vi.mock("../../context/AgentContext", () => ({ useAgent: () => state.agent }));
+vi.mock("./AboutYouSettings", () => ({ AboutYouSettings: () => null }));
 vi.mock("../../services/cli", () => ({
   getCliStatus: () => Promise.resolve({ supported: false, installed: false, path: null }),
 }));

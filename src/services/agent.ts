@@ -225,6 +225,15 @@ export const toolRespond = (requestId: string, ok: boolean, output: string) =>
   invoke<void>("agent_tool_respond", { requestId, ok, output });
 export const researchBriefDefault = () =>
   invoke<string>("agent_research_brief_default");
+/** What the writer says about themselves, sent with every agent request. */
+export interface WriterProfile {
+  name: string;
+  about: string;
+}
+export const getProfile = () => invoke<WriterProfile>("agent_profile");
+/** Resolves with the profile as saved: trimmed, the name on one line. */
+export const setProfile = (profile: WriterProfile) =>
+  invoke<WriterProfile>("agent_set_profile", { profile });
 export const listSkills = () => invoke<Skill[]>("agent_list_skills");
 /** Saves an offer as the user saw it; an archive must still match its digest. */
 export const installSkill = (
