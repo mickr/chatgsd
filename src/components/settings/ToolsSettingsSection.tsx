@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button, Select } from "../ui";
-import { SpinnerIcon, ChatGPTIcon } from "../icons";
+import { AntigravityIcon, SpinnerIcon, ChatGPTIcon } from "../icons";
 import { useAgent } from "../../context/AgentContext";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "../agent/ChatGPTAccount";
 import { ComputerPermissions } from "../agent/ComputerPermissions";
@@ -76,33 +76,36 @@ function AntigravityIntegrationCard() {
   const installing = !!agent.antigravityInstalling;
   const installProgress = agent.antigravityInstallProgress ?? null;
   const signingIn = !!agent.antigravitySigningIn;
+  const statusLabel = !enabled
+    ? "Off"
+    : installing
+      ? "Installing…"
+      : loading
+        ? "Checking…"
+        : agyStatus
+          ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status]
+          : "Enabled";
   return (
-    <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
+    <div className="mt-3 rounded-[10px] border border-border p-4 space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <label className="flex items-center gap-3 text-sm font-medium cursor-pointer">
+        <div className="flex items-center gap-2.5">
+          <AntigravityIcon className="w-4.5 h-4.5" />
+          <h3 className="text-sm font-medium">Antigravity</h3>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-text-muted">{statusLabel}</span>
           <input
             type="checkbox"
+            aria-label="Enable Antigravity"
             checked={enabled}
             disabled={installing}
             onChange={(event) => agent.setAntigravityEnabled?.(event.target.checked)}
             aria-describedby="antigravity-description"
           />
-          <span>Antigravity</span>
-        </label>
-        {enabled && (
-          <span className="text-xs text-text-muted">
-            {installing
-              ? "Installing…"
-              : loading
-                ? "Checking…"
-                : agyStatus
-                  ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status]
-                  : "Enabled"}
-          </span>
-        )}
+        </div>
       </div>
       <p id="antigravity-description" className="text-xs text-text-muted leading-relaxed">
-        Use Google Gemini models for prose generation and co-editing through your local{" "}
+        Antigravity powers Google Gemini and other models using your local{" "}
         <code className="font-mono text-[11px] bg-bg-muted px-1 py-0.5 rounded">agy</code> CLI and Antigravity plan.
         Models appear alongside ChatGPT in the agent panel.
       </p>
@@ -125,7 +128,7 @@ function AntigravityIntegrationCard() {
       {enabled && !installing && loading && (
         <div className="flex items-center gap-2 text-xs text-text-muted">
           <SpinnerIcon className="w-3.5 h-3.5 animate-spin" />
-          Checking local Antigravity session…
+          Checking your Antigravity session…
         </div>
       )}
       {enabled && error && (
@@ -134,15 +137,8 @@ function AntigravityIntegrationCard() {
         </p>
       )}
       {enabled && !installing && !loading && agyStatus?.status === "ready" && (
-        <div className="flex items-center justify-between text-xs text-text-muted">
-          <span>Using your local Antigravity plan</span>
-          <button
-            type="button"
-            className="hover:text-text"
-            onClick={() => { void agent.refreshAntigravityStatus?.(); }}
-          >
-            Refresh
-          </button>
+        <div className="text-xs space-y-1">
+          <p className="text-text-muted">Using your local Antigravity plan</p>
         </div>
       )}
       {enabled && !installing && !loading && agyStatus?.detail && (
@@ -167,23 +163,30 @@ function AntigravityIntegrationCard() {
         </div>
       )}
       {enabled && !installing && !loading && agyStatus?.status === "signed_out" && (
-        <Button
-          variant="outline"
-          size="sm"
+        <button
+          type="button"
+          className="agent-panel-chatgpt"
           disabled={signingIn}
           onClick={() => { void agent.signInAntigravity?.(); }}
         >
-          {signingIn ? "Opening Google sign-in…" : "Sign in with Google"}
-        </Button>
-      )}
-      {enabled && !installing && !loading && (agyStatus?.status === "error" || (error && agyStatus?.status !== "unavailable")) && (
-        <button
-          type="button"
-          className="text-xs text-text-muted hover:text-text"
-          onClick={() => { void agent.refreshAntigravityStatus?.(); }}
-        >
-          Try again
+          {signingIn ? (
+            <SpinnerIcon className="w-4 h-4 animate-spin" />
+          ) : (
+            <AntigravityIcon className="w-4.5 h-4.5" />
+          )}
+          {signingIn ? "Waiting for browser…" : "Continue with Antigravity"}
         </button>
+      )}
+      {enabled && !installing && !loading && (agyStatus?.status === "ready" || agyStatus?.status === "error" || (error && agyStatus?.status !== "unavailable")) && (
+        <div className="flex items-center justify-between text-xs">
+          <button
+            type="button"
+            className="text-text-muted hover:text-text"
+            onClick={() => { void agent.refreshAntigravityStatus?.(); }}
+          >
+            {agyStatus?.status === "ready" ? "Refresh" : "Try again"}
+          </button>
+        </div>
       )}
     </div>
   );
@@ -350,9 +353,19 @@ export function ToolsSettingsSection() {
       <section className="pb-2">
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-medium mb-0.5">Agent</h2>
-          <button type="button" className="text-xs text-text-muted hover:text-text" disabled={agent.statusLoading} onClick={() => { void agent.refreshStatus(); }}>Refresh</button>
+          <button
+            type="button"
+            className="text-xs text-text-muted hover:text-text"
+            disabled={agent.statusLoading || agent.antigravityLoading}
+            onClick={() => {
+              void agent.refreshStatus();
+              if (agent.antigravityEnabled) void agent.refreshAntigravityStatus?.();
+            }}
+          >
+            Refresh
+          </button>
         </div>
-        <p className="text-sm text-text-muted mb-4">Work alongside Codex in your notes ({mod}J), signed in with ChatGPT. Edits land directly while your caret stays yours.</p>
+        <p className="text-sm text-text-muted mb-4">Work alongside Codex or Antigravity in your notes ({mod}J). Edits land directly while your caret stays yours.</p>
         {agent.statusLoading && <div className="flex items-center gap-2 p-3 text-sm text-text-muted"><SpinnerIcon className="w-4 h-4 animate-spin" />Checking your ChatGPT account…</div>}
         {agent.statusError && <p role="alert" className="text-sm text-red-500 mb-3">{agent.statusError}</p>}
         {agent.status && (

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  AntigravityIcon,
   BoltIcon,
   ChatGPTIcon,
   CheckIcon,
   ChevronDownIcon,
-  SparkleIcon,
 } from "../icons";
 import { Tooltip } from "../ui";
 import { isAntigravityModel, type ModelInfo } from "../../services/agent";
@@ -286,7 +286,7 @@ export function ModelPicker({
                 aria-hidden="true"
               >
                 {usingAntigravity ? (
-                  <SparkleIcon className="w-3.5 h-3.5" />
+                  <AntigravityIcon className="w-3.5 h-3.5" />
                 ) : (
                   <ChatGPTIcon className="w-3.5 h-3.5" />
                 )}
@@ -356,7 +356,7 @@ export function ModelPicker({
                   className="model-picker-tab"
                   onClick={() => setTab("antigravity")}
                 >
-                  <SparkleIcon className="w-3.5 h-3.5" />
+                  <AntigravityIcon className="w-3.5 h-3.5" />
                   <span>Antigravity</span>
                 </button>
               </div>

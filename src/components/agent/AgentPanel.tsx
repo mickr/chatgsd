@@ -31,13 +31,13 @@ import {
   type SelectionSummary,
 } from "../../lib/agent/selection";
 import {
+  AntigravityIcon,
   ChatGPTIcon,
   CheckIcon,
   HistoryIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   PlusIcon,
-  SparkleIcon,
   SpinnerIcon,
   StopIcon,
   XIcon,
@@ -610,7 +610,7 @@ export function AgentPanel({
               <div className="flex items-center gap-2 text-xs font-medium">
                 {usingAntigravity ? (
                   <>
-                    <SparkleIcon className="w-4 h-4 text-[#4f7cff] dark:text-[#7aa2ff]" />
+                    <AntigravityIcon className="w-4 h-4 text-[#4f7cff] dark:text-[#7aa2ff]" />
                     Antigravity
                   </>
                 ) : (
