@@ -287,6 +287,75 @@ mod tests {
         tokio::fs::remove_dir_all(home).await.unwrap();
     }
 
+    /// The model refuses the turn as too long; the thread is compacted and
+    /// the same message is sent again over the summary.
+    #[tokio::test]
+    #[ignore = "requires an explicitly selected installed Codex runtime"]
+    async fn codex_runtime_compacts_and_retries_a_turn_that_exceeds_the_window() {
+        let binary = PathBuf::from(std::env::var_os("CHATGSD_CODEX_PATH").expect("select Codex with CHATGSD_CODEX_PATH"));
+        let home = std::env::temp_dir().join(format!("chatgsd-codex-test-{}", uuid::Uuid::new_v4()));
+        let provider = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", provider.server_addr());
+        let fixture = std::thread::spawn(move || {
+            let message = |id: &str, text: &str| json!({"type":"message","id":id,"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]});
+            let mut bodies = Vec::new();
+            for round in 0..3 {
+                let mut request = provider.recv_timeout(Duration::from_secs(30)).unwrap().expect("Codex model request");
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                bodies.push(body);
+                let events = if round == 0 {
+                    vec![json!({"type":"response.failed","response":{"id":"response-0","status":"failed","error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}})]
+                } else {
+                    let item = if round == 1 { message("summary", "Fixture summary of the plan.") } else { message("answer", "Tightened the opening.") };
+                    vec![
+                        json!({"type":"response.created","response":{"id":format!("response-{round}"),"status":"in_progress","output":[]}}),
+                        json!({"type":"response.output_item.added","output_index":0,"item":item}),
+                        json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                        json!({"type":"response.completed","response":{"id":format!("response-{round}"),"status":"completed","output":[item],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}),
+                    ]
+                };
+                let body = events.iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+                request.respond(tiny_http::Response::from_string(body).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "text/event-stream").unwrap()
+                )).unwrap();
+            }
+            bodies
+        });
+        let mut server = Server::spawn(&binary, &home).await.unwrap();
+        let config = json!({
+            "model_provider":"fixture",
+            "model_providers.fixture":{"name":"Local fixture","base_url":address,"wire_api":"responses","requires_openai_auth":false,"request_max_retries":0,"stream_max_retries":0},
+            "features.enable_request_compression":false
+        });
+        let started = server.rpc("thread/start", json!({"model":"gpt-5.4","config":config,"cwd":server.cwd,"sandbox":"read-only","approvalPolicy":"on-request"})).await.unwrap();
+        let thread = started["thread"]["id"].as_str().unwrap().to_owned();
+        let turn_params = json!({"threadId":thread,"input":[{"type":"text","text":"Tighten the opening.","text_elements":[]}]});
+        async fn finished(server: &mut Server, turn: &Value) -> Value {
+            loop {
+                let message = server.next().await.unwrap();
+                if message.get("id").is_some() { server.reject(&message).await.unwrap(); }
+                else if message["method"] == "turn/completed" && message["params"]["turn"]["id"] == *turn { return message["params"]["turn"].clone(); }
+            }
+        }
+        timeout(Duration::from_secs(60), async {
+            let started = server.rpc("turn/start", turn_params.clone()).await.unwrap();
+            let failed = finished(&mut server, &started["turn"]["id"]).await;
+            assert!(super::super::overflowed(&failed), "{failed}");
+            super::super::compact_thread(&mut server, &thread).await.unwrap();
+            let started = server.rpc("turn/start", turn_params.clone()).await.unwrap();
+            let retried = finished(&mut server, &started["turn"]["id"]).await;
+            assert_eq!(retried["status"], "completed", "{retried}");
+        }).await.unwrap();
+        let bodies = fixture.join().unwrap();
+        assert!(bodies[2].contains("Fixture summary of the plan."), "the retry is sent over the compacted context");
+        assert!(bodies[2].contains("Tighten the opening."));
+        server.child.start_kill().unwrap();
+        server.child.wait().await.unwrap();
+        drop(server);
+        tokio::fs::remove_dir_all(home).await.unwrap();
+    }
+
     #[tokio::test]
     #[ignore = "requires an explicitly selected installed Codex runtime"]
     async fn codex_runtime_browser_login_can_be_cancelled_without_opening_browser() {

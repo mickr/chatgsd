@@ -6,7 +6,7 @@ mod transport;
 use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use super::{computer::ComputerSession, conversations, events::{self, AgentEvent}, mcp, projects, prompt, skills, tools, AgentError, AgentErrorKind, AgentStatus, ChatGptAccount, ModelInfo, RunContext, RunResult, ServiceTierInfo};
+use super::{compaction, computer::ComputerSession, conversations, events::{self, AgentEvent}, mcp, projects, prompt, skills, tools, AgentError, AgentErrorKind, AgentStatus, ChatGptAccount, ModelInfo, RunContext, RunResult, ServiceTierInfo};
 use transport::Server;
 pub use account::status;
 
@@ -110,6 +110,43 @@ async fn native_skills(app: &tauri::AppHandle, server: &mut Server) -> Result<()
     Ok(())
 }
 
+/// Key of the summary kept for the history this engine replays.
+const ENGINE: &str = "codex";
+
+/// Writes history summaries on a tool-less ephemeral thread of the same server.
+struct Summaries<'a> {
+    server: &'a mut Server,
+    model: Option<&'a str>,
+}
+
+impl compaction::Summarizer for Summaries<'_> {
+    async fn summarize(&mut self, request: &str) -> Result<String, String> {
+        let server = &mut *self.server;
+        let started = server.rpc("thread/start", json!({"model":self.model,"cwd":server.cwd,"ephemeral":true,"sandbox":"read-only","approvalPolicy":"on-request","environments":[],"baseInstructions":compaction::INSTRUCTIONS})).await?;
+        let thread = started["thread"]["id"].as_str().ok_or("Codex returned no summary thread ID")?.to_owned();
+        server.rpc("turn/start", json!({"threadId":thread,"input":[{"type":"text","text":request,"text_elements":[]}],"sandboxPolicy":{"type":"readOnly","networkAccess":false},"approvalPolicy":"on-request"})).await?;
+        let mut summary = String::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let message = tokio::time::timeout_at(deadline, server.next()).await.map_err(|_| "Summarizing the conversation took too long".to_owned())??;
+            let params = &message["params"];
+            if message.get("id").is_some() {
+                server.reject(&message).await?;
+                continue;
+            }
+            if params["threadId"] != thread { continue; }
+            match message["method"].as_str().unwrap_or_default() {
+                "item/completed" if params["item"]["type"] == "agentMessage" => summary = params["item"]["text"].as_str().unwrap_or_default().to_owned(),
+                "turn/completed" => {
+                    turn_result(&params["turn"]).map_err(|error| error.message)?;
+                    return Ok(summary);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 pub async fn run(app: tauri::AppHandle, ctx: RunContext, options: TurnOptions, session_id: Option<String>, user_prompt: String, mut steer: Steers) -> RunResult {
     let mut changed = account::ACCOUNT_CHANGED.subscribe();
     let mut computer = None;
@@ -174,6 +211,14 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, options: TurnOpti
         if !historical.is_empty() { historical.push_str("\n\n"); }
         historical.push_str(context);
     }
+    if !historical.is_empty() {
+        let summary = conversations::load_summary(app, &ctx.notes_folder, &session_id, ENGINE).await.map_err(other)?;
+        let compacted = compaction::compact(&historical, summary, &compaction::REPLAY, &mut Summaries { server: &mut server, model: model.as_deref() }).await;
+        if let Some(summary) = compacted.summary.as_ref() {
+            conversations::save_summary(app, &ctx.notes_folder, &session_id, ENGINE, summary).await.map_err(other)?;
+        }
+        historical = compacted.context;
+    }
     let (method, params) = if !ctx.read_only && !ctx.computer_access && !refresh_tools && saved.thread_id.is_some() {
         params["threadId"] = json!(saved.thread_id);
         ("thread/resume", params)
@@ -208,8 +253,11 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, options: TurnOpti
     if let Some(tier) = service_tier.as_deref() {
         turn_params["serviceTier"] = json!(tier);
     }
-    let started = server.rpc("turn/start", turn_params).await.map_err(other)?;
+    let started = server.rpc("turn/start", turn_params.clone()).await.map_err(other)?;
     let mut turn = started["turn"]["id"].as_str().ok_or_else(|| other("Codex returned no turn ID"))?.to_owned();
+    // Codex compacts a thread as it fills. A turn that still overflows is
+    // compacted here and sent again, once per run.
+    let mut recovered = false;
     // Steering that arrived too late for a turn, sent as the next one.
     let mut undelivered = Vec::<String>::new();
     if !ctx.read_only && !ctx.computer_access { conversations::save_codex_thread(app, &ctx.notes_folder, &session_id, &account, &thread, saved.thread_id.as_deref(), tools::CATALOG_VERSION).await.map_err(other)?; }
@@ -317,6 +365,14 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, options: TurnOpti
                 save_computer_context(app, ctx, &session_id, &account, saved.continuation.as_deref(), &transcript, &streamed).await?;
             }
             "turn/completed" if params["turn"]["id"] == turn => {
+                if overflowed(&params["turn"]) {
+                    if recovered { return Err(other(TOO_LONG)); }
+                    recovered = true;
+                    compact_thread(&mut server, &thread).await.map_err(|_| other(TOO_LONG))?;
+                    let started = server.rpc("turn/start", turn_params.clone()).await.map_err(other)?;
+                    turn = started["turn"]["id"].as_str().ok_or_else(|| other("Codex returned no turn ID"))?.to_owned();
+                    continue;
+                }
                 turn_result(&params["turn"])?;
                 while let Ok(text) = steer.try_recv() {
                     transcript.push_str(&format!("\nUser:\n{text}\n"));
@@ -340,7 +396,8 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, options: TurnOpti
                     if let Some(tier) = service_tier.as_deref() {
                         next_params["serviceTier"] = json!(tier);
                     }
-                    let started = server.rpc("turn/start", next_params).await.map_err(other)?;
+                    turn_params = next_params;
+                    let started = server.rpc("turn/start", turn_params.clone()).await.map_err(other)?;
                     turn = started["turn"]["id"].as_str().ok_or_else(|| other("Codex returned no turn ID"))?.to_owned();
                     continue;
                 }
@@ -352,6 +409,29 @@ async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, options: TurnOpti
                 return Ok(());
             }
             _ => {}
+        }
+    }
+}
+
+const TOO_LONG: &str = "This conversation is too long for the model, even after compacting it. Start a new conversation; your notes and working memory carry over.";
+
+fn overflowed(turn: &Value) -> bool {
+    turn["status"] != "completed" && turn["error"]["codexErrorInfo"] == "contextWindowExceeded"
+}
+
+/// Has Codex compact the thread's own context and waits for it to finish.
+async fn compact_thread(server: &mut Server, thread: &str) -> Result<(), String> {
+    server.rpc("thread/compact/start", json!({"threadId":thread})).await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        let message = tokio::time::timeout_at(deadline, server.next()).await.map_err(|_| "Compacting the conversation took too long".to_owned())??;
+        if message.get("id").is_some() {
+            server.reject(&message).await?;
+            continue;
+        }
+        let params = &message["params"];
+        if params["threadId"] == thread && message["method"] == "turn/completed" {
+            return turn_result(&params["turn"]).map_err(|error| error.message);
         }
     }
 }
@@ -471,6 +551,14 @@ fn shown_result(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_failed_turn_that_exceeded_the_window_is_compacted_and_retried() {
+        assert!(overflowed(&json!({"status":"failed","error":{"codexErrorInfo":"contextWindowExceeded","message":"too long"}})));
+        assert!(!overflowed(&json!({"status":"failed","error":{"codexErrorInfo":"usageLimitExceeded"}})));
+        assert!(!overflowed(&json!({"status":"failed","error":{"codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":502}}}})));
+        assert!(!overflowed(&json!({"status":"completed"})));
+    }
 
     #[test]
     fn a_long_tool_result_keeps_its_end_where_research_lists_sources() {

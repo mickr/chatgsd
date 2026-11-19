@@ -7,7 +7,7 @@ mod mcp;
 mod transport;
 
 use super::{
-    conversations,
+    compaction, conversations,
     events::{self, AgentEvent},
     prompt, skills, tools, AgentError, AgentErrorKind, ModelInfo, RunContext, RunResult,
 };
@@ -46,6 +46,15 @@ pub struct AntigravityStatus {
 pub struct AntigravityLoginStart {
     pub auth_url: Option<String>,
     pub status: Option<AntigravityStatus>,
+}
+
+/// Writes history summaries in a tool-less session beside the conversation's.
+struct Summaries<'a>(&'a mut AcpClient);
+
+impl compaction::Summarizer for Summaries<'_> {
+    async fn summarize(&mut self, request: &str) -> Result<String, String> {
+        self.0.ask(compaction::INSTRUCTIONS, request).await
+    }
 }
 
 pub fn is_model(model: Option<&str>) -> bool {
@@ -365,6 +374,33 @@ pub async fn run(
                 .unwrap_or_default()
         } else {
             String::new()
+        };
+
+        let historical = if historical.is_empty() {
+            historical
+        } else {
+            let saved = conversations::load_summary(&app, &ctx.notes_folder, &session_id, ACCOUNT_KEY)
+                .await
+                .map_err(other)?;
+            let compacted = {
+                let mut summaries = Summaries(&mut *client);
+                tokio::select! {
+                    biased;
+                    _ = &mut cancel => None,
+                    compacted = compaction::compact(&historical, saved, &compaction::REPLAY, &mut summaries) => Some(compacted),
+                }
+            };
+            // Stopped while summarizing: the session never received its history, so it is not kept.
+            let Some(compacted) = compacted else {
+                client.dirty = true;
+                return Ok(());
+            };
+            if let Some(summary) = compacted.summary.as_ref() {
+                conversations::save_summary(&app, &ctx.notes_folder, &session_id, ACCOUNT_KEY, summary)
+                    .await
+                    .map_err(other)?;
+            }
+            compacted.context
         };
 
         let live_section = match live_note.as_deref() {

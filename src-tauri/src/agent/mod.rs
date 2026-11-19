@@ -1,6 +1,7 @@
 pub mod antigravity;
 mod bridge;
 pub mod codex;
+mod compaction;
 mod computer;
 pub mod computer_permissions;
 pub mod conversations;

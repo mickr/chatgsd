@@ -9,6 +9,9 @@
 //! - `<session>.model.json`: the old Responses history, retained as migration
 //!   input only. Encrypted reasoning is never sent to Codex.
 //! - `<session>.codex.json`: account-isolated native Codex thread IDs.
+//! - `<session>.compact.json`: summaries standing in for old turns when an
+//!   engine is sent the conversation as text (`compaction.rs`).
+use super::compaction::Summary;
 use super::memory::{Entry, Kind, Status, Update, WorkingMemory};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -372,7 +375,7 @@ pub async fn initialize_codex(
     let store = Store::open(app, notes_folder).await?;
     let _lock = INDEX_LOCK.lock().await;
     store.index().await?.session_for_save(session_id)?;
-    for suffix in ["", ".model", ".codex"] {
+    for suffix in ["", ".model", ".codex", ".compact"] {
         if tokio::fs::try_exists(store.session_file(session_id, suffix)?).await
             .map_err(|error| format!("Couldn't inspect conversation ownership: {error}"))?
         {
@@ -520,6 +523,24 @@ pub async fn complete_codex_migration(
 
 /// Readable panel transcript for continuing a conversation on another runtime
 /// or after an app restart.
+/// The saved summary standing in for the opening of the history one engine
+/// replays. Each engine replays different text, so each keeps its own.
+pub async fn load_summary(app: &AppHandle, notes_folder: &Path, session_id: &str, engine: &str) -> Result<Option<Summary>, String> {
+    let store = Store::open(app, notes_folder).await?;
+    let saved: Option<BTreeMap<String, Summary>> = store.read(&store.session_file(session_id, ".compact")?).await?;
+    Ok(saved.and_then(|mut summaries| summaries.remove(engine)))
+}
+
+pub async fn save_summary(app: &AppHandle, notes_folder: &Path, session_id: &str, engine: &str, summary: &Summary) -> Result<(), String> {
+    let store = Store::open(app, notes_folder).await?;
+    let _lock = INDEX_LOCK.lock().await;
+    store.index().await?.session_for_save(session_id)?;
+    let path = store.session_file(session_id, ".compact")?;
+    let mut summaries: BTreeMap<String, Summary> = store.read(&path).await?.unwrap_or_default();
+    summaries.insert(engine.to_owned(), summary.clone());
+    store.write(&path, &summaries).await
+}
+
 pub async fn transcript_context(
     app: &AppHandle,
     notes_folder: &Path,
@@ -661,7 +682,7 @@ pub async fn notes_deleted(app: &AppHandle, notes_folder: &Path, target: &str) {
         }
         store.write(&store.index_path(), &index).await?;
         for session in removed {
-            for suffix in ["", ".model", ".codex"] {
+            for suffix in ["", ".model", ".codex", ".compact"] {
                 let _ = tokio::fs::remove_file(store.session_file(&session, suffix)?).await;
             }
         }

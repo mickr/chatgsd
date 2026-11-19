@@ -15,6 +15,7 @@ use tokio::time::timeout;
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WARM_SESSIONS: usize = 6;
+const ASK_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(super) const BASE_BRIDGE_RULES: &str = "\
 Runtime bridge rules:
@@ -753,6 +754,78 @@ impl AcpClient {
         let _ = self
             .rpc("session/close", json!({ "sessionId": acp_session_id }))
             .await;
+    }
+
+    /// One reply from a session of its own that has no tools: the client's
+    /// model answers `text` under `system_prompt`, and the session is closed.
+    pub async fn ask(&mut self, system_prompt: &str, text: &str) -> Result<String, String> {
+        let response = self
+            .rpc(
+                "session/new",
+                json!({
+                    "cwd": self.cwd,
+                    "mcpServers": [],
+                    "_meta": { "antigravity": { "systemPrompt": { "append": system_prompt } } }
+                }),
+            )
+            .await?;
+        let session = response["sessionId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "Antigravity returned no session ID.".to_owned())?
+            .to_owned();
+        let prompt_id = self.next_id();
+        self.dirty = true;
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": prompt_id,
+            "method": "session/prompt",
+            "params": { "sessionId": session, "prompt": [{ "type": "text", "text": text }] },
+        }))
+        .await?;
+        let mut reply = String::new();
+        let finished = timeout(ASK_TIMEOUT, async {
+            loop {
+                let message = self.next_message().await?;
+                if message.get("id").and_then(Value::as_u64) == Some(prompt_id) && message.get("method").is_none() {
+                    return match message.get("error") {
+                        Some(error) => Err(error["message"].as_str().unwrap_or("Antigravity request failed").to_owned()),
+                        None => Ok(()),
+                    };
+                }
+                if message.get("id").is_some() && message["method"].as_str() == Some("session/request_permission") {
+                    self.send(json!({
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": { "outcome": { "outcome": "cancelled" } },
+                    }))
+                    .await?;
+                    continue;
+                }
+                let update = &message["params"]["update"];
+                if message["method"].as_str() == Some("session/update")
+                    && message["params"]["sessionId"].as_str() == Some(session.as_str())
+                    && update["sessionUpdate"].as_str() == Some("agent_message_chunk")
+                {
+                    if let Some(chunk) = update["content"]["text"].as_str() {
+                        reply.push_str(chunk);
+                    }
+                }
+            }
+        })
+        .await;
+        match finished {
+            Ok(Ok(())) => {
+                self.dirty = false;
+                self.close_session(&session).await;
+                Ok(reply)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                self.cancel_session(&session).await;
+                Err("Antigravity took too long to answer.".into())
+            }
+        }
     }
 
     pub async fn cancel_session(&mut self, acp_session_id: &str) {
