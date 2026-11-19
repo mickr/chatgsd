@@ -259,9 +259,11 @@ pub async fn agent_start_run(
             codex::run(
                 task_app.clone(),
                 task_ctx.clone(),
-                model,
-                effort,
-                service_tier,
+                codex::TurnOptions {
+                    model,
+                    effort,
+                    service_tier,
+                },
                 request.session_id,
                 request.prompt,
                 steered,

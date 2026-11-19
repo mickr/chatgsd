@@ -13,6 +13,12 @@ pub use account::status;
 /// Messages the user sends while a run is working.
 pub type Steers = tokio::sync::mpsc::UnboundedReceiver<String>;
 
+pub struct TurnOptions {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub service_tier: Option<String>,
+}
+
 fn other(message: impl Into<String>) -> AgentError { AgentError { kind: AgentErrorKind::Other, message: message.into() } }
 fn auth(message: impl Into<String>) -> AgentError { AgentError { kind: AgentErrorKind::Auth, message: message.into() } }
 
@@ -104,12 +110,12 @@ async fn native_skills(app: &tauri::AppHandle, server: &mut Server) -> Result<()
     Ok(())
 }
 
-pub async fn run(app: tauri::AppHandle, ctx: RunContext, model: Option<String>, effort: Option<String>, service_tier: Option<String>, session_id: Option<String>, user_prompt: String, mut steer: Steers) -> RunResult {
+pub async fn run(app: tauri::AppHandle, ctx: RunContext, options: TurnOptions, session_id: Option<String>, user_prompt: String, mut steer: Steers) -> RunResult {
     let mut changed = account::ACCOUNT_CHANGED.subscribe();
     let mut computer = None;
     let result = tokio::select! {
         result = async {
-            run_session(&app, &ctx, model, effort, service_tier, session_id, &user_prompt, &mut computer, &mut steer).await
+            run_session(&app, &ctx, options, session_id, &user_prompt, &mut computer, &mut steer).await
         } => result,
         _ = changed.changed() => Err(auth("The ChatGPT account changed or signed out. Start a new conversation.")),
     };
@@ -117,7 +123,8 @@ pub async fn run(app: tauri::AppHandle, ctx: RunContext, model: Option<String>, 
     result
 }
 
-async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, model: Option<String>, effort: Option<String>, service_tier: Option<String>, session_id: Option<String>, user_prompt: &str, computer: &mut Option<ComputerSession>, steer: &mut Steers) -> RunResult {
+async fn run_session(app: &tauri::AppHandle, ctx: &RunContext, options: TurnOptions, session_id: Option<String>, user_prompt: &str, computer: &mut Option<ComputerSession>, steer: &mut Steers) -> RunResult {
+    let TurnOptions { model, effort, service_tier } = options;
     // Check-ins are transient observations, never new saved chats or continuations
     // of an interactive thread that may carry broader tools and edit instructions.
     let session_id = if ctx.read_only { None } else { session_id };
