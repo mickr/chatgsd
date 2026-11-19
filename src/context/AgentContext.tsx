@@ -232,8 +232,11 @@ export interface AgentContextValue {
   antigravityStatus: agent.AntigravityStatus | null;
   antigravityLoading: boolean;
   antigravityError: string | null;
+  antigravityInstalling: boolean;
+  antigravityInstallProgress: agent.AntigravityInstallProgress | null;
   antigravitySigningIn: boolean;
   refreshAntigravityStatus: () => Promise<void>;
+  installAntigravity: () => Promise<void>;
   signInAntigravity: () => Promise<void>;
   /** The current note's unanswered ask_user question while its run is active. */
   pendingQuestion: QuestionItem | null;
@@ -326,6 +329,9 @@ export function AgentProvider({
   const [antigravityStatus, setAntigravityStatus] = useState<agent.AntigravityStatus | null>(null);
   const [antigravityLoading, setAntigravityLoading] = useState(false);
   const [antigravityError, setAntigravityError] = useState<string | null>(null);
+  const [antigravityInstalling, setAntigravityInstalling] = useState(false);
+  const [antigravityInstallProgress, setAntigravityInstallProgress] =
+    useState<agent.AntigravityInstallProgress | null>(null);
   const [antigravitySigningIn, setAntigravitySigningIn] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [computerAccess, updateComputerAccess] = useState(true);
@@ -1240,6 +1246,37 @@ export function AgentProvider({
       void agent.antigravityShutdown().catch(() => {});
     }
   }, [persist]);
+  const installAntigravity = useCallback(async () => {
+    setAntigravityInstalling(true);
+    setAntigravityError(null);
+    setAntigravityInstallProgress({
+      stage: "checking",
+      detail: "Checking latest Antigravity CLI version…",
+      percent: null,
+    });
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await agent.onAntigravityInstallProgress((progress) => {
+        setAntigravityInstallProgress(progress);
+      });
+      const next = await agent.antigravityInstall();
+      setAntigravityStatus(next);
+      if (next.status === "ready") {
+        reloadModels();
+        toast.success("Antigravity CLI installed and ready.");
+      } else if (next.status === "signed_out") {
+        toast.success("Antigravity CLI installed. Sign in with Google to finish setup.");
+      }
+    } catch (error) {
+      const message = agent.errorMessage(error);
+      setAntigravityError(message);
+      toast.error(`Antigravity install: ${message}`);
+    } finally {
+      unlisten?.();
+      setAntigravityInstalling(false);
+      setAntigravityInstallProgress(null);
+    }
+  }, [reloadModels]);
   const signInAntigravity = useCallback(async () => {
     setAntigravitySigningIn(true);
     setAntigravityError(null);
@@ -1778,8 +1815,11 @@ export function AgentProvider({
       antigravityStatus,
       antigravityLoading,
       antigravityError,
+      antigravityInstalling,
+      antigravityInstallProgress,
       antigravitySigningIn,
       refreshAntigravityStatus,
+      installAntigravity,
       signInAntigravity,
       pendingQuestion,
       answerQuestion,
@@ -1858,8 +1898,11 @@ export function AgentProvider({
       antigravityStatus,
       antigravityLoading,
       antigravityError,
+      antigravityInstalling,
+      antigravityInstallProgress,
       antigravitySigningIn,
       refreshAntigravityStatus,
+      installAntigravity,
       signInAntigravity,
       pendingQuestion,
       answerQuestion,

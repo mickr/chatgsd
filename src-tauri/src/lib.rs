@@ -3422,6 +3422,7 @@ pub fn run() {
             agent::codex::decisions::agent_classify_inline,
             agent::codex::decisions::agent_review_writing,
             agent::antigravity::antigravity_status,
+            agent::antigravity::antigravity_install,
             agent::antigravity::antigravity_sign_in,
             agent::antigravity::antigravity_shutdown,
             read_file_direct,

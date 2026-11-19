@@ -29,6 +29,11 @@ export interface AntigravityStatus {
   detail: string | null;
   binaryPath: string | null;
 }
+export interface AntigravityInstallProgress {
+  stage: string;
+  detail: string;
+  percent: number | null;
+}
 export const isAntigravityModel = (id: string | null | undefined): boolean =>
   typeof id === "string" && id.startsWith("agy:");
 export interface RunContext {
@@ -176,8 +181,15 @@ export const reviewWriting = (context: WritingReviewContext) =>
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const getAntigravityStatus = () => invoke<AntigravityStatus>("antigravity_status");
+export const antigravityInstall = () => invoke<AntigravityStatus>("antigravity_install");
 export const antigravitySignIn = () => invoke<AntigravityStatus>("antigravity_sign_in");
 export const antigravityShutdown = () => invoke<void>("antigravity_shutdown");
+export const onAntigravityInstallProgress = (
+  handler: (progress: AntigravityInstallProgress) => void,
+) =>
+  listen<AntigravityInstallProgress>("antigravity:install-progress", ({ payload }) =>
+    handler(payload),
+  );
 export const setupComputerPermissions = (permission: ComputerPermission) =>
   invoke<string>("agent_computer_permissions", { permission });
 export const listModels = (includeAntigravity = false) =>

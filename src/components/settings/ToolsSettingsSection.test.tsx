@@ -96,3 +96,30 @@ it("renders the Antigravity integration card and toggles it", async () => {
   act(() => toggle.click());
   expect(setAntigravityEnabled).toHaveBeenCalledWith(false);
 });
+
+it("offers on-demand Antigravity CLI installation when agy is not found", async () => {
+  const installAntigravity = vi.fn();
+  state.agent = {
+    ...state.agent,
+    antigravityEnabled: true,
+    setAntigravityEnabled: vi.fn(),
+    antigravityStatus: {
+      status: "unavailable",
+      detail: "Antigravity CLI (`agy`) was not found on this Mac.",
+      binaryPath: null,
+    },
+    antigravityLoading: false,
+    antigravityError: null,
+    antigravityInstalling: false,
+    antigravityInstallProgress: null,
+    installAntigravity,
+    refreshAntigravityStatus: vi.fn(),
+  };
+  await act(async () => { root.render(<ToolsSettingsSection />); });
+  const installButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Install Antigravity CLI",
+  )!;
+  expect(installButton).toBeTruthy();
+  act(() => installButton.click());
+  expect(installAntigravity).toHaveBeenCalledTimes(1);
+});

@@ -73,6 +73,8 @@ function AntigravityIntegrationCard() {
   const agyStatus = agent.antigravityStatus ?? null;
   const loading = !!agent.antigravityLoading;
   const error = agent.antigravityError ?? null;
+  const installing = !!agent.antigravityInstalling;
+  const installProgress = agent.antigravityInstallProgress ?? null;
   const signingIn = !!agent.antigravitySigningIn;
   return (
     <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
@@ -81,6 +83,7 @@ function AntigravityIntegrationCard() {
           <input
             type="checkbox"
             checked={enabled}
+            disabled={installing}
             onChange={(event) => agent.setAntigravityEnabled?.(event.target.checked)}
             aria-describedby="antigravity-description"
           />
@@ -88,7 +91,13 @@ function AntigravityIntegrationCard() {
         </label>
         {enabled && (
           <span className="text-xs text-text-muted">
-            {loading ? "Checking…" : agyStatus ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status] : "Enabled"}
+            {installing
+              ? "Installing…"
+              : loading
+                ? "Checking…"
+                : agyStatus
+                  ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status]
+                  : "Enabled"}
           </span>
         )}
       </div>
@@ -97,7 +106,23 @@ function AntigravityIntegrationCard() {
         <code className="font-mono text-[11px] bg-bg-muted px-1 py-0.5 rounded">agy</code> CLI and Antigravity plan.
         Models appear alongside ChatGPT in the agent panel.
       </p>
-      {enabled && loading && (
+      {enabled && installing && (
+        <div className="space-y-2" role="status" aria-live="polite">
+          <div className="flex items-center gap-2 text-xs text-text-muted">
+            <SpinnerIcon className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span>{installProgress?.detail ?? "Installing Antigravity CLI…"}</span>
+          </div>
+          {typeof installProgress?.percent === "number" && (
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-muted">
+              <div
+                className="h-full bg-accent transition-[width] duration-150"
+                style={{ width: `${Math.min(100, Math.max(0, installProgress.percent))}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {enabled && !installing && loading && (
         <div className="flex items-center gap-2 text-xs text-text-muted">
           <SpinnerIcon className="w-3.5 h-3.5 animate-spin" />
           Checking local Antigravity session…
@@ -108,7 +133,7 @@ function AntigravityIntegrationCard() {
           {error}
         </p>
       )}
-      {enabled && !loading && agyStatus?.status === "ready" && (
+      {enabled && !installing && !loading && agyStatus?.status === "ready" && (
         <div className="flex items-center justify-between text-xs text-text-muted">
           <span>Using your local Antigravity plan</span>
           <button
@@ -120,10 +145,28 @@ function AntigravityIntegrationCard() {
           </button>
         </div>
       )}
-      {enabled && !loading && agyStatus?.detail && (
+      {enabled && !installing && !loading && agyStatus?.detail && (
         <p className="text-xs text-text-muted">{agyStatus.detail}</p>
       )}
-      {enabled && !loading && agyStatus?.status === "signed_out" && (
+      {enabled && !installing && !loading && agyStatus?.status === "unavailable" && (
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { void agent.installAntigravity?.(); }}
+          >
+            Install Antigravity CLI
+          </Button>
+          <button
+            type="button"
+            className="text-xs text-text-muted hover:text-text"
+            onClick={() => { void agent.refreshAntigravityStatus?.(); }}
+          >
+            Check again
+          </button>
+        </div>
+      )}
+      {enabled && !installing && !loading && agyStatus?.status === "signed_out" && (
         <Button
           variant="outline"
           size="sm"
@@ -133,7 +176,7 @@ function AntigravityIntegrationCard() {
           {signingIn ? "Opening Google sign-in…" : "Sign in with Google"}
         </Button>
       )}
-      {enabled && !loading && (agyStatus?.status === "error" || agyStatus?.status === "unavailable" || error) && (
+      {enabled && !installing && !loading && (agyStatus?.status === "error" || (error && agyStatus?.status !== "unavailable")) && (
         <button
           type="button"
           className="text-xs text-text-muted hover:text-text"

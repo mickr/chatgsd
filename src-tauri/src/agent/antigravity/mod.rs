@@ -2,6 +2,7 @@
 //! local `agy acp` server while keeping all document reads and edits on
 //! ChatGSD's tracked TipTap tools over a localhost MCP bridge.
 
+mod install;
 mod mcp;
 mod transport;
 
@@ -76,7 +77,7 @@ async fn ensure_client<'a>(
 }
 
 pub async fn status(app: &tauri::AppHandle) -> AntigravityStatus {
-    let Some(binary) = find_executable() else {
+    let Some(binary) = find_executable(Some(app)) else {
         return AntigravityStatus {
             status: "unavailable".into(),
             detail: Some("Antigravity CLI (`agy`) was not found on this Mac.".into()),
@@ -140,13 +141,23 @@ pub async fn antigravity_status(app: tauri::AppHandle) -> AntigravityStatus {
 
 #[tauri::command]
 pub async fn antigravity_sign_in(app: tauri::AppHandle) -> Result<AntigravityStatus, String> {
-    let binary = find_executable()
+    let binary = find_executable(Some(&app))
         .ok_or_else(|| "Antigravity CLI (`agy`) was not found on this Mac.".to_owned())?;
     {
         let mut guard = CLIENT.lock().await;
         *guard = None;
     }
     transport::run_interactive_login(&binary).await?;
+    Ok(status(&app).await)
+}
+
+#[tauri::command]
+pub async fn antigravity_install(app: tauri::AppHandle) -> Result<AntigravityStatus, String> {
+    {
+        let mut guard = CLIENT.lock().await;
+        *guard = None;
+    }
+    install::install_cli(&app).await?;
     Ok(status(&app).await)
 }
 

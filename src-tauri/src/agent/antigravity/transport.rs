@@ -39,7 +39,7 @@ pub(super) struct AcpClient {
     pub dirty: bool,
 }
 
-pub(super) fn find_executable() -> Option<PathBuf> {
+pub(super) fn find_executable(app: Option<&tauri::AppHandle>) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("AGY_PATH") {
         let path = PathBuf::from(path);
         if path.is_absolute() && path.is_file() {
@@ -59,6 +59,9 @@ pub(super) fn find_executable() -> Option<PathBuf> {
         candidates.push(home.join(".antigravity/bin/agy"));
         candidates.push(home.join(".gemini/antigravity-cli/bin/agy"));
         candidates.push(home.join("bin/agy"));
+    }
+    if let Some(managed) = app.and_then(super::install::app_managed_binary) {
+        candidates.push(managed);
     }
     candidates.into_iter().find(|path| path.is_file())
 }
@@ -260,7 +263,7 @@ fn parse_models(response: &Value) -> ParsedCatalog {
 
 impl AcpClient {
     pub async fn start(app: &tauri::AppHandle) -> Result<Self, String> {
-        let binary = find_executable()
+        let binary = find_executable(Some(app))
             .ok_or_else(|| "Antigravity CLI (`agy`) was not found on this Mac.".to_owned())?;
         let cwd = workspace_dir(app)?;
         tokio::fs::create_dir_all(&cwd)
