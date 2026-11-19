@@ -1,3 +1,4 @@
+pub mod antigravity;
 mod bridge;
 pub mod codex;
 mod computer;
@@ -72,10 +73,26 @@ pub struct AgentStatus {
     pub detail: Option<String>,
     pub account: Option<ChatGptAccount>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceTierInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_tiers: Vec<ServiceTierInfo>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +105,10 @@ pub struct RequestContext {
 #[serde(rename_all = "camelCase")]
 pub struct StartRunRequest {
     model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    service_tier: Option<String>,
     ui_guide: String,
     session_id: Option<String>,
     prompt: String,
@@ -108,6 +129,7 @@ pub struct StartRunResponse {
 }
 struct Run {
     task: tauri::async_runtime::JoinHandle<()>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
     context: RunContext,
     /// Messages the user sends while the run works reach it here.
     steer: tokio::sync::mpsc::UnboundedSender<String>,
@@ -133,8 +155,28 @@ pub async fn agent_status(app: tauri::AppHandle) -> AgentStatus {
     codex::status(&app).await
 }
 #[tauri::command]
-pub async fn agent_list_models(app: tauri::AppHandle) -> Result<Vec<ModelInfo>, String> {
-    codex::list_models(&app).await
+pub async fn agent_list_models(
+    app: tauri::AppHandle,
+    include_antigravity: Option<bool>,
+) -> Result<Vec<ModelInfo>, String> {
+    let mut models = Vec::new();
+    let mut errors = Vec::new();
+    match codex::list_models(&app).await {
+        Ok(list) => models.extend(list),
+        Err(error) => errors.push(error),
+    }
+    if include_antigravity.unwrap_or(false) {
+        match antigravity::list_models(&app).await {
+            Ok(list) => models.extend(list),
+            Err(error) => errors.push(error),
+        }
+    }
+    if models.is_empty() {
+        if let Some(error) = errors.into_iter().next() {
+            return Err(error);
+        }
+    }
+    Ok(models)
 }
 /// The research role's built-in brief, shown in settings until the user edits it.
 #[tauri::command]
@@ -190,6 +232,11 @@ pub async fn agent_start_run(
     };
     let task_ctx = ctx.clone();
     let task_app = app.clone();
+    let model = request.model.filter(|m| !m.is_empty());
+    let effort = request.effort.filter(|e| !e.is_empty());
+    let service_tier = request.service_tier.filter(|tier| !tier.is_empty());
+    let use_antigravity = antigravity::is_model(model.as_deref());
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     // The gate ensures tools cannot arrive before the run and its context are registered.
     let (start, ready) = tokio::sync::oneshot::channel();
     let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
@@ -197,16 +244,30 @@ pub async fn agent_start_run(
         if ready.await.is_err() {
             return;
         }
-        let model = request.model.filter(|m| !m.is_empty());
-        let result = codex::run(
-            task_app.clone(),
-            task_ctx.clone(),
-            model,
-            request.session_id,
-            request.prompt,
-            steered,
-        )
-        .await;
+        let result = if use_antigravity {
+            antigravity::run(
+                task_app.clone(),
+                task_ctx.clone(),
+                model,
+                effort,
+                request.session_id,
+                request.prompt,
+                cancel_rx,
+            )
+            .await
+        } else {
+            codex::run(
+                task_app.clone(),
+                task_ctx.clone(),
+                model,
+                effort,
+                service_tier,
+                request.session_id,
+                request.prompt,
+                steered,
+            )
+            .await
+        };
         let state = task_app.state::<AgentState>();
         // Removing under the same lock as cancellation chooses exactly one terminal owner.
         let removed = state
@@ -233,7 +294,15 @@ pub async fn agent_start_run(
         .runs
         .lock()
         .expect("agent runs mutex")
-        .insert(run_id.clone(), Run { task, context: ctx, steer });
+        .insert(
+            run_id.clone(),
+            Run {
+                task,
+                cancel: use_antigravity.then_some(cancel_tx),
+                context: ctx,
+                steer,
+            },
+        );
     let _ = start.send(());
     Ok(StartRunResponse { run_id })
 }
@@ -257,7 +326,11 @@ pub fn agent_steer_run(run_id: String, text: String, state: State<'_, AgentState
 pub fn agent_cancel_run(app: tauri::AppHandle, run_id: String, state: State<'_, AgentState>) {
     let run = state.runs.lock().expect("agent runs mutex").remove(&run_id);
     if let Some(run) = run {
-        run.task.abort();
+        if let Some(cancel) = run.cancel {
+            let _ = cancel.send(());
+        } else {
+            run.task.abort();
+        }
         state.bridge.cleanup(&run_id);
         emit(
             &app,

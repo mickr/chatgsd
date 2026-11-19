@@ -12,6 +12,7 @@ vi.mock("../../services/cli", () => ({
 vi.mock("../../services/agent", () => ({
   researchBriefDefault: () => Promise.resolve("Prefer primary sources."),
   setupComputerPermissions: vi.fn(),
+  isAntigravityModel: (id: string | null | undefined) => typeof id === "string" && id.startsWith("agy:"),
   errorMessage: String,
 }));
 
@@ -71,4 +72,27 @@ it("saves nothing on the way out after a reset or with nothing typed", () => {
   act(() => root.unmount());
   expect(setResearchBrief).toHaveBeenCalledTimes(1);
   root = createRoot(container);
+});
+
+it("renders the Antigravity integration card and toggles it", async () => {
+  const setAntigravityEnabled = vi.fn();
+  state.agent = {
+    ...state.agent,
+    antigravityEnabled: true,
+    setAntigravityEnabled,
+    antigravityStatus: { status: "ready", detail: null, binaryPath: "/usr/local/bin/agy" },
+    antigravityLoading: false,
+    antigravityError: null,
+    antigravitySigningIn: false,
+    refreshAntigravityStatus: vi.fn(),
+    signInAntigravity: vi.fn(),
+  };
+  await act(async () => { root.render(<ToolsSettingsSection />); });
+  expect(container.textContent).toContain("Antigravity");
+  expect(container.textContent).toContain("Using your local Antigravity plan");
+  const toggle = [...container.querySelectorAll<HTMLInputElement>("input[type='checkbox']")]
+    .find((input) => input.getAttribute("aria-describedby") === "antigravity-description")!;
+  expect(toggle.checked).toBe(true);
+  act(() => toggle.click());
+  expect(setAntigravityEnabled).toHaveBeenCalledWith(false);
 });

@@ -131,6 +131,12 @@ pub struct Settings {
     /// ChatGPT model slug for the agent panel; `None` uses the first model listed.
     #[serde(rename = "agentModel")]
     pub agent_model: Option<String>,
+    /// Selected reasoning/thinking level for the agent panel; `None` uses the model's default.
+    #[serde(rename = "agentReasoningEffort")]
+    pub agent_reasoning_effort: Option<String>,
+    /// Enable priority/fast service tier for GPT models that support it.
+    #[serde(rename = "agentPriorityMode")]
+    pub agent_priority_mode: Option<bool>,
     #[serde(rename = "agentPanelWidthPx")]
     pub agent_panel_width_px: Option<u32>,
     #[serde(rename = "agentComputerAccess")]
@@ -143,6 +149,9 @@ pub struct Settings {
     /// The user's brief for the research role; `None` uses the built-in one.
     #[serde(rename = "agentResearchBrief")]
     pub agent_research_brief: Option<String>,
+    /// Enable the local Antigravity (`agy acp`) integration alongside Codex.
+    #[serde(rename = "agentAntigravityEnabled")]
+    pub agent_antigravity_enabled: Option<bool>,
     #[serde(rename = "foldersEnabled")]
     pub folders_enabled: Option<bool>,
     #[serde(rename = "ignoredPatterns")]
@@ -3412,6 +3421,9 @@ pub fn run() {
             agent::codex::account::chatgpt_ack_plan_notice,
             agent::codex::decisions::agent_classify_inline,
             agent::codex::decisions::agent_review_writing,
+            agent::antigravity::antigravity_status,
+            agent::antigravity::antigravity_sign_in,
+            agent::antigravity::antigravity_shutdown,
             read_file_direct,
             save_file_direct,
             import_file_to_folder,

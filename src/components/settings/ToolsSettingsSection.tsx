@@ -9,7 +9,7 @@ import { ComputerPermissions } from "../agent/ComputerPermissions";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
-import { errorMessage, researchBriefDefault } from "../../services/agent";
+import { errorMessage, isAntigravityModel, researchBriefDefault } from "../../services/agent";
 
 type CliState = {
   status: CliStatus | null;
@@ -60,6 +60,91 @@ function CliUsageHint() {
 }
 
 const STATUS_LABELS = { ready: "Ready", signed_out: "Signed out", error: "Codex unavailable" };
+const ANTIGRAVITY_STATUS_LABELS = {
+  ready: "Ready",
+  signed_out: "Sign in required",
+  unavailable: "CLI not found",
+  error: "Unavailable",
+} as const;
+
+function AntigravityIntegrationCard() {
+  const agent = useAgent();
+  const enabled = !!agent.antigravityEnabled;
+  const agyStatus = agent.antigravityStatus ?? null;
+  const loading = !!agent.antigravityLoading;
+  const error = agent.antigravityError ?? null;
+  const signingIn = !!agent.antigravitySigningIn;
+  return (
+    <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-3 text-sm font-medium cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => agent.setAntigravityEnabled?.(event.target.checked)}
+            aria-describedby="antigravity-description"
+          />
+          <span>Antigravity</span>
+        </label>
+        {enabled && (
+          <span className="text-xs text-text-muted">
+            {loading ? "Checking…" : agyStatus ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status] : "Enabled"}
+          </span>
+        )}
+      </div>
+      <p id="antigravity-description" className="text-xs text-text-muted leading-relaxed">
+        Use Google Gemini models for prose generation and co-editing through your local{" "}
+        <code className="font-mono text-[11px] bg-bg-muted px-1 py-0.5 rounded">agy</code> CLI and Antigravity plan.
+        Models appear alongside ChatGPT in the agent panel.
+      </p>
+      {enabled && loading && (
+        <div className="flex items-center gap-2 text-xs text-text-muted">
+          <SpinnerIcon className="w-3.5 h-3.5 animate-spin" />
+          Checking local Antigravity session…
+        </div>
+      )}
+      {enabled && error && (
+        <p role="alert" className="text-xs text-red-500">
+          {error}
+        </p>
+      )}
+      {enabled && !loading && agyStatus?.status === "ready" && (
+        <div className="flex items-center justify-between text-xs text-text-muted">
+          <span>Using your local Antigravity plan</span>
+          <button
+            type="button"
+            className="hover:text-text"
+            onClick={() => { void agent.refreshAntigravityStatus?.(); }}
+          >
+            Refresh
+          </button>
+        </div>
+      )}
+      {enabled && !loading && agyStatus?.detail && (
+        <p className="text-xs text-text-muted">{agyStatus.detail}</p>
+      )}
+      {enabled && !loading && agyStatus?.status === "signed_out" && (
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={signingIn}
+          onClick={() => { void agent.signInAntigravity?.(); }}
+        >
+          {signingIn ? "Opening Google sign-in…" : "Sign in with Google"}
+        </Button>
+      )}
+      {enabled && !loading && (agyStatus?.status === "error" || agyStatus?.status === "unavailable" || error) && (
+        <button
+          type="button"
+          className="text-xs text-text-muted hover:text-text"
+          onClick={() => { void agent.refreshAntigravityStatus?.(); }}
+        >
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
 
 /** Internet access and the researcher role that does the web work. */
 function InternetAccessSettings() {
@@ -119,13 +204,15 @@ function InternetAccessSettings() {
             <Select
               id="research-model"
               value={agent.researchModel}
-              disabled={!agent.models.length}
+              disabled={!agent.models.some((model) => !isAntigravityModel(model.id))}
               onChange={(event) => agent.setResearchModel(event.target.value)}
             >
-              {agent.models.length ? (
-                agent.models.map((model) => (
-                  <option key={model.id} value={model.id}>{model.label}</option>
-                ))
+              {agent.models.some((model) => !isAntigravityModel(model.id)) ? (
+                agent.models
+                  .filter((model) => !isAntigravityModel(model.id))
+                  .map((model) => (
+                    <option key={model.id} value={model.id}>{model.label}</option>
+                  ))
               ) : (
                 <option value="">
                   {agent.modelsLoading ? "Loading models…" : "Available after signing in"}
@@ -238,6 +325,7 @@ export function ToolsSettingsSection() {
             <PlanNotice />
           </div>
         )}
+        <AntigravityIntegrationCard />
         <div className="mt-4 rounded-[10px] border border-border p-4 space-y-3">
           <label className="flex items-center justify-between gap-4 text-sm font-medium">
             Computer access

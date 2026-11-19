@@ -500,6 +500,19 @@ pub async fn complete_codex_migration(
     store.write(&path, &threads).await
 }
 
+/// Readable panel transcript for continuing a conversation on another runtime
+/// or after an app restart.
+pub async fn transcript_context(
+    app: &AppHandle,
+    notes_folder: &Path,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let store = Store::open(app, notes_folder).await?;
+    let transcript: Option<Vec<Value>> = store.read(&store.session_file(session_id, "")?).await?;
+    let text = readable_transcript(transcript.as_deref().unwrap_or_default());
+    Ok((!text.is_empty()).then_some(text))
+}
+
 struct Store {
     dir: PathBuf,
 }

@@ -1579,3 +1579,39 @@ export function ReplaceAllIcon({ className = "w-4.5 h-4.5" }: IconProps) {
     </svg>
   );
 }
+
+export function BoltIcon({
+  className = "w-4.5 h-4.5",
+  filled = false,
+}: IconProps & { filled?: boolean }) {
+  return (
+    <svg
+      className={className}
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M13 3l0 7l6 0l-8 11l0 -7l-6 0l8 -11" />
+    </svg>
+  );
+}
+
+export function SparkleIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="currentColor"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 2.25c.45 4.4 2.85 6.8 7.25 7.25-4.4.45-6.8 2.85-7.25 7.25-.45-4.4-2.85-6.8-7.25-7.25 4.4-.45 6.8-2.85 7.25-7.25Z" />
+      <path
+        d="M18.25 14.5c.22 1.85 1.15 2.78 3 3-1.85.22-2.78 1.15-3 3-.22-1.85-1.15-2.78-3-3 1.85-.22 2.78-1.15 3-3Z"
+        opacity="0.65"
+      />
+    </svg>
+  );
+}

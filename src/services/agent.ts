@@ -11,10 +11,26 @@ export interface AgentStatus {
   detail: string | null;
   account: ChatGptAccount | null;
 }
+export interface ServiceTierInfo {
+  id: string;
+  name: string;
+  description: string;
+}
 export interface ModelInfo {
   id: string;
   label: string;
+  provider?: "chatgpt" | "antigravity";
+  efforts?: string[];
+  defaultEffort?: string;
+  serviceTiers?: ServiceTierInfo[];
 }
+export interface AntigravityStatus {
+  status: "ready" | "signed_out" | "unavailable" | "error";
+  detail: string | null;
+  binaryPath: string | null;
+}
+export const isAntigravityModel = (id: string | null | undefined): boolean =>
+  typeof id === "string" && id.startsWith("agy:");
 export interface RunContext {
   noteId: string;
   noteTitle: string;
@@ -26,6 +42,8 @@ export interface StartRunRequest {
   /** Background writing check-ins can read the note but cannot edit or use other apps. */
   readOnly?: boolean;
   model: string | null;
+  effort?: string | null;
+  serviceTier?: string | null;
   /** Scratch UI block guide, generated from the json-render catalog. */
   uiGuide: string;
   sessionId: string | null;
@@ -60,6 +78,7 @@ export type AgentEvent =
   | { type: "error"; kind: AgentErrorKind; message: string };
 export interface AgentEventPayload {
   runId: string;
+  seq?: number;
   event: AgentEvent;
 }
 export interface ToolRequest {
@@ -156,9 +175,16 @@ export const reviewWriting = (context: WritingReviewContext) =>
   invoke<{ revisit?: boolean; focus: WritingFocus | null; anchor: number | null; route: ModelRoute; request?: RequestState | null; scores?: WritingScores }>("agent_review_writing", { context });
 
 export const getStatus = () => invoke<AgentStatus>("agent_status");
+export const getAntigravityStatus = () => invoke<AntigravityStatus>("antigravity_status");
+export const antigravitySignIn = () => invoke<AntigravityStatus>("antigravity_sign_in");
+export const antigravityShutdown = () => invoke<void>("antigravity_shutdown");
 export const setupComputerPermissions = (permission: ComputerPermission) =>
   invoke<string>("agent_computer_permissions", { permission });
-export const listModels = () => invoke<ModelInfo[]>("agent_list_models");
+export const listModels = (includeAntigravity = false) =>
+  invoke<ModelInfo[]>(
+    "agent_list_models",
+    includeAntigravity ? { includeAntigravity: true } : undefined,
+  );
 export const startRun = (request: StartRunRequest) =>
   invoke<{ runId: string }>("agent_start_run", { request });
 /** Hands the working agent a message without stopping it. */

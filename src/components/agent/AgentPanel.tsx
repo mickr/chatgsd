@@ -37,6 +37,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   PlusIcon,
+  SparkleIcon,
   SpinnerIcon,
   StopIcon,
   XIcon,
@@ -51,10 +52,11 @@ import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
 import { writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
-import type { WritingScores } from "../../services/agent";
+import { isAntigravityModel, type WritingScores } from "../../services/agent";
 import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
 import { agentPresence, displayInstruction } from "./InlineAgentActivity";
 import { InlineAgentFace } from "./InlineAgentFace";
+import { ModelPicker } from "./ModelPicker";
 import { WritingCompanionPointer } from "./WritingCompanionPointer";
 
 /** Each way to work together, and which of the gate's scores says it fits this passage. */
@@ -191,18 +193,24 @@ export function AgentPanel({
     [running, runSelection, agent.editor, focusRange, selection],
   );
   const draft = currentNote ? (drafts[currentNote.id] ?? "") : "";
+  const codexReady = status?.status === "ready";
+  const antigravityReady = !!agent.antigravityEnabled && agent.antigravityStatus?.status === "ready";
+  const anyReady = codexReady || antigravityReady;
+  const usingAntigravity = isAntigravityModel(agent.model);
   const needsPlanNotice =
-    status?.account?.planUsage && !status.account.planNoticeSeen;
-  const showChatGptSignIn = status?.status === "signed_out";
+    !usingAntigravity && status?.account?.planUsage && !status.account.planNoticeSeen;
+  const showChatGptSignIn = status?.status === "signed_out" && !antigravityReady;
   const reason = !currentNote
     ? "Open a note to start a conversation."
-    : agent.statusLoading
-      ? "Checking your ChatGPT account…"
-      : !status
+    : !anyReady && (agent.statusLoading || agent.antigravityLoading)
+      ? agent.antigravityEnabled && !agent.statusLoading
+        ? "Checking Antigravity…"
+        : "Checking your ChatGPT account…"
+      : !anyReady && !status
         ? (agent.statusError ?? "ChatGPT is unavailable. Try again.")
-        : status.status !== "ready"
-          ? (status.detail ??
-            (status.status === "signed_out"
+        : !anyReady
+          ? (status?.detail ??
+            (status?.status === "signed_out"
               ? "Sign in with ChatGPT to get started."
               : "Codex is unavailable. Try again."))
           : needsPlanNotice
@@ -338,7 +346,9 @@ export function AgentPanel({
       }
       const session = editor.storage.scratchDocument.session;
       agent.prepareCompanionMessage();
-      const decision = await routeMessage(editor, text, conversation.items);
+      const decision = codexReady && !usingAntigravity
+        ? await routeMessage(editor, text, conversation.items)
+        : null;
       // The note changed while routing: this message was never meant for the new one.
       if (editor.isDestroyed || editor.storage.scratchDocument.session !== session) {
         restore();
@@ -405,31 +415,21 @@ export function AgentPanel({
           <span ref={home} className="shrink-0">
             <InlineAgentFace state={presence.state} expression={presence.expression} />
           </span>
-          <div className="min-w-0 flex-1">
-            {/* pl-2 matches the inset WebKit gives the native model <select> text below. */}
-            <h2 className="text-sm font-medium pl-2 py-0.5">ChatGPT</h2>
-            {status?.status === "ready" && (
-              <select
-                aria-label="Agent model"
-                value={agent.model}
-                onChange={(event) => agent.setModel(event.target.value)}
-                disabled={running || agent.modelsLoading}
-                className="agent-panel-select text-xs text-text-muted"
-              >
-                {agent.models.length ? (
-                  agent.models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">
-                    {agent.modelsLoading ? "Loading models…" : "Default model"}
-                  </option>
-                )}
-              </select>
-            )}
-          </div>
+          <ModelPicker
+            ready={anyReady}
+            disabled={running}
+            modelsLoading={agent.modelsLoading}
+            model={agent.model}
+            models={agent.models}
+            onSelectModel={agent.setModel}
+            effort={agent.effort ?? ""}
+            efforts={agent.efforts ?? []}
+            onSelectEffort={agent.setEffort}
+            priorityMode={!!agent.priorityMode}
+            supportsPriority={!!agent.supportsPriority}
+            priorityDescription={agent.priorityDescription ?? null}
+            onTogglePriority={agent.setPriorityMode}
+          />
           <DropdownMenu.Root>
             <Tooltip content="Earlier conversations">
               <DropdownMenu.Trigger asChild>
@@ -608,8 +608,17 @@ export function AgentPanel({
           {conversation.error && (
             <section role="alert" className="agent-panel-error">
               <div className="flex items-center gap-2 text-xs font-medium">
-                <ChatGPTIcon className="w-4 h-4" />
-                ChatGPT
+                {usingAntigravity ? (
+                  <>
+                    <SparkleIcon className="w-4 h-4 text-[#4f7cff] dark:text-[#7aa2ff]" />
+                    Antigravity
+                  </>
+                ) : (
+                  <>
+                    <ChatGPTIcon className="w-4 h-4" />
+                    ChatGPT
+                  </>
+                )}
               </div>
               <h3 className="text-sm font-medium">
                 {
@@ -632,7 +641,18 @@ export function AgentPanel({
               ) : conversation.error.kind === "usage_limit" ? (
                 <ManageUsage primary />
               ) : conversation.error.kind === "auth" ? (
-                <ContinueWithChatGPT />
+                usingAntigravity ? (
+                  <button
+                    type="button"
+                    className="agent-panel-link"
+                    disabled={agent.antigravitySigningIn}
+                    onClick={() => void agent.signInAntigravity?.()}
+                  >
+                    {agent.antigravitySigningIn ? "Opening Google sign-in…" : "Sign in with Google"}
+                  </button>
+                ) : (
+                  <ContinueWithChatGPT />
+                )
               ) : conversation.error.kind === "not_eligible" ? (
                 <button type="button" className="agent-panel-link" onClick={() => { void agent.refreshStatus(); }}>
                   Check account again
@@ -703,19 +723,23 @@ export function AgentPanel({
               {reason}
             </p>
           )}
-          {(agent.statusError ||
-            status?.status === "error" ||
-            agent.modelsError ||
-            (!status && !agent.statusLoading)) && (
+          {((!anyReady &&
+            (agent.statusError ||
+              status?.status === "error" ||
+              (!status && !agent.statusLoading))) ||
+            agent.modelsError) && (
             <button
               type="button"
               className="agent-panel-link mb-2"
               onClick={() => {
                 // Signed in but the model list failed: retry that request,
                 // since a status refresh leaves readiness unchanged.
-                if (status?.status === "ready" && agent.modelsError)
+                if (anyReady && agent.modelsError)
                   agent.reloadModels();
-                else void agent.refreshStatus();
+                else {
+                  void agent.refreshStatus();
+                  if (agent.antigravityEnabled) void agent.refreshAntigravityStatus?.();
+                }
               }}
             >
               Try again
@@ -811,9 +835,19 @@ export function AgentPanel({
               </div>
             </div>
           </div>
-          {status?.account?.planUsage && (
+          {usingAntigravity ? (
+            <div className="mt-2.5 flex flex-wrap items-center gap-1 text-[10px] text-text-muted">
+              <span>Using Antigravity plan</span>
+            </div>
+          ) : status?.account?.planUsage && (
             <div className="mt-2.5 flex flex-wrap items-center gap-1 text-[10px] text-text-muted">
               <span>Using ChatGPT plan</span>
+              {agent.supportsPriority && agent.priorityMode && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>Priority</span>
+                </>
+              )}
               <span aria-hidden="true">·</span>
               <ManageUsage />
             </div>

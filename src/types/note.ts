@@ -57,11 +57,14 @@ export interface Settings {
   defaultNoteName?: string;
   interfaceZoom?: number;
   agentModel?: string;
+  agentReasoningEffort?: string;
+  agentPriorityMode?: boolean;
   agentPanelWidthPx?: number;
   agentComputerAccess?: boolean;
   agentWebAccess?: boolean;
   agentResearchModel?: string;
   agentResearchBrief?: string;
+  agentAntigravityEnabled?: boolean;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;
