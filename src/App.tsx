@@ -34,6 +34,7 @@ import { isMac, isWindows } from "./lib/platform";
 function getWindowMode(): {
   isPreview: boolean;
   previewFile: string | null;
+  previewProject: string | null;
 } {
   const params = new URLSearchParams(window.location.search);
   const mode = params.get("mode");
@@ -41,6 +42,7 @@ function getWindowMode(): {
   return {
     isPreview: mode === "preview" && !!file,
     previewFile: file,
+    previewProject: params.get("project"),
   };
 }
 
@@ -571,7 +573,7 @@ function UpdateToast({
 }
 
 function App() {
-  const { isPreview, previewFile } = useMemo(getWindowMode, []);
+  const { isPreview, previewFile, previewProject } = useMemo(getWindowMode, []);
   useUpdateMenu(showUpdateToast);
 
   // Cmd/Ctrl+W — close window (works in both preview and folder mode)
@@ -605,7 +607,7 @@ function App() {
       <ThemeProvider>
         <Toaster />
         <TooltipProvider>
-          <PreviewApp filePath={decodeURIComponent(previewFile)} />
+          <PreviewApp filePath={decodeURIComponent(previewFile)} projectId={previewProject} />
         </TooltipProvider>
       </ThemeProvider>
     );

@@ -148,7 +148,8 @@ export const classifyInlineContext = (context: InlineContext) =>
 
 export interface MemoryEntry {
   key: string;
-  kind: "assignment" | "thought" | "choice";
+  /** insight: what an argument trace learned, recorded by the app as the agent's reading. */
+  kind: "assignment" | "thought" | "choice" | "insight";
   status: "open" | "waiting" | "done";
   summary: string;
   quote: string | null;
@@ -162,6 +163,15 @@ export const returnThought = (folder: string, documentId: string, email: string,
 export const observeWording = (folder: string, documentId: string, email: string,
   observation: { kept: string; proposed: string; restored: boolean }) =>
   invoke<void>("agent_observe_wording", { folder, documentId, email, ...observation });
+/** What an argument trace leaves in memory: the writer's meaning at a step, or what the trace learned. */
+export type TraceMemory =
+  | { kind: "meaning"; quote: string; meant: string; read_as: string }
+  | { kind: "insight"; quote: string | null; outcome: string; learned: string };
+export const recordTraceMemory = (folder: string, documentId: string, email: string, record: TraceMemory) =>
+  invoke<void>("agent_record_trace_memory", { folder, documentId, email, record });
+/** Starts a saved conversation for a note, returning its session ID. */
+export const beginConversation = (noteId: string, title: string) =>
+  invoke<string>("agent_begin_conversation", { noteId, title });
 export const forgetMemory = (folder: string, documentId: string, email: string, revision: number, key: string) =>
   invoke<void>("agent_forget_memory", { folder, documentId, email, revision, key });
 

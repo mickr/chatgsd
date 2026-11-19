@@ -197,6 +197,15 @@ pub(crate) async fn notes_folder(app: &tauri::AppHandle) -> Result<PathBuf, Stri
         .await
         .map_err(|e| format!("Cannot open notes folder: {e}"))
 }
+/// The file behind the open document: a note in the notes folder, or a
+/// linked project's file by its `project:` ID (open in its own window).
+pub(crate) async fn document_path(app: &tauri::AppHandle, notes_folder: &std::path::Path, note_id: &str) -> Result<PathBuf, String> {
+    if note_id.starts_with(projects::ID_PREFIX) {
+        projects::note_path(app, note_id).await
+    } else {
+        crate::abs_path_from_id(notes_folder, note_id)
+    }
+}
 pub(super) async fn check_memory_folder(app: &tauri::AppHandle, expected: &std::path::Path) -> Result<(), String> {
     let expected = tokio::fs::canonicalize(expected).await.map_err(|e| e.to_string())?;
     if notes_folder(app).await? != expected { return Err("The notes folder changed.".into()); }
@@ -212,7 +221,7 @@ pub async fn agent_start_run(
         return Err("Enter a message first".into());
     }
     let notes_folder = notes_folder(&app).await?;
-    crate::abs_path_from_id(&notes_folder, &request.context.note_id)?;
+    document_path(&app, &notes_folder, &request.context.note_id).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let ctx = RunContext {
         run_id: run_id.clone(),

@@ -22,7 +22,7 @@ vi.mock("../../context/McpContext", () => ({
   useMcp: () => ({ servers: [], error: null, refresh: vi.fn() }),
 }));
 vi.mock("../../context/NotesContext", () => ({
-  useNotes: () => ({ currentNote: { id: "note", title: "Note" }, selectNote: vi.fn() }),
+  useOptionalNotes: () => ({ currentNote: { id: "note", title: "Note" }, selectNote: vi.fn() }),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -146,7 +146,7 @@ it("resolves a model-authored card in the sidebar without adding a duplicate", (
   expect(container.querySelectorAll(".writing-offer-card")).toHaveLength(1);
   expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Answer the writing question"]')!.value).toBe("The incentives changed.");
   act(() => [...container.querySelectorAll("button")].find(button => button.textContent === "Send answer")!.click());
-  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("question", "The incentives changed.");
+  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("question", { answer: "The incentives changed." });
   expect(state.agent.send).not.toHaveBeenCalled();
 });
 

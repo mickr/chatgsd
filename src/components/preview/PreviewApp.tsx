@@ -1,16 +1,29 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, Window } from "@tauri-apps/api/window";
+import type { Editor as TiptapEditor } from "@tiptap/react";
 import { toast } from "sonner";
 import { Editor, type PreviewModeData } from "../editor/Editor";
+import { AgentPanel } from "../agent/AgentPanel";
+import { AgentLauncher } from "../agent/AgentLauncher";
+import { useAgentPanelShortcut } from "../agent/useAgentPanelShortcut";
+import { AgentProvider, useAgent } from "../../context/AgentContext";
+import { AgentDocumentProvider, type AgentDocument } from "../../context/AgentDocumentContext";
+import { SkillsProvider } from "../../context/SkillsContext";
+import { McpProvider } from "../../context/McpContext";
 import * as filesService from "../../services/files";
+import * as notesService from "../../services/notes";
+import * as projectsService from "../../services/projects";
 import type { ExternalChange } from "../../lib/agent/merge";
 
 interface PreviewAppProps {
   filePath: string;
+  /** Set when the file was opened from a project; the agent panel works on it under this ID. */
+  projectId?: string | null;
 }
 
-export function PreviewApp({ filePath }: PreviewAppProps) {
+export function PreviewApp({ filePath, projectId }: PreviewAppProps) {
+  const noteId = projectId ?? filePath;
   const [content, setContent] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [modified, setModified] = useState(0);
@@ -45,12 +58,12 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
       diskContentRef.current = result.content;
       setModified(result.modified);
       setTitle(result.title);
-      setExternalChange({ noteId: filePath, content: result.content, modified: result.modified, seq: ++externalSequenceRef.current });
+      setExternalChange({ noteId, content: result.content, modified: result.modified, seq: ++externalSequenceRef.current });
     } catch (error) {
       console.error("Failed to read external file changes:", error);
       toast.error("Could not read the changes from disk.");
     }
-  }, [filePath]);
+  }, [filePath, noteId]);
 
   useEffect(() => {
     const handleFocus = () => { void readExternalChange(); };
@@ -181,6 +194,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
   const previewData: PreviewModeData = {
     content,
     title,
+    noteId,
     filePath,
     modified,
     externalChange,
@@ -188,6 +202,20 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     save,
     reload,
   };
+
+  const exitFocusMode = useCallback(() => setFocusMode(false), []);
+
+  if (projectId) {
+    return (
+      <ProjectFileWorkspace
+        previewData={previewData}
+        focusMode={focusMode}
+        onExitFocusMode={exitFocusMode}
+        onSaveToFolder={handleSaveToFolder}
+        saveToFolderDisabled={isSaving}
+      />
+    );
+  }
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
@@ -197,6 +225,106 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
         onSaveToFolder={handleSaveToFolder}
         saveToFolderDisabled={isSaving}
       />
+    </div>
+  );
+}
+
+interface ProjectFileWorkspaceProps {
+  previewData: PreviewModeData;
+  focusMode: boolean;
+  onExitFocusMode: () => void;
+  onSaveToFolder: () => void;
+  saveToFolderDisabled: boolean;
+}
+
+/** Opens a link from the panel: project files in their own window, notes in the main one. */
+async function openFromPanel(id: string) {
+  try {
+    if (id.startsWith("project:")) {
+      await projectsService.openFile(id);
+      return;
+    }
+    await emitTo("main", "select-note", id);
+    await (await Window.getByLabel("main"))?.setFocus();
+  } catch (error) {
+    toast.error(`Couldn't open the note: ${error}`);
+  }
+}
+
+/** A project file's window: the note with the agent panel beside it, as in the main window. */
+function ProjectFileWorkspace({ previewData, ...layout }: ProjectFileWorkspaceProps) {
+  const editorRef = useRef<TiptapEditor | null>(null);
+  const [editor, setEditor] = useState<TiptapEditor | null>(null);
+  const handleEditorReady = useCallback((ready: TiptapEditor | null) => {
+    editorRef.current = ready;
+    setEditor(ready);
+  }, []);
+  // Conversations and working memory are kept with the notes folder's, as for any note.
+  const [notesFolder, setNotesFolder] = useState<string | null>(null);
+  useEffect(() => {
+    notesService.getNotesFolder().then(setNotesFolder).catch((error) => {
+      console.error("Failed to read the notes folder:", error);
+    });
+  }, []);
+  const { content, title, noteId, filePath, modified } = previewData;
+  const currentNote = useMemo(
+    () => (content === null ? null : { id: noteId, title, content, path: filePath, modified }),
+    [content, title, noteId, filePath, modified],
+  );
+  const document = useMemo<AgentDocument>(
+    () => ({ currentNote, notesFolder, selectNote: openFromPanel }),
+    [currentNote, notesFolder],
+  );
+  return (
+    <AgentDocumentProvider value={document}>
+      <SkillsProvider>
+        <McpProvider>
+          <AgentProvider editorRef={editorRef} editor={editor}>
+            <ProjectFileLayout previewData={previewData} hasNote={!!currentNote} onEditorReady={handleEditorReady} {...layout} />
+          </AgentProvider>
+        </McpProvider>
+      </SkillsProvider>
+    </AgentDocumentProvider>
+  );
+}
+
+function ProjectFileLayout({
+  previewData,
+  hasNote,
+  onEditorReady,
+  focusMode,
+  onExitFocusMode,
+  onSaveToFolder,
+  saveToFolderDisabled,
+}: ProjectFileWorkspaceProps & { hasNote: boolean; onEditorReady: (editor: TiptapEditor | null) => void }) {
+  const agent = useAgent();
+  const togglePanel = useCallback(() => {
+    onExitFocusMode();
+    // Focus mode only hides an open panel, so bring it back instead of closing it.
+    if (focusMode && agent.open) agent.focusPanel();
+    else agent.toggle();
+  }, [onExitFocusMode, focusMode, agent.open, agent.toggle, agent.focusPanel]);
+  const focusPanel = useCallback(() => {
+    onExitFocusMode();
+    agent.focusPanel();
+  }, [onExitFocusMode, agent.focusPanel]);
+  useAgentPanelShortcut(true, togglePanel, focusPanel, agent.focusNote);
+  const panelVisible = agent.open && !focusMode;
+  return (
+    <div className="h-full min-h-0 flex bg-bg text-text overflow-hidden">
+      <div className="flex flex-1 flex-col min-w-0 min-h-0" data-writing-workspace>
+        <Editor
+          focusMode={focusMode}
+          previewMode={previewData}
+          onEditorReady={onEditorReady}
+          onSaveToFolder={onSaveToFolder}
+          saveToFolderDisabled={saveToFolderDisabled}
+          agentPanelOpen={panelVisible}
+          onToggleAgentPanel={togglePanel}
+        />
+        {hasNote && !panelVisible && <AgentLauncher onOpen={focusPanel} />}
+      </div>
+      <AgentPanel visible={panelVisible} />
     </div>
   );
 }

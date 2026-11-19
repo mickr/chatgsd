@@ -18,7 +18,7 @@ import {
   clampPanelWidth,
   type QuestionAnswer,
 } from "../../context/AgentContext";
-import { useNotes } from "../../context/NotesContext";
+import { useAgentDocument } from "../../context/AgentDocumentContext";
 import {
   activeFocusRange,
   attachedRange,
@@ -52,13 +52,15 @@ import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
-import { writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
+import { mapStepBlock, writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
 import { isAntigravityModel, type WritingScores } from "../../services/agent";
 import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
 import { agentPresence, displayInstruction } from "./InlineAgentActivity";
 import { InlineAgentFace } from "./InlineAgentFace";
 import { ModelPicker } from "./ModelPicker";
 import { WritingCompanionPointer } from "./WritingCompanionPointer";
+import { ArgumentMapOverlay } from "./ArgumentMapOverlay";
+import { argumentMapFor } from "../editor/ArgumentMap";
 
 /** Each way to work together, and which of the gate's scores says it fits this passage. */
 const STARTERS: Array<{ label: string; kind: WritingRequest; fits: (scores: WritingScores) => number }> = [
@@ -159,7 +161,7 @@ export function AgentPanel({
   onManageServers?: () => void;
 }) {
   const agent = useAgent();
-  const { currentNote, selectNote } = useNotes();
+  const { currentNote, selectNote } = useAgentDocument();
   const changes = useAgentChanges(agent.editor);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [selection, setSelection] = useState<SelectionSummary | null>(null);
@@ -384,8 +386,12 @@ export function AgentPanel({
     id: offer.id, offer: offer.prepared, stale: offer.stale, busy: running || sending || waiting || agent.companionChecking || !!reason,
     draft: agent.writingOfferDraft, onDraftChange: agent.setWritingOfferDraft,
     onAccept: agent.acceptWritingOffer,
-    onAnswer: (answer) => { void agent.requestWritingHelp("question", answer); },
+    onAnswer: (answer) => { void agent.requestWritingHelp("question", { answer }); },
     onShow: agent.showWritingOffer,
+    onHighlight: agent.highlightWritingOffer,
+    map: { open: !!agent.argumentMap, active: agent.argumentMap?.active ?? null, onToggle: agent.toggleArgumentMap,
+      onFocus: agent.focusArgumentStep,
+      onRealign: (step, correction) => { void agent.requestWritingHelp("realign", { answer: correction, step }); } },
     onDismiss: agent.dismissWritingSuggestion,
     onAddToChat: () => {
       if (!currentNote) return;
@@ -409,7 +415,14 @@ export function AgentPanel({
           key={offer?.id ?? "writing-finding"}
           editor={agent.editor} range={agent.writingTarget} kind={agent.writingFocus}
           preparedOffer={offer && !offer.stale ? offer.prepared : null}
-          originRef={home} replayTrigger={pointerReplay + agent.writingOfferReplay} />
+          originRef={home} replayTrigger={pointerReplay + agent.writingOfferReplay}
+          followTarget={agent.argumentMap && offer && !offer.stale
+            ? mapStepBlock(agent.editor.state.doc, offer.prepared, agent.argumentMap.active) : null} />
+      )}
+      {visible && agent.editor && offer && !offer.stale && agent.argumentMap && (
+        <ArgumentMapOverlay editor={agent.editor} trace={offer.prepared.offer.trace}
+          map={argumentMapFor(offer.prepared, agent.argumentMap.active)}
+          onSelect={agent.focusArgumentStep} />
       )}
       <div className="agent-panel-inner" style={{ width: agent.width }}>
         <header className="agent-panel-header">
@@ -501,6 +514,10 @@ export function AgentPanel({
               running={running}
               onReveal={revealSelection}
               onClear={clearSelection}
+              onTrace={selectionSummary.range && !reason ? () => {
+                void agent.requestWritingHelp("outcome", { focus: selectionSummary.range });
+              } : undefined}
+              tracing={sending || agent.companionChecking}
             />
           )}
           <div className="mt-2 flex items-center justify-between gap-2 text-xs">
@@ -543,8 +560,9 @@ export function AgentPanel({
             {turns.map((turn, turnIndex) => (
               <SuggestionContext.Provider key={turn.id} value={turnIndex === turns.length - 1 ? sendSuggestion : null}>
                 {turn.items.map((item, index) => (
+                  // A wrapper that takes no box, so a map step can find the message it came from.
+                  <div key={item.id} data-transcript-item={item.id} className="contents">
                   <AgentMessage
-                    key={item.id}
                     item={item}
                     active={running && turnIndex === turns.length - 1}
                     streaming={
@@ -557,6 +575,7 @@ export function AgentPanel({
                     onAnswer={answer}
                     onDismissOffer={agent.dismissSkillOffer}
                   />
+                  </div>
                 ))}
                 <AgentTurnChanges changes={turn.changes} turn={turnIndex + 1} />
               </SuggestionContext.Provider>

@@ -46,3 +46,65 @@
 .writing-offer-stale { color: var(--color-text-muted); font-size: 12px; }
 .writing-offer-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .agent-panel-chip:disabled { opacity: .5; cursor: default; }
+.argument-map-steps { display: flex; flex-direction: column; gap: 0; list-style: none; margin: 0; padding: 0; }
+.argument-map-steps > li { position: relative; display: flex; gap: 10px; padding-bottom: 12px; }
+/* The line joining each step to the next, the same thread the margin draws in the note. */
+.argument-map-steps > li:not(:last-child)::before { content: ""; position: absolute; top: 20px; bottom: 2px; left: 8.5px; border-left: 1.4px solid var(--color-border); }
+.argument-map-steps > li[data-unsure]:not(:last-child)::before { border-left-style: dashed; }
+.argument-map-steps-number { flex-shrink: 0; display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border: 1.4px solid currentColor; border-radius: 50%; font-size: 9px; font-weight: 600; font-variant-numeric: tabular-nums; background: var(--color-bg); }
+li[data-unsure] > .argument-map-steps-number { border-style: dashed; }
+li[data-active] > .argument-map-steps-number { background: var(--color-text); color: var(--color-bg); }
+li[data-decision] > .argument-map-steps-number { width: 12px; height: 12px; margin: 4px 3px 0; border-radius: 2px; transform: rotate(45deg); background: currentColor; }
+.argument-map-steps-body { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; flex: 1; }
+.argument-map-steps-quote { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; padding: 0 4px; margin-left: -4px; border-radius: 3px; text-align: left; font-style: italic; cursor: pointer; background: color-mix(in srgb, var(--color-selection) 35%, transparent); }
+li[data-unsure] .argument-map-steps-quote { background: none; text-decoration: underline dashed color-mix(in srgb, var(--color-text) 55%, transparent); text-underline-offset: 3px; }
+li[data-decision] .argument-map-steps-quote { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+li[data-active] .argument-map-steps-quote { background: var(--color-selection); }
+.argument-map-steps-quote:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.argument-map-steps-body > p { color: var(--color-text-muted); }
+.argument-map-steps-unsure { color: var(--color-text); font-weight: 500; }
+.argument-map-steps-realign { font-size: 11px; color: var(--color-text-muted); cursor: pointer; }
+.argument-map-steps-realign:hover:not(:disabled) { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
+.argument-map-steps-realign:disabled { opacity: .45; cursor: not-allowed; }
+.argument-map-steps-correct { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.argument-map-steps-correct textarea { width: 100%; padding: 8px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-secondary); color: inherit; font: inherit; resize: vertical; min-height: 54px; }
+.argument-map-steps-correct textarea:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.argument-map-steps-source { font-size: 11px; color: var(--color-text-muted); overflow-wrap: anywhere; }
+.argument-map-steps-source strong { color: var(--color-text); font-weight: 600; }
+.argument-map-steps-source a { color: var(--color-text); text-decoration: none; }
+li[data-source] > .argument-map-steps-number { border-style: dotted; }
+li[data-source] .argument-map-steps-quote { background: var(--color-bg-secondary); font-style: normal; }
+.argument-map-steps-body strong { font-weight: 600; color: var(--color-text); }
+.argument-map-steps-quote.argument-map-steps-outcome { -webkit-line-clamp: 3; font-style: normal; white-space: pre-line; background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.argument-map-steps-quote.argument-map-steps-focus { padding-left: 8px; margin-left: 0; border-left: 2px solid currentColor; border-radius: 0 3px 3px 0; background: none;
+  text-decoration: underline solid color-mix(in srgb, var(--color-text) 70%, transparent); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+li[data-active] .argument-map-steps-quote.argument-map-steps-outcome { background: color-mix(in srgb, var(--color-accent) 14%, transparent); }
+li[data-active] .argument-map-steps-quote.argument-map-steps-focus { background: var(--color-selection); }
+.agent-trace-record { border: 1px solid var(--color-border); border-radius: 10px; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+.agent-trace-record > summary { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; list-style: none; }
+.agent-trace-record > summary::-webkit-details-marker { display: none; }
+.agent-trace-record > summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 4px; }
+.agent-trace-record-diamond { flex-shrink: 0; width: 8px; height: 8px; border-radius: 1px; transform: rotate(45deg); background: currentColor; }
+.agent-trace-record-meta { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--color-text-muted); }
+.agent-trace-record[open] > summary { margin-bottom: 10px; }
+.agent-trace-record .argument-map-steps-quote { cursor: default; }
+.agent-trace-record-correction { color: var(--color-text) !important; }
+/* A step that lives only in the conversation: a small hollow waypoint, no number, since there is nothing in the note to point to. */
+li[data-offpage] > .argument-map-steps-number { width: 10px; height: 10px; margin: 5px 4px 0; border-width: 1.4px; border-style: solid; background: var(--color-bg); }
+/* A conversation excerpt, set like a quoted message rather than a highlight in the note. */
+.argument-map-steps-excerpt { margin: 0; padding: 2px 0 2px 9px; border-left: 2px solid var(--color-border); color: var(--color-text); max-height: none; white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.argument-map-steps-links { display: flex; gap: 10px; font-size: 11px; }
+.argument-map-steps-links button { color: var(--color-text-muted); cursor: pointer; }
+.argument-map-steps-links button:hover { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
+.argument-map-steps-links button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 3px; }
+.argument-map-steps-full { margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: 8px; background: var(--color-bg-secondary); font: inherit; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The card's quoted passage, set like a quote, is the link to it in the note. */
+.writing-offer-passage { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; padding: 2px 0 2px 10px; border-left: 2px solid var(--color-border); text-align: left; color: var(--color-text-muted); cursor: pointer; transition: border-color 150ms, color 150ms; }
+.writing-offer-passage-text { max-height: 140px; overflow: auto; white-space: pre-wrap; }
+.writing-offer-passage-hint { font-size: 10px; color: var(--color-text-muted); opacity: 0; transition: opacity 150ms; }
+.writing-offer-passage:hover:not(:disabled), .writing-offer-passage:focus-visible { border-left-color: var(--color-text); color: var(--color-text); }
+.writing-offer-passage:hover:not(:disabled) .writing-offer-passage-hint, .writing-offer-passage:focus-visible .writing-offer-passage-hint { opacity: 1; }
+.writing-offer-passage:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 0 4px 4px 0; }
+.writing-offer-passage:disabled { cursor: default; }
+.writing-offer-original .writing-offer-passage { margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) { .writing-offer-passage, .writing-offer-passage-hint { transition: none; } }

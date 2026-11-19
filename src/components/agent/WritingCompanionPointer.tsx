@@ -14,26 +14,35 @@ const POINTER = { size: 20, gap: 3, tipY: 2, lift: 90, samples: 32,
   easing: "cubic-bezier(.25, .1, .2, 1)" };
 type Point = { left: number; top: number; zoom: number; rtl: boolean; ghostWidth: number };
 
-export function WritingCompanionPointer({ editor, range, kind, originRef, replayTrigger = 0, preparedOffer = null }: {
+export function WritingCompanionPointer({ editor, range, kind, originRef, replayTrigger = 0, preparedOffer = null, followTarget = null }: {
   editor: Editor;
   range: { from: number; to: number };
   kind: "clarity" | "evidence" | "development";
   originRef: RefObject<HTMLElement | null>;
   replayTrigger?: number;
   preparedOffer?: PreparedWritingOffer | null;
+  /**
+   * The argument map is open, and this is the block of the step being read. The
+   * cursor reads beside it in the right margin (the left holds the map), hopping
+   * from step to step, and stays there.
+   */
+  followTarget?: WritingRange | null;
 }) {
+  const followTrace = !!followTarget;
+  const lastPoint = useRef<{ left: number; top: number } | null>(null);
   const marker = useRef<HTMLDivElement>(null);
   const introduction = useRef<{ editor: Editor; key: string; shown: boolean } | null>(null);
-  const gestureKey = JSON.stringify([replayTrigger, preparedOffer
+  // Opening the map replays through replayTrigger; closing it only re-settles.
+  const gestureKey = JSON.stringify([replayTrigger, followTarget?.from ?? null, preparedOffer
     ? [preparedOffer.documentSession, preparedOffer.offer] : range]);
 
   useLayoutEffect(() => {
     const element = marker.current;
     if (!element) return;
-    const move = preparedOffer?.offer.kind === "move";
-    const destination = move ? preparedOffer.destination ?? preparedOffer.sourceBlock
-      : preparedOffer?.sourceBlock ?? range;
-    const steps = preparedOffer?.offer.kind === "question"
+    const move = preparedOffer?.offer.kind === "move" && !followTarget;
+    const destination = followTarget ?? (move ? preparedOffer.destination ?? preparedOffer.sourceBlock
+      : preparedOffer?.sourceBlock ?? range);
+    const steps = followTarget ? [followTarget] : preparedOffer?.offer.kind === "question"
       ? [...preparedOffer.traceBlocks.filter((block, index, all) => block.from !== destination.from &&
         all.findIndex((other) => other.from === block.from) === index), destination]
       : move ? [preparedOffer.sourceBlock, destination] : [destination];
@@ -49,6 +58,7 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
     let disposed = false;
     let animation: Animation | undefined;
     let previousGeometry = "";
+    let hopping = false;
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
     const settle = () => {
       if (animation) { animation.onfinish = null; animation.cancel(); animation = undefined; }
@@ -82,18 +92,21 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
       const editorStyle = getComputedStyle(editor.view.dom);
       const proseLeft = editorBounds.left + (Number.parseFloat(editorStyle.paddingLeft) || 0) * zoom;
       const proseRight = editorBounds.right - (Number.parseFloat(editorStyle.paddingRight) || 0) * zoom;
-      const left = rtl ? Math.max(bounds.right, proseRight) + POINTER.gap * zoom
+      // Following the map, the cursor reads from the margin opposite it.
+      const right = rtl !== followTrace;
+      const left = right ? Math.max(bounds.right, proseRight) + POINTER.gap * zoom
         : Math.min(bounds.left, proseLeft) - (POINTER.gap + POINTER.size) * zoom;
       const top = (line.top + line.bottom) / 2 - POINTER.tipY * zoom;
       // Hiding, rather than clamping, keeps every gesture grounded in its line.
       if (left < clip.left || left + size > clip.right || top < clip.top || top + size > clip.bottom ||
           line.top < clip.top || line.bottom > clip.bottom) return null;
-      const availableWidth = (rtl ? clip.right - left : left + size - clip.left) / zoom;
+      const availableWidth = (right ? clip.right - left : left + size - clip.left) / zoom;
       const availableHeight = (clip.bottom - top) / zoom - POINTER.size - 4;
-      return { left: left / zoom, top: top / zoom, zoom, rtl,
+      return { left: left / zoom, top: top / zoom, zoom, rtl: right,
         ghostWidth: Math.max(0, Math.min(160, availableWidth, availableHeight * 160 / 76)) };
     };
     const place = (point: Point) => {
+      lastPoint.current = { left: point.left, top: point.top };
       element.style.left = `${point.left}px`;
       element.style.top = `${point.top}px`;
       const compact = point.ghostWidth < 120;
@@ -110,14 +123,16 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
       const geometry = JSON.stringify(points);
       if (introduced && previousGeometry === geometry) return;
       previousGeometry = geometry;
+      // Following the map, the cursor hops on from where it was rather than flying in from the panel again.
+      const hopFrom = followTrace && !introduced ? lastPoint.current : null;
       settle();
       place(finalPoint);
       if (introduced) return;
       introduced = true;
       gesture.shown = true;
+      hopping = !!hopFrom;
       const origin = originRef.current?.querySelector(".inline-agent-face") ?? originRef.current;
-      if (motion.matches || !origin?.getClientRects().length) return;
-      const source = origin.getBoundingClientRect();
+      if (motion.matches || (!hopFrom && !origin?.getClientRects().length)) return;
       const visible = points.filter((point): point is Point => point !== null);
       // If pickup is offscreen, show the proposal at its destination without a
       // fictional pickup. Never scroll or move the writer's selection for a tour.
@@ -139,7 +154,7 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
           return { transform: `translate(${dx}px, ${dy}px)`, opacity: index ? 1 : Math.min(1, t * 8), offset: t };
         });
         element.dataset.motion = "travelling";
-        animation = element.animate(keyframes, { duration: index ? TIMING.travel : TIMING.arrive,
+        animation = element.animate(keyframes, { duration: index || hopping ? TIMING.travel : TIMING.arrive,
           easing: POINTER.easing, fill: "both" });
         animation.onfinish = () => {
           element.dataset.motion = index === visible.length - 1 ? "settled" : "reading";
@@ -152,6 +167,8 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
           }, TIMING.pause);
         };
       };
+      if (hopFrom) { travel(0, hopFrom); return; }
+      const source = origin!.getBoundingClientRect();
       travel(0, { left: (source.left + source.width / 2) / finalPoint.zoom - POINTER.size / 2,
         top: (source.top + source.height / 2) / finalPoint.zoom - POINTER.size / 2 });
     };
@@ -180,15 +197,16 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
       editor.off("transaction", interrupt);
       motion.removeEventListener("change", interrupt);
     };
-  }, [editor, range.from, range.to, originRef, replayTrigger, preparedOffer, gestureKey]);
+  }, [editor, range.from, range.to, originRef, replayTrigger, preparedOffer, gestureKey, followTrace]);
 
   return createPortal(
-    <div ref={marker} className="writing-companion-pointer" data-kind={kind} data-offer-kind={preparedOffer?.offer.kind} aria-hidden="true" hidden
+    <div ref={marker} className="writing-companion-pointer" data-kind={kind} data-offer-kind={followTrace ? undefined : preparedOffer?.offer.kind}
+      data-follow-trace={followTrace || undefined} aria-hidden="true" hidden
       style={{ width: POINTER.size, height: POINTER.size }}>
       <svg viewBox="0 0 20 20" focusable="false">
         <path d="M18 2 2 9.5l6.7 2.1 3.1 6.4Z" />
       </svg>
-      {preparedOffer?.offer.kind === "move" && <div className="writing-companion-pointer-ghost">
+      {preparedOffer?.offer.kind === "move" && !followTrace && <div className="writing-companion-pointer-ghost">
         <span className="writing-companion-pointer-ghost-label">Move preview</span>
         <span className="writing-companion-pointer-ghost-excerpt">{preparedOffer.offer.quote}</span>
         <span className="writing-companion-pointer-ghost-thumbnail"><i /><i /><i /></span>

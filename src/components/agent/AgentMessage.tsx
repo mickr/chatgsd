@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import type { QuestionAnswer, TranscriptItem } from "../../context/AgentContext";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentQuestion } from "./AgentQuestion";
+import { TraceRecordCard } from "./TraceRecordCard";
 import { SelectionQuote } from "./SelectionCard";
 import { SkillOfferCard, sourceHost } from "./SkillOfferCard";
 /** " (lines 120–260)" for a ranged read, otherwise nothing. */
@@ -125,6 +126,7 @@ export const AgentMessage = memo(function AgentMessage({
     );
   if (item.type === "activity")
     return <p className="text-xs text-text-muted">{item.text}</p>;
+  if (item.type === "trace") return <TraceRecordCard record={item} />;
   if (item.type === "tool")
     return (
       <details className="agent-panel-tool">

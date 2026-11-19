@@ -267,11 +267,12 @@ pub async fn projects_folder_files(app: tauri::AppHandle, id: String, label: Str
     .await
 }
 
-/// Opens a project file, by its `project:` ID, in its own window.
+/// Opens a project file, by its `project:` ID, in its own window, where the
+/// agent co-edits it under that ID.
 #[tauri::command]
 pub async fn projects_open_file(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let path = note_path(&app, &id).await?;
-    crate::open_file_preview(app, path.to_string_lossy().into_owned())
+    crate::open_project_file(&app, &path, &id)
 }
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {

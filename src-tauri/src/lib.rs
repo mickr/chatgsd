@@ -3039,7 +3039,8 @@ fn is_markdown_extension(path: &Path) -> bool {
 }
 
 // Preview mode: create a lightweight window for editing a single file
-fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String> {
+// A project file's window also carries its `project:` ID, which the agent panel uses.
+fn create_preview_window(app: &AppHandle, file_path: &str, project_id: Option<&str>) -> Result<(), String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -3060,11 +3061,16 @@ fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String>
         .unwrap_or_else(|| "Preview".to_string());
 
     let encoded_path = urlencoding::encode(file_path);
-    let url = format!("index.html?mode=preview&file={}", encoded_path);
+    let mut url = format!("index.html?mode=preview&file={}", encoded_path);
+    if let Some(id) = project_id {
+        url.push_str(&format!("&project={}", urlencoding::encode(id)));
+    }
 
+    // A project file's window leaves room for the agent panel beside the note.
+    let (width, height) = if project_id.is_some() { (1160.0, 720.0) } else { (800.0, 600.0) };
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title(format!("{} — ChatGSD", filename))
-        .inner_size(800.0, 600.0)
+        .inner_size(width, height)
         .min_inner_size(400.0, 300.0)
         .resizable(true)
         .decorations(true);
@@ -3098,7 +3104,14 @@ fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
     }
 
     if !try_select_in_notes_folder(&app, &file_path) {
-        create_preview_window(&app, &path)?;
+        create_preview_window(&app, &path, None)?;
+    }
+    Ok(())
+}
+
+fn open_project_file(app: &AppHandle, path: &Path, id: &str) -> Result<(), String> {
+    if !try_select_in_notes_folder(app, path) {
+        create_preview_window(app, &path.to_string_lossy(), Some(id))?;
     }
     Ok(())
 }
@@ -3124,7 +3137,7 @@ fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
         if is_markdown_extension(&path) && path.is_file() {
             opened_file = true;
             if !try_select_in_notes_folder(app, &path)
-                && create_preview_window(app, &path.to_string_lossy()).is_ok()
+                && create_preview_window(app, &path.to_string_lossy(), None).is_ok()
             {
                 opened_preview = true;
             }
@@ -3327,7 +3340,7 @@ pub fn run() {
                         && path.is_file()
                         && !try_select_in_notes_folder(app, path)
                     {
-                        let _ = create_preview_window(app, &path.to_string_lossy());
+                        let _ = create_preview_window(app, &path.to_string_lossy(), None);
                     }
                 }
             }
@@ -3412,6 +3425,8 @@ pub fn run() {
             agent::conversations::agent_note_memory,
             agent::conversations::agent_forget_memory,
             agent::conversations::agent_observe_wording,
+            agent::conversations::agent_record_trace_memory,
+            agent::conversations::agent_begin_conversation,
             agent::conversations::agent_return_thought,
             agent::conversations::agent_load_conversation,
             agent::conversations::agent_save_conversation,
@@ -3450,7 +3465,7 @@ pub fn run() {
                         && path.is_file()
                         && !try_select_in_notes_folder(_app_handle, &path)
                     {
-                        let _ = create_preview_window(_app_handle, &path.to_string_lossy());
+                        let _ = create_preview_window(_app_handle, &path.to_string_lossy(), None);
                     }
                 }
             }
