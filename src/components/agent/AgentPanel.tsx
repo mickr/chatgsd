@@ -1,5 +1,6 @@
 import { WorkingMemory } from "./WorkingMemory";
 import { McpServices } from "./McpServices";
+import { AntigravitySignIn } from "./AntigravitySignIn";
 import {
   useCallback,
   useEffect,
@@ -642,14 +643,7 @@ export function AgentPanel({
                 <ManageUsage primary />
               ) : conversation.error.kind === "auth" ? (
                 usingAntigravity ? (
-                  <button
-                    type="button"
-                    className="agent-panel-link"
-                    disabled={agent.antigravitySigningIn}
-                    onClick={() => void agent.signInAntigravity?.()}
-                  >
-                    {agent.antigravitySigningIn ? "Opening Google sign-in…" : "Sign in with Google"}
-                  </button>
+                  <AntigravitySignIn />
                 ) : (
                   <ContinueWithChatGPT />
                 )

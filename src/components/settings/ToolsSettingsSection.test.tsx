@@ -13,6 +13,7 @@ vi.mock("../../services/agent", () => ({
   researchBriefDefault: () => Promise.resolve("Prefer primary sources."),
   setupComputerPermissions: vi.fn(),
   isAntigravityModel: (id: string | null | undefined) => typeof id === "string" && id.startsWith("agy:"),
+  openExternalUrl: vi.fn(() => Promise.resolve()),
   errorMessage: String,
 }));
 
@@ -122,4 +123,51 @@ it("offers on-demand Antigravity CLI installation when agy is not found", async 
   expect(installButton).toBeTruthy();
   act(() => installButton.click());
   expect(installAntigravity).toHaveBeenCalledTimes(1);
+});
+
+it("lets the user paste an authorization code or callback URL to finish Antigravity sign-in", async () => {
+  const completeAntigravitySignIn = vi.fn();
+  const cancelAntigravitySignIn = vi.fn();
+  state.agent = {
+    ...state.agent,
+    antigravityEnabled: true,
+    setAntigravityEnabled: vi.fn(),
+    antigravityStatus: {
+      status: "signed_out",
+      detail: "Sign in with Google to use Antigravity models.",
+      binaryPath: "/usr/local/bin/agy",
+    },
+    antigravityLoading: false,
+    antigravityError: null,
+    antigravitySigningIn: false,
+    antigravityAuthUrl: "https://accounts.google.com/o/oauth2/auth?client_id=test",
+    signInAntigravity: vi.fn(),
+    completeAntigravitySignIn,
+    cancelAntigravitySignIn,
+    refreshAntigravityStatus: vi.fn(),
+  };
+  await act(async () => { root.render(<ToolsSettingsSection />); });
+  const input = container.querySelector<HTMLInputElement>(
+    'input[aria-label="Antigravity authorization code or callback URL"]',
+  )!;
+  expect(input).toBeTruthy();
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      "  4/0AeanS0-sample-code  ",
+    );
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const submitButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Finish sign-in",
+  )!;
+  expect(submitButton).toBeTruthy();
+  act(() => submitButton.click());
+  expect(completeAntigravitySignIn).toHaveBeenCalledWith("4/0AeanS0-sample-code");
+
+  const cancelButton = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Cancel",
+  )!;
+  act(() => cancelButton.click());
+  expect(cancelAntigravitySignIn).toHaveBeenCalledTimes(1);
 });

@@ -16,10 +16,47 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WARM_SESSIONS: usize = 6;
 
+pub(super) const BASE_BRIDGE_RULES: &str = "\
+Runtime bridge rules:
+- You are connected to ChatGSD through the `scratch` MCP server.
+- Use ONLY the `mcp_scratch_*` tools (`read_document`, `edit_document`, `replace_selection`, \
+`offer_writing_help`, `set_expression`, `ask_user`, `remember_work`, `search_notes`, \
+`list_notes`, `read_notes`, `find_in_note`, `edit_note`, `note_links`, `read_skill`).
+- Never call built-in shell, terminal, browser, or filesystem tools; the workspace folder is \
+intentionally empty and every note lives inside ChatGSD's tracked editor tools.
+- Every turn already includes the live open note snapshot inside `<live_note>` (identical to \
+calling `read_document`). Do NOT call `read_document` first—go straight to `edit_document`, \
+`replace_selection`, `offer_writing_help`, or your direct answer. Only call `read_document` if \
+`<live_note>` is an outline and you need unseen lines, or if an edit fails because the writer \
+typed concurrently.
+- Minimize tool turns: invoke `edit_document` or `replace_selection` as your single first \
+tool call. Never call `set_expression` or `read_document` before an edit.";
+
 pub(super) struct WarmSession {
     pub acp_session_id: String,
     pub read_only: bool,
     pub last_used: u64,
+}
+
+pub(super) struct StandbySession {
+    pub acp_session_id: String,
+    pub read_only: bool,
+    pub instructions_hash: Option<u64>,
+}
+
+pub(super) struct EnsuredSession {
+    pub acp_session_id: String,
+    pub reused: bool,
+    pub needs_instructions_preamble: bool,
+}
+
+pub(super) fn hash_str(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 pub(super) struct AcpClient {
@@ -32,6 +69,8 @@ pub(super) struct AcpClient {
     request_id: u64,
     queued: VecDeque<Value>,
     sessions: HashMap<String, WarmSession>,
+    standby: Option<StandbySession>,
+    session_models: HashMap<String, String>,
     session_tick: u64,
     pub cached_models: Vec<ModelInfo>,
     variant_map: HashMap<(String, String), String>,
@@ -84,7 +123,11 @@ pub(super) fn permission_outcome(params: &Value) -> Value {
         options
             .and_then(|opts| {
                 opts.iter()
-                    .find(|opt| opt["kind"].as_str() == Some("allow_once"))
+                    .find(|opt| opt["kind"].as_str() == Some("allow_always"))
+                    .or_else(|| {
+                        opts.iter()
+                            .find(|opt| opt["kind"].as_str() == Some("allow_once"))
+                    })
                     .or_else(|| {
                         opts.iter().find(|opt| {
                             opt["kind"]
@@ -262,21 +305,26 @@ fn parse_models(response: &Value) -> ParsedCatalog {
 }
 
 impl AcpClient {
-    pub async fn start(app: &tauri::AppHandle) -> Result<Self, String> {
+    pub async fn start(app: &tauri::AppHandle, default_read_only: bool) -> Result<Self, String> {
         let binary = find_executable(Some(app))
             .ok_or_else(|| "Antigravity CLI (`agy`) was not found on this Mac.".to_owned())?;
         let cwd = workspace_dir(app)?;
         tokio::fs::create_dir_all(&cwd)
             .await
             .map_err(|error| format!("Cannot prepare Antigravity workspace: {error}"))?;
-        let mcp = McpServer::start().await?;
+        let mcp = McpServer::start(default_read_only).await?;
         Self::spawn(binary, cwd, mcp).await
     }
 
     async fn spawn(binary: PathBuf, cwd: PathBuf, mcp: McpServer) -> Result<Self, String> {
         let mut command = Command::new(&binary);
         command
-            .args(["acp", "--stdio", "--include-default-customizations=false"])
+            .args([
+                "acp",
+                "--stdio",
+                "--include-default-customizations=false",
+                "--disable-telemetry",
+            ])
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -314,6 +362,8 @@ impl AcpClient {
             request_id: 0,
             queued: VecDeque::new(),
             sessions: HashMap::new(),
+            standby: None,
+            session_models: HashMap::new(),
             session_tick: 0,
             cached_models: Vec::new(),
             variant_map: HashMap::new(),
@@ -468,6 +518,13 @@ impl AcpClient {
         if model_id.is_empty() {
             return Ok(());
         }
+        if self
+            .session_models
+            .get(acp_session_id)
+            .is_some_and(|current| current == &model_id)
+        {
+            return Ok(());
+        }
         match self
             .rpc(
                 "session/set_model",
@@ -478,7 +535,11 @@ impl AcpClient {
             )
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.session_models
+                    .insert(acp_session_id.to_owned(), model_id);
+                Ok(())
+            }
             Err(error) if error.contains("Unknown model ID") => {
                 // Fall back to ACP configOptions (`model` + `thought_level`).
                 let base = self.base_model_id(raw_model).to_owned();
@@ -504,54 +565,15 @@ impl AcpClient {
                         )
                         .await;
                 }
+                self.session_models
+                    .insert(acp_session_id.to_owned(), model_id);
                 Ok(())
             }
             Err(error) => Err(error),
         }
     }
 
-    pub async fn discover_models(&mut self) -> Result<Vec<ModelInfo>, String> {
-        let response = self
-            .rpc(
-                "session/new",
-                json!({
-                    "cwd": self.cwd,
-                    "mcpServers": [],
-                }),
-            )
-            .await?;
-        let catalog = parse_models(&response);
-        if let Some(sid) = response["sessionId"].as_str() {
-            let _ = self.rpc("session/close", json!({ "sessionId": sid })).await;
-        }
-        self.queued.clear();
-        if catalog.models.is_empty() {
-            return Err("Antigravity returned no models.".into());
-        }
-        self.store_catalog(catalog);
-        Ok(self.cached_models.clone())
-    }
-
-    pub async fn ensure_session(
-        &mut self,
-        chat_session_id: Option<&str>,
-        read_only: bool,
-        system_prompt: &str,
-    ) -> Result<(String, bool), String> {
-        self.session_tick += 1;
-        if let Some(key) = chat_session_id {
-            if let Some(existing) = self.sessions.get_mut(key) {
-                if existing.read_only == read_only {
-                    existing.last_used = self.session_tick;
-                    return Ok((existing.acp_session_id.clone(), true));
-                }
-                let old_id = existing.acp_session_id.clone();
-                self.sessions.remove(key);
-                let _ = self
-                    .rpc("session/close", json!({ "sessionId": old_id }))
-                    .await;
-            }
-        }
+    async fn create_session(&mut self, system_prompt: &str) -> Result<String, String> {
         let response = self
             .rpc(
                 "session/new",
@@ -573,35 +595,161 @@ impl AcpClient {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| "Antigravity returned no session ID.".to_owned())?
             .to_owned();
+        if let Some(current) = response["models"]["currentModelId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+        {
+            self.session_models
+                .insert(acp_session_id.clone(), current.to_owned());
+        }
         let discovered = parse_models(&response);
         self.store_catalog(discovered);
-        if let Some(key) = chat_session_id {
-            self.sessions.insert(
-                key.to_owned(),
-                WarmSession {
-                    acp_session_id: acp_session_id.clone(),
-                    read_only,
-                    last_used: self.session_tick,
-                },
-            );
-            while self.sessions.len() > MAX_WARM_SESSIONS {
-                if let Some((oldest_key, oldest)) = self
-                    .sessions
-                    .iter()
-                    .min_by_key(|(_, session)| session.last_used)
-                    .map(|(k, v)| (k.clone(), v.acp_session_id.clone()))
-                {
-                    self.sessions.remove(&oldest_key);
-                    let _ = self
-                        .rpc("session/close", json!({ "sessionId": oldest }))
-                        .await;
-                }
+        Ok(acp_session_id)
+    }
+
+    pub async fn discover_models(&mut self) -> Result<Vec<ModelInfo>, String> {
+        // Connect the Scratch MCP server during discovery and keep the session
+        // as a warm standby so the first conversation skips `session/new`.
+        let acp_session_id = self.create_session(BASE_BRIDGE_RULES).await?;
+        self.queued.clear();
+        if self.cached_models.is_empty() {
+            self.close_session(&acp_session_id).await;
+            return Err("Antigravity returned no models.".into());
+        }
+        if let Some(old) = self.standby.take() {
+            self.close_session(&old.acp_session_id).await;
+        }
+        self.standby = Some(StandbySession {
+            acp_session_id,
+            read_only: false,
+            instructions_hash: None,
+        });
+        Ok(self.cached_models.clone())
+    }
+
+    pub fn needs_standby(&self, read_only: bool, system_prompt: &str) -> bool {
+        let target_hash = hash_str(system_prompt);
+        !matches!(
+            &self.standby,
+            Some(standby)
+                if standby.read_only == read_only
+                    && standby.instructions_hash == Some(target_hash)
+        )
+    }
+
+    pub async fn prewarm_standby(
+        &mut self,
+        read_only: bool,
+        system_prompt: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<(), String> {
+        let target_hash = hash_str(system_prompt);
+        if matches!(
+            &self.standby,
+            Some(standby)
+                if standby.read_only == read_only
+                    && standby.instructions_hash == Some(target_hash)
+        ) {
+            if let (Some(standby), Some(raw_model)) = (&self.standby, model) {
+                let sid = standby.acp_session_id.clone();
+                let _ = self.apply_model(&sid, raw_model, effort).await;
+            }
+            return Ok(());
+        }
+        if let Some(old) = self.standby.take() {
+            self.close_session(&old.acp_session_id).await;
+        }
+        let acp_session_id = self.create_session(system_prompt).await?;
+        if let Some(raw_model) = model {
+            let _ = self.apply_model(&acp_session_id, raw_model, effort).await;
+        }
+        self.queued.clear();
+        self.standby = Some(StandbySession {
+            acp_session_id,
+            read_only,
+            instructions_hash: Some(target_hash),
+        });
+        Ok(())
+    }
+
+    fn record_warm_session(&mut self, chat_session_id: &str, acp_session_id: &str, read_only: bool) -> Vec<String> {
+        self.sessions.insert(
+            chat_session_id.to_owned(),
+            WarmSession {
+                acp_session_id: acp_session_id.to_owned(),
+                read_only,
+                last_used: self.session_tick,
+            },
+        );
+        let mut evicted = Vec::new();
+        while self.sessions.len() > MAX_WARM_SESSIONS {
+            if let Some((oldest_key, oldest)) = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, session)| session.last_used)
+                .map(|(k, v)| (k.clone(), v.acp_session_id.clone()))
+            {
+                self.sessions.remove(&oldest_key);
+                evicted.push(oldest);
             }
         }
-        Ok((acp_session_id, false))
+        evicted
+    }
+
+    pub async fn ensure_session(
+        &mut self,
+        chat_session_id: Option<&str>,
+        read_only: bool,
+        system_prompt: &str,
+    ) -> Result<EnsuredSession, String> {
+        self.session_tick += 1;
+        if let Some(key) = chat_session_id {
+            if let Some(existing) = self.sessions.get_mut(key) {
+                if existing.read_only == read_only {
+                    existing.last_used = self.session_tick;
+                    return Ok(EnsuredSession {
+                        acp_session_id: existing.acp_session_id.clone(),
+                        reused: true,
+                        needs_instructions_preamble: false,
+                    });
+                }
+                let old_id = existing.acp_session_id.clone();
+                self.sessions.remove(key);
+                self.close_session(&old_id).await;
+            }
+        }
+        let target_hash = hash_str(system_prompt);
+        let claimed = match &self.standby {
+            Some(standby)
+                if standby.read_only == read_only
+                    && (standby.instructions_hash == Some(target_hash)
+                        || (!read_only && standby.instructions_hash.is_none())) =>
+            {
+                self.standby.take()
+            }
+            _ => None,
+        };
+        let (acp_session_id, needs_instructions_preamble) = if let Some(standby) = claimed {
+            (standby.acp_session_id, standby.instructions_hash.is_none())
+        } else {
+            (self.create_session(system_prompt).await?, false)
+        };
+        if let Some(key) = chat_session_id {
+            let evicted = self.record_warm_session(key, &acp_session_id, read_only);
+            for old in evicted {
+                self.close_session(&old).await;
+            }
+        }
+        Ok(EnsuredSession {
+            acp_session_id,
+            reused: false,
+            needs_instructions_preamble,
+        })
     }
 
     pub async fn close_session(&mut self, acp_session_id: &str) {
+        self.session_models.remove(acp_session_id);
         let _ = self
             .rpc("session/close", json!({ "sessionId": acp_session_id }))
             .await;
@@ -625,19 +773,186 @@ impl Drop for AcpClient {
     }
 }
 
-pub(super) async fn run_interactive_login(binary: &Path) -> Result<(), String> {
-    let status = Command::new(binary)
-        .args(["acp", "--login"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
+const LOGIN_START_TIMEOUT: Duration = Duration::from_secs(15);
+const LOGIN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_LOGIN_STDERR_BYTES: usize = 16 * 1024;
+
+pub(super) struct LoginSession {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    stderr: tokio::task::JoinHandle<String>,
+}
+
+pub(super) enum LoginStartOutcome {
+    /// Browser OAuth URL printed by `agy acp --login`; session is waiting on stdin for the code.
+    NeedsCode {
+        auth_url: String,
+        session: Box<LoginSession>,
+    },
+    /// `agy acp --login` exited cleanly without asking for a code.
+    Completed,
+}
+
+impl Drop for LoginSession {
+    fn drop(&mut self) {
+        self.stderr.abort();
+        let _ = self.child.start_kill();
+    }
+}
+
+pub(super) fn extract_auth_url(line: &str) -> Option<String> {
+    for token in line.split_whitespace() {
+        let candidate = token.trim_matches(|ch| matches!(ch, '"' | '\'' | '<' | '>' | '(' | ')' | ',' | ';'));
+        let Ok(parsed) = url::Url::parse(candidate) else {
+            continue;
+        };
+        if parsed.scheme() == "https" && parsed.host_str().is_some() {
+            return Some(parsed.to_string());
+        }
+    }
+    None
+}
+
+fn summarize_login_output(stdout_lines: &[String], stderr: &str) -> String {
+    let detail = stderr
+        .lines()
+        .chain(stdout_lines.iter().map(String::as_str))
+        .map(str::trim)
+        .rfind(|line| !line.is_empty() && extract_auth_url(line).is_none());
+    match detail {
+        Some(message) => format!("Antigravity Google sign-in failed: {message}"),
+        None => "Antigravity Google sign-in did not complete.".to_owned(),
+    }
+}
+
+impl LoginSession {
+    pub async fn start(binary: &Path) -> Result<LoginStartOutcome, String> {
+        let mut command = Command::new(binary);
+        command
+            .args(["acp", "--login"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Cannot start Antigravity sign-in: {error}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Antigravity sign-in stdin unavailable.".to_owned())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Antigravity sign-in stdout unavailable.".to_owned())?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Antigravity sign-in stderr unavailable.".to_owned())?;
+        let stderr = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr_pipe);
+            let mut out = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                if out.len() < MAX_LOGIN_STDERR_BYTES {
+                    out.push_str(&line);
+                }
+                line.clear();
+            }
+            out
+        });
+
+        let mut reader = BufReader::new(stdout);
+        let mut seen_lines = Vec::new();
+        let auth_url = timeout(LOGIN_START_TIMEOUT, async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = reader
+                    .read_line(&mut line)
+                    .await
+                    .map_err(|error| format!("Cannot read Antigravity sign-in output: {error}"))?;
+                if read == 0 {
+                    return Ok::<Option<String>, String>(None);
+                }
+                if let Some(url) = extract_auth_url(&line) {
+                    return Ok(Some(url));
+                }
+                seen_lines.push(line.trim().to_owned());
+            }
+        })
         .await
-        .map_err(|error| format!("Cannot start Antigravity sign-in: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("Antigravity Google sign-in did not complete.".into())
+        .map_err(|_| "Timed out waiting for Antigravity sign-in link.".to_owned())??;
+
+        if let Some(auth_url) = auth_url {
+            return Ok(LoginStartOutcome::NeedsCode {
+                auth_url,
+                session: Box::new(Self {
+                    child,
+                    stdin: Some(stdin),
+                    stdout: reader,
+                    stderr,
+                }),
+            });
+        }
+
+        drop(stdin);
+        let status = timeout(Duration::from_secs(5), child.wait())
+            .await
+            .map_err(|_| "Antigravity sign-in exited unexpectedly.".to_owned())?
+            .map_err(|error| format!("Antigravity sign-in failed: {error}"))?;
+        let stderr_text = stderr.await.unwrap_or_default();
+        if status.success() {
+            Ok(LoginStartOutcome::Completed)
+        } else {
+            Err(summarize_login_output(&seen_lines, &stderr_text))
+        }
+    }
+
+    pub async fn complete(mut self, code: &str) -> Result<(), String> {
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            return Err("Paste the authorization code or callback URL first.".into());
+        }
+        let mut stdin = self
+            .stdin
+            .take()
+            .ok_or_else(|| "Antigravity sign-in session is no longer accepting input.".to_owned())?;
+        let payload = format!("{trimmed}\n");
+        timeout(Duration::from_secs(5), async {
+            stdin.write_all(payload.as_bytes()).await?;
+            stdin.flush().await
+        })
+        .await
+        .map_err(|_| "Timed out sending authorization code to Antigravity.".to_owned())?
+        .map_err(|error| format!("Cannot send authorization code to Antigravity: {error}"))?;
+        drop(stdin);
+
+        let mut stdout_lines = Vec::new();
+        let status = timeout(LOGIN_COMPLETE_TIMEOUT, async {
+            let mut line = String::new();
+            while self.stdout.read_line(&mut line).await.unwrap_or(0) > 0 {
+                let trimmed_line = line.trim();
+                if !trimmed_line.is_empty() {
+                    stdout_lines.push(trimmed_line.to_owned());
+                }
+                line.clear();
+            }
+            self.child
+                .wait()
+                .await
+                .map_err(|error| format!("Antigravity sign-in failed: {error}"))
+        })
+        .await
+        .map_err(|_| "Timed out waiting for Antigravity to verify the authorization code.".to_owned())??;
+
+        let stderr_text = (&mut self.stderr).await.unwrap_or_default();
+        if status.success() {
+            Ok(())
+        } else {
+            Err(summarize_login_output(&stdout_lines, &stderr_text))
+        }
     }
 }
 
@@ -646,9 +961,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_auth_url_finds_https_oauth_link_and_ignores_non_https() {
+        let oauth_line = "  https://accounts.google.com/o/oauth2/auth?client_id=abc&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback\n";
+        assert_eq!(
+            extract_auth_url(oauth_line).as_deref(),
+            Some("https://accounts.google.com/o/oauth2/auth?client_id=abc&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback")
+        );
+        assert_eq!(
+            extract_auth_url("Open this link in a browser to log in with Google:\n"),
+            None
+        );
+        assert_eq!(extract_auth_url("http://insecure.example/callback"), None);
+    }
+
+    #[test]
     fn permission_outcome_allows_only_scratch_mcp_tools() {
         let options = json!([
-            { "optionId": "allow", "kind": "allow_once" },
+            { "optionId": "allow_once_id", "kind": "allow_once" },
+            { "optionId": "allow_always_id", "kind": "allow_always" },
             { "optionId": "deny", "kind": "reject_once" },
         ]);
         let mcp_req = json!({
@@ -657,6 +987,18 @@ mod tests {
         });
         assert_eq!(
             permission_outcome(&mcp_req),
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow_always_id" } })
+        );
+
+        let once_only = json!({
+            "toolCall": { "name": "mcp_scratch_read_document" },
+            "options": [
+                { "optionId": "allow", "kind": "allow_once" },
+                { "optionId": "deny", "kind": "reject_once" },
+            ],
+        });
+        assert_eq!(
+            permission_outcome(&once_only),
             json!({ "outcome": { "outcome": "selected", "optionId": "allow" } })
         );
 

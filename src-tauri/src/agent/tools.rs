@@ -243,6 +243,19 @@ async fn live_note(app: &tauri::AppHandle, run_id: &str) -> Result<LiveNote, Too
     })
 }
 
+/// Fast snapshot of the open live note formatted identically to `read_document`.
+pub(super) async fn live_note_view(app: &tauri::AppHandle, run_id: &str) -> Option<String> {
+    let note = tokio::time::timeout(Duration::from_secs(5), live_note(app, run_id))
+        .await
+        .ok()?
+        .ok()?;
+    Some(format!(
+        "{}\n---\n{}",
+        note.header,
+        reading::view(&note.markdown, None, None)
+    ))
+}
+
 async fn find_in_note(app: &tauri::AppHandle, run_id: &str, ctx: &RunContext, args: &Value) -> ToolOutput {
     let id = args.get("id").and_then(Value::as_str).unwrap_or("");
     let Some(query) = args.get("query").and_then(Value::as_str) else {

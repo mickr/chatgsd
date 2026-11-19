@@ -3424,6 +3424,8 @@ pub fn run() {
             agent::antigravity::antigravity_status,
             agent::antigravity::antigravity_install,
             agent::antigravity::antigravity_sign_in,
+            agent::antigravity::antigravity_sign_in_complete,
+            agent::antigravity::antigravity_sign_in_cancel,
             agent::antigravity::antigravity_shutdown,
             read_file_direct,
             save_file_direct,

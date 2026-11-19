@@ -29,6 +29,10 @@ export interface AntigravityStatus {
   detail: string | null;
   binaryPath: string | null;
 }
+export interface AntigravityLoginStart {
+  authUrl: string | null;
+  status: AntigravityStatus | null;
+}
 export interface AntigravityInstallProgress {
   stage: string;
   detail: string;
@@ -182,7 +186,10 @@ export const reviewWriting = (context: WritingReviewContext) =>
 export const getStatus = () => invoke<AgentStatus>("agent_status");
 export const getAntigravityStatus = () => invoke<AntigravityStatus>("antigravity_status");
 export const antigravityInstall = () => invoke<AntigravityStatus>("antigravity_install");
-export const antigravitySignIn = () => invoke<AntigravityStatus>("antigravity_sign_in");
+export const antigravitySignIn = () => invoke<AntigravityLoginStart>("antigravity_sign_in");
+export const antigravitySignInComplete = (code: string) =>
+  invoke<AntigravityStatus>("antigravity_sign_in_complete", { code });
+export const antigravitySignInCancel = () => invoke<void>("antigravity_sign_in_cancel");
 export const antigravityShutdown = () => invoke<void>("antigravity_shutdown");
 export const onAntigravityInstallProgress = (
   handler: (progress: AntigravityInstallProgress) => void,
@@ -247,5 +254,7 @@ export const onToolRequest = (handler: (payload: ToolRequest) => void) =>
   listen<ToolRequest>("agent:tool-request", ({ payload }) => handler(payload));
 export const openUsage = () =>
   invoke<void>("open_url_safe", { url: "https://chatgpt.com/settings/usage" });
+export const openExternalUrl = (url: string) =>
+  invoke<void>("open_url_safe", { url });
 export const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);

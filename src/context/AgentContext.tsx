@@ -235,9 +235,12 @@ export interface AgentContextValue {
   antigravityInstalling: boolean;
   antigravityInstallProgress: agent.AntigravityInstallProgress | null;
   antigravitySigningIn: boolean;
+  antigravityAuthUrl: string | null;
   refreshAntigravityStatus: () => Promise<void>;
   installAntigravity: () => Promise<void>;
   signInAntigravity: () => Promise<void>;
+  completeAntigravitySignIn: (code: string) => Promise<void>;
+  cancelAntigravitySignIn: () => Promise<void>;
   /** The current note's unanswered ask_user question while its run is active. */
   pendingQuestion: QuestionItem | null;
   answerQuestion: (answer: QuestionAnswer) => Promise<void>;
@@ -333,6 +336,7 @@ export function AgentProvider({
   const [antigravityInstallProgress, setAntigravityInstallProgress] =
     useState<agent.AntigravityInstallProgress | null>(null);
   const [antigravitySigningIn, setAntigravitySigningIn] = useState(false);
+  const [antigravityAuthUrl, setAntigravityAuthUrl] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [computerAccess, updateComputerAccess] = useState(true);
   const [webAccess, updateWebAccess] = useState(true);
@@ -1243,6 +1247,7 @@ export function AgentProvider({
     if (!enabled) {
       setAntigravityStatus(null);
       setAntigravityError(null);
+      setAntigravityAuthUrl(null);
       void agent.antigravityShutdown().catch(() => {});
     }
   }, [persist]);
@@ -1281,17 +1286,59 @@ export function AgentProvider({
     setAntigravitySigningIn(true);
     setAntigravityError(null);
     try {
-      const next = await agent.antigravitySignIn();
-      setAntigravityStatus(next);
-      reloadModels();
+      const started = await agent.antigravitySignIn();
+      if (started.authUrl) {
+        setAntigravityAuthUrl(started.authUrl);
+      } else {
+        setAntigravityAuthUrl(null);
+        if (started.status) {
+          setAntigravityStatus(started.status);
+          reloadModels();
+        }
+      }
     } catch (error) {
       const message = agent.errorMessage(error);
+      setAntigravityAuthUrl(null);
       setAntigravityError(message);
       toast.error(`Antigravity sign-in: ${message}`);
     } finally {
       setAntigravitySigningIn(false);
     }
   }, [reloadModels]);
+  const completeAntigravitySignIn = useCallback(async (code: string) => {
+    const trimmed = code.trim();
+    if (!trimmed) {
+      setAntigravityError("Paste the authorization code or callback URL first.");
+      return;
+    }
+    setAntigravitySigningIn(true);
+    setAntigravityError(null);
+    try {
+      const next = await agent.antigravitySignInComplete(trimmed);
+      setAntigravityAuthUrl(null);
+      setAntigravityStatus(next);
+      reloadModels();
+      if (next.status === "ready") {
+        toast.success("Signed in to Antigravity");
+      }
+    } catch (error) {
+      const message = agent.errorMessage(error);
+      setAntigravityAuthUrl(null);
+      setAntigravityError(message);
+      toast.error(`Antigravity sign-in: ${message}`);
+    } finally {
+      setAntigravitySigningIn(false);
+    }
+  }, [reloadModels]);
+  const cancelAntigravitySignIn = useCallback(async () => {
+    setAntigravityAuthUrl(null);
+    setAntigravityError(null);
+    try {
+      await agent.antigravitySignInCancel();
+    } catch {
+      // Ignore cancel errors when no session is active.
+    }
+  }, []);
   const setResearchModel = useCallback((next: string) => {
     setSavedResearchModel(next);
     persist({ agentResearchModel: next });
@@ -1818,9 +1865,12 @@ export function AgentProvider({
       antigravityInstalling,
       antigravityInstallProgress,
       antigravitySigningIn,
+      antigravityAuthUrl,
       refreshAntigravityStatus,
       installAntigravity,
       signInAntigravity,
+      completeAntigravitySignIn,
+      cancelAntigravitySignIn,
       pendingQuestion,
       answerQuestion,
       coediting,
@@ -1901,9 +1951,12 @@ export function AgentProvider({
       antigravityInstalling,
       antigravityInstallProgress,
       antigravitySigningIn,
+      antigravityAuthUrl,
       refreshAntigravityStatus,
       installAntigravity,
       signInAntigravity,
+      completeAntigravitySignIn,
+      cancelAntigravitySignIn,
       pendingQuestion,
       answerQuestion,
       coediting,

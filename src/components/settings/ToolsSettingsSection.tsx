@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Button, Select } from "../ui";
 import { AntigravityIcon, SpinnerIcon, ChatGPTIcon } from "../icons";
 import { useAgent } from "../../context/AgentContext";
+import { AntigravitySignIn } from "../agent/AntigravitySignIn";
 import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "../agent/ChatGPTAccount";
 import { ComputerPermissions } from "../agent/ComputerPermissions";
 import { mod } from "../../lib/platform";
@@ -75,16 +76,18 @@ function AntigravityIntegrationCard() {
   const error = agent.antigravityError ?? null;
   const installing = !!agent.antigravityInstalling;
   const installProgress = agent.antigravityInstallProgress ?? null;
-  const signingIn = !!agent.antigravitySigningIn;
+  const authPending = !!agent.antigravityAuthUrl;
   const statusLabel = !enabled
     ? "Off"
     : installing
       ? "Installing…"
-      : loading
-        ? "Checking…"
-        : agyStatus
-          ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status]
-          : "Enabled";
+      : authPending
+        ? "Finish sign-in"
+        : loading
+          ? "Checking…"
+          : agyStatus
+            ? ANTIGRAVITY_STATUS_LABELS[agyStatus.status]
+            : "Enabled";
   return (
     <div className="mt-3 rounded-[10px] border border-border p-4 space-y-3">
       <div className="flex items-center justify-between gap-3">
@@ -141,7 +144,7 @@ function AntigravityIntegrationCard() {
           <p className="text-text-muted">Using your local Antigravity plan</p>
         </div>
       )}
-      {enabled && !installing && !loading && agyStatus?.detail && (
+      {enabled && !installing && !loading && !authPending && agyStatus?.detail && (
         <p className="text-xs text-text-muted">{agyStatus.detail}</p>
       )}
       {enabled && !installing && !loading && agyStatus?.status === "unavailable" && (
@@ -162,20 +165,8 @@ function AntigravityIntegrationCard() {
           </button>
         </div>
       )}
-      {enabled && !installing && !loading && agyStatus?.status === "signed_out" && (
-        <button
-          type="button"
-          className="agent-panel-chatgpt"
-          disabled={signingIn}
-          onClick={() => { void agent.signInAntigravity?.(); }}
-        >
-          {signingIn ? (
-            <SpinnerIcon className="w-4 h-4 animate-spin" />
-          ) : (
-            <AntigravityIcon className="w-4.5 h-4.5" />
-          )}
-          {signingIn ? "Waiting for browser…" : "Continue with Antigravity"}
-        </button>
+      {enabled && !installing && !loading && (agyStatus?.status === "signed_out" || authPending) && (
+        <AntigravitySignIn />
       )}
       {enabled && !installing && !loading && (agyStatus?.status === "ready" || agyStatus?.status === "error" || (error && agyStatus?.status !== "unavailable")) && (
         <div className="flex items-center justify-between text-xs">

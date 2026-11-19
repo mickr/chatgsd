@@ -33,7 +33,7 @@ pub(super) struct McpServer {
 }
 
 impl McpServer {
-    pub async fn start() -> Result<Self, String> {
+    pub async fn start(default_read_only: bool) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|error| format!("Cannot start Antigravity MCP bridge: {error}"))?;
@@ -50,10 +50,11 @@ impl McpServer {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
+                let _ = stream.set_nodelay(true);
                 let state = Arc::clone(&task_active);
                 let auth = expected_auth.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, state, &auth).await;
+                    let _ = handle_connection(stream, state, &auth, default_read_only).await;
                 });
             }
         });
@@ -94,9 +95,14 @@ pub(super) fn mcp_tool_list(read_only: bool) -> (Vec<Value>, HashSet<String>) {
     let mut list = Vec::with_capacity(specs.len());
     for spec in specs {
         permitted.insert(spec.name.to_owned());
+        let description = if spec.name == "read_document" {
+            "Read additional lines of the current live note. Every turn already includes <live_note> (identical to calling read_document with null bounds), so only call this when <live_note> is an outline and you need more lines (pass 1-based start_line and end_line, up to 400 lines) or when an edit fails because the writer typed concurrently."
+        } else {
+            spec.description
+        };
         list.push(json!({
             "name": spec.name,
-            "description": spec.description,
+            "description": description,
             "inputSchema": spec.parameters,
         }));
     }
@@ -116,6 +122,7 @@ async fn handle_connection<S>(
     stream: S,
     active: Arc<RwLock<Option<ActiveMcpRun>>>,
     expected_auth: &str,
+    default_read_only: bool,
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -160,7 +167,7 @@ where
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return write_http(reader.get_mut(), 400, "Bad Request", None).await;
     };
-    let Some(response) = dispatch_rpc(request, &active).await else {
+    let Some(response) = dispatch_rpc(request, &active, default_read_only).await else {
         return write_http(reader.get_mut(), 202, "Accepted", None).await;
     };
     let bytes = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
@@ -196,6 +203,7 @@ where
 async fn dispatch_rpc(
     request: Value,
     active: &Arc<RwLock<Option<ActiveMcpRun>>>,
+    default_read_only: bool,
 ) -> Option<Value> {
     let method = request["method"].as_str().unwrap_or_default();
     let id = request.get("id").cloned();
@@ -220,7 +228,7 @@ async fn dispatch_rpc(
                 let guard = active.read().await;
                 match guard.as_ref() {
                     Some(run) => run.tools.clone(),
-                    None => mcp_tool_list(false).0,
+                    None => mcp_tool_list(default_read_only).0,
                 }
             };
             json!({ "tools": tools })
@@ -316,7 +324,7 @@ mod tests {
             async move {
                 let (mut client, server) = tokio::io::duplex(64 * 1024);
                 let task = tokio::spawn(async move {
-                    handle_connection(server, active, "Bearer secret").await
+                    handle_connection(server, active, "Bearer secret", false).await
                 });
                 client.write_all(req.as_bytes()).await.unwrap();
                 client.shutdown().await.unwrap();
