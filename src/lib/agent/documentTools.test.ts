@@ -427,11 +427,13 @@ describe("agent presence", () => {
 
   it("clears a deleted agent range and preserves an independent reading caret", async () => {
     const editor = openNote("User paragraph.\n\nTarget: original.");
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1);
     const binding = captureRunBinding(editor, "run")!;
+    const startCaret = agentChangesKey.getState(editor.state)!.presence["agent"];
     await executeDocumentTool(editor, binding, "read_document", {});
     const readCaret = agentChangesKey.getState(editor.state)!.presence["agent"];
     expect(readCaret).toBeDefined();
-    expect(readCaret!.from).toBe(readCaret!.to);
+    expect(readCaret).toEqual(startCaret);
     await executeDocumentTool(editor, binding, "edit_document", {
       edits: [{ old_text: "original", new_text: "revised" }],
     });

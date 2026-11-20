@@ -643,8 +643,9 @@ export async function executeDocumentTool(
             ? `(first ${SELECTION_PREVIEW_CHARS} of ${markdown.length} characters) ${JSON.stringify(markdown.slice(0, SELECTION_PREVIEW_CHARS))}`
             : JSON.stringify(markdown);
       }
-      const position = editor.state.doc.firstChild?.isTextblock ? 1 : 0;
-      setAgentPresence(editor, range ?? { from: position, to: position });
+      // Reading the whole note isn't work at its start: moving the caret there
+      // would pull a following view away from where the agent will write.
+      if (range && range.from < range.to) setAgentPresence(editor, range);
       return {
         ok: true,
         output: `Note: ${editor.storage.scratchDocument.title}\nSelection: ${selection}\n---\n${serializeDocument(editor)}`,
