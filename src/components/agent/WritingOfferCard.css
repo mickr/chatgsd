@@ -47,39 +47,63 @@
 .writing-offer-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .agent-panel-chip:disabled { opacity: .5; cursor: default; }
 .argument-map-steps { display: flex; flex-direction: column; gap: 0; list-style: none; margin: 0; padding: 0; }
-.argument-map-steps > li { position: relative; display: flex; gap: 10px; padding-bottom: 12px; }
+.argument-map-steps > li, .argument-map-step-row { position: relative; display: flex; gap: 10px; padding-bottom: 12px; }
+.argument-map-step-row:last-child { padding-bottom: 2px; }
 /* The line joining each step to the next, the same thread the margin draws in the note. */
-.argument-map-steps > li:not(:last-child)::before { content: ""; position: absolute; top: 20px; bottom: 2px; left: 8.5px; border-left: 1.4px solid var(--color-border); }
-.argument-map-steps > li[data-unsure]:not(:last-child)::before { border-left-style: dashed; }
+.argument-map-steps > li:not(:last-child)::before,
+.argument-map-step-row:not(:last-child)::before { content: ""; position: absolute; top: 20px; bottom: 2px; left: 8.5px; border-left: 1.4px solid var(--color-border); }
+.argument-map-steps > li[data-unsure]:not(:last-child)::before,
+.argument-map-step-row[data-unsure]:not(:last-child)::before { border-left-style: dashed; }
+.argument-map-steps > li[data-role="tensions"]:not(:last-child)::before,
+.argument-map-step-row[data-role="tensions"]:not(:last-child)::before { border-left-color: #d97706; }
 .argument-map-steps-number { flex-shrink: 0; display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border: 1.4px solid currentColor; border-radius: 50%; font-size: 9px; font-weight: 600; font-variant-numeric: tabular-nums; background: var(--color-bg); }
-li[data-unsure] > .argument-map-steps-number { border-style: dashed; }
-li[data-active] > .argument-map-steps-number { background: var(--color-text); color: var(--color-bg); }
-li[data-decision] > .argument-map-steps-number { width: 12px; height: 12px; margin: 4px 3px 0; border-radius: 2px; transform: rotate(45deg); background: currentColor; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-unsure] > .argument-map-steps-number { border-style: dashed; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-role="tensions"] > .argument-map-steps-number { border-color: #d97706; color: #d97706; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-active] > .argument-map-steps-number { background: var(--color-text); color: var(--color-bg); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-role="tensions"][data-active] > .argument-map-steps-number { background: #d97706; border-color: #d97706; color: #fff; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-decision] > .argument-map-steps-number { width: 12px; height: 12px; margin: 4px 3px 0; border-radius: 2px; transform: rotate(45deg); background: currentColor; }
 .argument-map-steps-body { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; flex: 1; }
 .argument-map-steps-quote { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; padding: 0 4px; margin-left: -4px; border-radius: 3px; text-align: left; font-style: italic; cursor: pointer; background: color-mix(in srgb, var(--color-selection) 35%, transparent); }
-li[data-unsure] .argument-map-steps-quote { background: none; text-decoration: underline dashed color-mix(in srgb, var(--color-text) 55%, transparent); text-underline-offset: 3px; }
-li[data-decision] .argument-map-steps-quote { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
-li[data-active] .argument-map-steps-quote { background: var(--color-selection); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-role="tensions"] .argument-map-steps-quote { background: color-mix(in srgb, #f59e0b 16%, transparent); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-unsure] .argument-map-steps-quote { background: none; text-decoration: underline dashed color-mix(in srgb, var(--color-text) 55%, transparent); text-underline-offset: 3px; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-decision] .argument-map-steps-quote { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-branch] .argument-map-steps-quote { background: color-mix(in srgb, var(--color-selection) 75%, transparent); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-active] .argument-map-steps-quote { background: var(--color-selection); }
 .argument-map-steps-quote:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .argument-map-steps-body > p { color: var(--color-text-muted); }
 .argument-map-steps-unsure { color: var(--color-text); font-weight: 500; }
-.argument-map-steps-realign { font-size: 11px; color: var(--color-text-muted); cursor: pointer; }
-.argument-map-steps-realign:hover:not(:disabled) { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
-.argument-map-steps-realign:disabled { opacity: .45; cursor: not-allowed; }
+.argument-map-steps-confirmed, .argument-map-steps-resolved { color: var(--color-accent); font-weight: 500; }
+.argument-map-steps-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.argument-map-steps-confirm, .argument-map-steps-realign, .argument-map-steps-source-check { font-size: 11px; color: var(--color-text-muted); cursor: pointer; }
+.argument-map-steps-confirm { color: var(--color-text); font-weight: 500; }
+.argument-map-steps-confirm:hover:not(:disabled),
+.argument-map-steps-realign:hover:not(:disabled),
+.argument-map-steps-source-check:hover:not(:disabled) { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
+.argument-map-steps-confirm:disabled,
+.argument-map-steps-realign:disabled,
+.argument-map-steps-source-check:disabled { opacity: .45; cursor: not-allowed; }
+.writing-offer-assumption { display: flex; flex-direction: column; gap: 6px; padding: 9px 11px; border: 1px dashed var(--color-border); border-radius: 8px; background: color-mix(in srgb, var(--color-bg-secondary) 65%, transparent); font-size: 12px; }
+.writing-offer-assumption > p { color: var(--color-text-muted); }
+.writing-offer-assumption-more { font-size: 11px; color: var(--color-text-muted); }
 .argument-map-steps-correct { display: flex; flex-direction: column; gap: 6px; width: 100%; }
 .argument-map-steps-correct textarea { width: 100%; padding: 8px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-secondary); color: inherit; font: inherit; resize: vertical; min-height: 54px; }
 .argument-map-steps-correct textarea:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .argument-map-steps-source { font-size: 11px; color: var(--color-text-muted); overflow-wrap: anywhere; }
 .argument-map-steps-source strong { color: var(--color-text); font-weight: 600; }
 .argument-map-steps-source a { color: var(--color-text); text-decoration: none; }
-li[data-source] > .argument-map-steps-number { border-style: dotted; }
-li[data-source] .argument-map-steps-quote { background: var(--color-bg-secondary); font-style: normal; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-source] > .argument-map-steps-number { border-style: dotted; }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-source] .argument-map-steps-quote { background: var(--color-bg-secondary); font-style: normal; }
+.argument-map-steps-tension { display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; color: #d97706; background: color-mix(in srgb, #f59e0b 14%, transparent); }
+.argument-map-genui { display: flex; flex-direction: column; gap: 8px; }
+.argument-map-branch-bar { display: flex; flex-wrap: wrap; gap: 5px; }
+.argument-map-branch-bar .agent-panel-chip[aria-pressed="true"] { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.argument-map-branch-bar .agent-panel-chip[data-tension] { color: #d97706; border-color: color-mix(in srgb, #d97706 45%, var(--color-border)); }
 .argument-map-steps-body strong { font-weight: 600; color: var(--color-text); }
 .argument-map-steps-quote.argument-map-steps-outcome { -webkit-line-clamp: 3; font-style: normal; white-space: pre-line; background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
 .argument-map-steps-quote.argument-map-steps-focus { padding-left: 8px; margin-left: 0; border-left: 2px solid currentColor; border-radius: 0 3px 3px 0; background: none;
   text-decoration: underline solid color-mix(in srgb, var(--color-text) 70%, transparent); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
-li[data-active] .argument-map-steps-quote.argument-map-steps-outcome { background: color-mix(in srgb, var(--color-accent) 14%, transparent); }
-li[data-active] .argument-map-steps-quote.argument-map-steps-focus { background: var(--color-selection); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-active] .argument-map-steps-quote.argument-map-steps-outcome { background: color-mix(in srgb, var(--color-accent) 14%, transparent); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-active] .argument-map-steps-quote.argument-map-steps-focus { background: var(--color-selection); }
 .agent-trace-record { border: 1px solid var(--color-border); border-radius: 10px; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
 .agent-trace-record > summary { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; list-style: none; }
 .agent-trace-record > summary::-webkit-details-marker { display: none; }
@@ -90,7 +114,7 @@ li[data-active] .argument-map-steps-quote.argument-map-steps-focus { background:
 .agent-trace-record .argument-map-steps-quote { cursor: default; }
 .agent-trace-record-correction { color: var(--color-text) !important; }
 /* A step that lives only in the conversation: a small hollow waypoint, no number, since there is nothing in the note to point to. */
-li[data-offpage] > .argument-map-steps-number { width: 10px; height: 10px; margin: 5px 4px 0; border-width: 1.4px; border-style: solid; background: var(--color-bg); }
+:is(.argument-map-steps > li, .argument-map-step-row)[data-offpage] > .argument-map-steps-number { width: 10px; height: 10px; margin: 5px 4px 0; border-width: 1.4px; border-style: solid; background: var(--color-bg); }
 /* A conversation excerpt, set like a quoted message rather than a highlight in the note. */
 .argument-map-steps-excerpt { margin: 0; padding: 2px 0 2px 9px; border-left: 2px solid var(--color-border); color: var(--color-text); max-height: none; white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .argument-map-steps-links { display: flex; gap: 10px; font-size: 11px; }

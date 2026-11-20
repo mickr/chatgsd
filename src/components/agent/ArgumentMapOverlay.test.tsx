@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Editor } from "@tiptap/core";
 import { ArgumentMapOverlay } from "./ArgumentMapOverlay";
-import type { ArgumentMapState } from "../editor/ArgumentMap";
+import { argumentMapFor, type ArgumentMapState } from "../editor/ArgumentMap";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root;
@@ -55,4 +55,68 @@ it("shows a one-line highlight as the diamond alone", () => {
   render({ steps: [], decision: { from: 41, to: 45, via: [], block: { from: 40, to: 48 } }, active: null, length: 0 });
   expect(scroll.querySelector(".argument-map-rail")).toBeNull();
   expect(scroll.querySelectorAll(".argument-map-node")).toHaveLength(1);
+});
+
+it("draws converging branches in distinct bow lanes and marks tension and off-page root branches", () => {
+  const map = argumentMapFor({
+    trace: [{ from: 2, to: 8 }, { from: 22, to: 28 }, null],
+    source: { from: 61, to: 69 },
+    provenance: [null, null, { kind: "web" }],
+    offer: {
+      trace: [
+        { sure: true, leads_to: null },
+        { sure: true, leads_to: null, role: "tensions" },
+        { sure: false, leads_to: null },
+      ],
+    },
+  }, 1);
+  act(() => root.render(
+    <ArgumentMapOverlay
+      editor={editor}
+      map={map}
+      onSelect={vi.fn()}
+      trace={[
+        { quote: "a", reading: "Premise 1", sure: true, leads_to: null },
+        { quote: "b", reading: "Competing point", sure: true, leads_to: null, role: "tensions" },
+        { quote: "c", reading: "Web study", sure: false, leads_to: null, source: "e1" },
+      ]}
+    />,
+  ));
+  const arrows = [...scroll.querySelectorAll(".argument-map-arrow")];
+  // Two note branches + one standalone off-page `web` root branch all converge on the diamond.
+  expect(arrows).toHaveLength(3);
+  expect(arrows[0].getAttribute("d")).not.toBe(arrows[1].getAttribute("d"));
+  expect(arrows[1].getAttribute("data-role")).toBe("tensions");
+  expect(arrows[1].hasAttribute("data-active")).toBe(true);
+  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("web");
+});
+
+it("draws parallel note and web branches converging into an intermediate synthesis step before the outcome", () => {
+  const map = argumentMapFor({
+    trace: [{ from: 2, to: 8 }, null, { from: 32, to: 38 }],
+    source: { from: 61, to: 69 },
+    provenance: [null, { kind: "web" }, null],
+    offer: {
+      trace: [
+        { sure: true, leads_to: 3 },
+        { sure: true, leads_to: 3 },
+        { sure: true, leads_to: null },
+      ],
+    },
+  }, 2);
+  act(() => root.render(
+    <ArgumentMapOverlay
+      editor={editor}
+      map={map}
+      onSelect={vi.fn()}
+      trace={[
+        { quote: "a", reading: "Note passage", sure: true, leads_to: 3 },
+        { quote: "b", reading: "Web source", sure: true, source: "e1", leads_to: 3 },
+        { quote: "c", reading: "Synthesis claim", sure: true, leads_to: null },
+      ]}
+    />,
+  ));
+  // Step 1 -> Step 3, Web root -> Step 3, and Step 3 -> Outcome ♦ all render without forcing 1 -> 2 -> 3.
+  expect(scroll.querySelectorAll(".argument-map-arrow")).toHaveLength(3);
+  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("web");
 });

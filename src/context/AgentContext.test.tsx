@@ -1576,6 +1576,181 @@ describe("structured writing offers", () => {
     expect(prompt).toContain("I meant: I want a slow one.");
     expect(prompt).toContain('"correctedStep":1');
   });
+  it("supplies the conversation ledger to question and realign traces, re-delivers late corrections, and reloads saved maps", async () => {
+    await readyWithModels();
+    await act(async () => { await current.send("Keep the coastal route."); });
+    act(() => {
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "text_delta", text: "We can anchor the route at Big Sur." } });
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+    });
+    await settle();
+
+    // Forward "Trace my argument" now receives the conversation ledger.
+    await act(async () => { await current.requestWritingHelp("question"); });
+    const questionPrompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(questionPrompt).toContain('"text":"Keep the coastal route."');
+    expect(questionPrompt).toContain('"text":"We can anchor the route at Big Sur."');
+    await deliver({
+      ...offer,
+      kind: "question",
+      replacement: null,
+      question: "Why Big Sur?",
+      trace: [{ quote: "anchor the route at Big Sur", reading: "We discussed Big Sur.", sure: true, source: "e2" }],
+    });
+    expect(current.writingOffer?.prepared.provenance[0]?.kind).toBe("chat");
+
+    const savedTrace = current.conversation.items.find(item => item.type === "trace")!;
+    expect(savedTrace).toBeDefined();
+
+    // A coedit check-in delivers the map to the main agent without closing the open offer;
+    // correcting a step afterward clears `delivered` so the writer's next message carries it.
+    await act(async () => { await current.send("Document activity", false, "coedit", { checkIn: true }); });
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+    expect(current.conversation.items.find(item => item.type === "trace")).toMatchObject({ delivered: true });
+
+    await act(async () => { await current.requestWritingHelp("realign", { answer: "Big Sur is a day stop, not the hub.", step: 0 }); });
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+    expect(current.conversation.items.find(item => item.type === "trace")?.delivered).toBeUndefined();
+
+    await act(async () => { await current.send("Update the itinerary"); });
+    expect(vi.mocked(agent.startRun).mock.lastCall![0].prompt).toContain("Big Sur is a day stop, not the hub.");
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+
+    // Reloading a saved conversation preserves valid trace records and drops corrupt ones.
+    vi.mocked(agent.loadConversation).mockResolvedValueOnce([
+      { id: "u-saved", type: "user", text: "Keep the coastal route." },
+      { ...savedTrace, delivered: true },
+      { id: "trace:corrupt", type: "trace", offer: { quote: 123 } },
+    ]);
+    await act(async () => { await current.openConversation("session-saved"); });
+    const reloaded = current.conversation.items.filter(item => item.type === "trace");
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0]).toMatchObject({ id: savedTrace.id, delivered: true });
+  });
+  it("reanchors saved meaning quotes in working memory as the writer edits the passage", async () => {
+    vi.mocked(agent.getNoteMemory).mockResolvedValue({
+      documentId: "test-document",
+      revision: 1,
+      entries: [{ key: "meaning-trip", kind: "choice", status: "open", summary: "The writer means: A slow trip", quote: "Trip plan", next: null }],
+    });
+    await readyWithModels();
+    await settle();
+
+    // Editing inside the anchored quote updates its saved quote after idle.
+    vi.useFakeTimers();
+    act(() => {
+      const pos = 1 + editor.getText().indexOf("plan");
+      editor.view.dispatch(editor.state.tr.insertText("coastal ", pos));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    await settle();
+    expect(agent.recordTraceMemory).toHaveBeenCalledWith("/notes", "test-document", "me@example.com", {
+      kind: "reanchor",
+      key: "meaning-trip",
+      quote: "Trip coastal plan",
+    });
+    vi.useRealTimers();
+  });
+  it("opens chat-authored argument maps, passes open maps to chat, and confirms unsure steps in one click", async () => {
+    await readyWithModels();
+    editor.commands.setContent("<p>Premise one.</p><p>Trip plan</p>");
+
+    // A main chat turn that maps the argument opens the margin map and saves the trace record.
+    await act(async () => { await current.send("Map how my argument connects"); });
+    await act(async () => {
+      await mocks.toolHandler?.({
+        runId: "run-1",
+        requestId: "chat-map-1",
+        name: "offer_writing_help",
+        args: {
+          ...offer,
+          kind: "question",
+          replacement: null,
+          question: "How does Premise one lead to Trip plan?",
+          trace: [{ quote: "Premise one.", reading: "Assumed premise.", sure: false, source: null, leads_to: null, role: "supports" }],
+        },
+      });
+    });
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+    expect(current.writingOffer?.prepared.offer.trace[0].sure).toBe(false);
+    expect(current.conversation.items.find(item => item.type === "trace")).toMatchObject({ requested: "chat", delivered: true });
+
+    // Confirming an unsure assumption turns it solid immediately and saves it to working memory.
+    vi.mocked(agent.recordTraceMemory).mockClear();
+    act(() => current.confirmArgumentStep(0));
+    expect(current.writingOffer?.prepared.offer.trace[0].sure).toBe(true);
+    expect(agent.recordTraceMemory).toHaveBeenCalledWith("/notes", "test-document", "me@example.com", {
+      kind: "meaning",
+      quote: "Premise one.",
+      meant: "Assumed premise.",
+      read_as: "",
+    });
+    expect(current.conversation.items.find(item => item.type === "trace")).toMatchObject({
+      confirmed: [{ step: 0, quote: "Premise one.", reading: "Assumed premise." }],
+    });
+  });
+  it("suppresses a background check-in gap already answered in conversation and supports 1-click source checks on unsure steps", async () => {
+    editor.commands.setContent("<p>Latency dropped 40%.</p><p>Pack light.</p>");
+    editor.commands.setTextSelection(30);
+    await readyWithModels();
+
+    // Earlier conversation turn answers the latency question.
+    await act(async () => { await current.send("The 40% drop refers to p99 tail latency."); });
+    act(() => mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } }));
+    await settle();
+
+    // A background check-in later tries to surface that same uncertainty as a question gap: it is suppressed, keeping starters.
+    vi.mocked(agent.reviewWriting).mockResolvedValueOnce({ focus: "clarity", anchor: 0, route: "fast" });
+    await act(async () => { await current.startCompanion(); });
+    const checkInPrompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(checkInPrompt).toContain("p99 tail latency");
+    await act(async () => {
+      await mocks.toolHandler?.({
+        runId: "run-1",
+        requestId: "offer-dup",
+        name: "offer_writing_help",
+        args: {
+          ...offer,
+          kind: "question",
+          quote: "Latency dropped 40%.",
+          replacement: null,
+          question: "Is this p99 latency?",
+          trace: [{ quote: "Latency dropped 40%.", reading: "I took this as p99 latency.", sure: false }],
+        },
+      });
+    });
+    act(() => {
+      mocks.eventHandler?.({
+        runId: "run-1",
+        event: { type: "text_delta", text: "Starters:\nCompare median latency\nAdd benchmark setup" },
+      });
+      mocks.eventHandler?.({ runId: "run-1", event: { type: "done", stopReason: "completed" } });
+    });
+    await settle();
+    expect(current.writingOffer).toBeNull();
+    expect(current.writingStarters).toEqual(["Compare median latency", "Add benchmark setup"]);
+
+    // For a genuine new unsure step, 1-click "Check a source" runs web evidence targeted at that step's assumption.
+    act(() => current.setWebAccess(true));
+    await act(async () => { await current.requestWritingHelp("rewrite"); });
+    await deliver({
+      ...offer,
+      quote: "Latency dropped 40%.",
+      replacement: "Tail latency fell by 40%.",
+      trace: [{ quote: "Pack light.", reading: "Assumed mobile cold-start budget under 200ms.", sure: false }],
+    });
+    expect(current.writingOffer?.prepared.offer.trace[0].sure).toBe(false);
+    await act(async () => { await current.requestWritingHelp("evidence", { step: 0 }); });
+    const evidenceCall = vi.mocked(agent.startRun).mock.lastCall![0];
+    expect(evidenceCall.webAccess).toBe(true);
+    expect(evidenceCall.prompt).toContain('Check a source for step 1 of how you read this note ("Pack light.")');
+    expect(evidenceCall.prompt).toContain("Assumed mobile cold-start budget under 200ms.");
+  });
   it("marks an offer stale when its passage changes and prevents acceptance", async () => {
     await readyWithModels();
     await act(async () => { await current.requestWritingHelp("rewrite"); });

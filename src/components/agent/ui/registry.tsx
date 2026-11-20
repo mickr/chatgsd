@@ -3,7 +3,7 @@ import { defineRegistry, useBoundProp } from "@json-render/react";
 import { catalog } from "../../../lib/agent/ui/catalog";
 import { cn } from "../../../lib/utils";
 import { isProjectFileId, openFile } from "../../../services/projects";
-import { WritingSuggestionView } from "./writingOfferContext";
+import { TraceOutcomeView, TraceStepView, WritingSuggestionView } from "./writingOfferContext";
 
 /** Lets NoteLink open a note without the model wiring an action. Project files open in their own window. */
 export const OpenNoteContext = createContext<(id: string) => void>(() => {});
@@ -192,6 +192,15 @@ export const { registry } = defineRegistry(catalog, {
       <SuggestionsView items={list<unknown>(props.items).map(text).map((item) => item.trim()).filter(Boolean).slice(0, MAX_SUGGESTIONS)} />
     ),
     WritingSuggestion: ({ props }) => <WritingSuggestionView id={typeof props.id === "string" ? props.id : ""} />,
+    TraceStep: ({ props }) => (
+      <TraceStepView
+        offerId={typeof props.offerId === "string" ? props.offerId : null}
+        step={typeof props.step === "number" ? props.step : -1}
+      />
+    ),
+    TraceOutcome: ({ props }) => (
+      <TraceOutcomeView offerId={typeof props.offerId === "string" ? props.offerId : null} />
+    ),
     Choice: ({ props, bindings }) => {
       const [value, setValue] = useBoundProp<string | string[] | null>(
         props.value,

@@ -24,7 +24,7 @@ use transport::{
 use uuid::Uuid;
 
 pub const MODEL_PREFIX: &str = "agy:";
-const ACCOUNT_KEY: &str = "antigravity";
+pub(super) const ACCOUNT_KEY: &str = "antigravity";
 
 static CLIENT: Mutex<Option<AcpClient>> = Mutex::const_new(None);
 /// Separate warm client for background read-only check-ins so they never block
@@ -105,6 +105,10 @@ async fn clear_clients() {
     *CLIENT.lock().await = None;
     *CHECKIN_CLIENT.lock().await = None;
     *LOGIN_SESSION.lock().await = None;
+}
+
+pub(super) async fn is_ready(app: &tauri::AppHandle) -> bool {
+    status(app).await.status == "ready"
 }
 
 pub async fn status(app: &tauri::AppHandle) -> AntigravityStatus {

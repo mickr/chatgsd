@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { Editor } from "@tiptap/core";
-import type { PreparedWritingOffer, WritingRange } from "../../lib/agent/writingOffers";
+import { tracePlaybackOrder, type PreparedWritingOffer, type WritingRange } from "../../lib/agent/writingOffers";
 import "./WritingCompanionPointer.css";
 
 /* ANIMATION STORYBOARD
@@ -42,9 +42,20 @@ export function WritingCompanionPointer({ editor, range, kind, originRef, replay
     const move = preparedOffer?.offer.kind === "move" && !followTarget;
     const destination = followTarget ?? (move ? preparedOffer.destination ?? preparedOffer.sourceBlock
       : preparedOffer?.sourceBlock ?? range);
+    const orderedBlocks = preparedOffer?.offer.kind === "question"
+      ? tracePlaybackOrder(preparedOffer.offer.trace)
+          .slice(0, -1)
+          .flatMap((idx) => {
+            const range = preparedOffer.trace[idx];
+            if (!range) return [];
+            const $pos = editor.state.doc.resolve(Math.min(range.from, editor.state.doc.content.size));
+            return $pos.depth ? [{ from: $pos.before($pos.depth), to: $pos.after($pos.depth) }] : [];
+          })
+      : [];
     const steps = followTarget ? [followTarget] : preparedOffer?.offer.kind === "question"
-      ? [...preparedOffer.traceBlocks.filter((block, index, all) => block.from !== destination.from &&
-        all.findIndex((other) => other.from === block.from) === index), destination]
+      ? [...(orderedBlocks.length ? orderedBlocks : preparedOffer.traceBlocks)
+          .filter((block, index, all) => block.from !== destination.from &&
+            all.findIndex((other) => other.from === block.from) === index), destination]
       : move ? [preparedOffer.sourceBlock, destination] : [destination];
     let frame = 0;
     let pause: ReturnType<typeof setTimeout> | undefined;

@@ -163,9 +163,10 @@ export const returnThought = (folder: string, documentId: string, email: string,
 export const observeWording = (folder: string, documentId: string, email: string,
   observation: { kept: string; proposed: string; restored: boolean }) =>
   invoke<void>("agent_observe_wording", { folder, documentId, email, ...observation });
-/** What an argument trace leaves in memory: the writer's meaning at a step, or what the trace learned. */
+/** What an argument trace leaves in memory: the writer's meaning at a step, its updated quote, or what the trace learned. */
 export type TraceMemory =
-  | { kind: "meaning"; quote: string; meant: string; read_as: string }
+  | { kind: "meaning"; key?: string; quote: string; meant: string; read_as: string }
+  | { kind: "reanchor"; key: string; quote: string }
   | { kind: "insight"; quote: string | null; outcome: string; learned: string };
 export const recordTraceMemory = (folder: string, documentId: string, email: string, record: TraceMemory) =>
   invoke<void>("agent_record_trace_memory", { folder, documentId, email, record });

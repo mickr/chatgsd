@@ -82,6 +82,21 @@ export const componentDefinitions = {
     description:
       "An existing writing offer with its grounded passage and native actions: accept or edit a rewrite, answer a question, inspect sources, preview or apply a paragraph move, and Add to chat. Use only the id returned by offer_writing_help. The application owns these actions; inventing an id cannot create an offer.",
   },
+  TraceStep: {
+    props: z.object({
+      offerId: z.string().nullable(),
+      step: z.number().int().min(1),
+    }),
+    description:
+      "One grounded step (1-based) of an argument trace from offer_writing_help, with its note or conversation link, role badge, and correction control. Pass offerId when used in a chat reply spec; null inside offer_writing_help's own view.",
+  },
+  TraceOutcome: {
+    props: z.object({
+      offerId: z.string().nullable(),
+    }),
+    description:
+      "The convergence diamond of an argument trace from offer_writing_help: what the branches establish and the resulting question or takeaway. Pass offerId in a chat reply spec; null inside offer_writing_help's own view.",
+  },
   Suggestions: {
     props: z.object({ items: z.array(z.string()) }),
     description:
@@ -135,6 +150,22 @@ export const previewTypes: ReadonlySet<string> = new Set<ComponentType>([
   "Callout",
 ]);
 
+/** The blocks an argument trace's custom view may use to group converging branches. */
+export const traceViewTypes: ReadonlySet<string> = new Set<ComponentType>([
+  "Stack",
+  "Card",
+  "Heading",
+  "Text",
+  "List",
+  "Table",
+  "KeyValue",
+  "Checklist",
+  "Callout",
+  "NoteLink",
+  "TraceStep",
+  "TraceOutcome",
+]);
+
 export const catalog = defineCatalog(schema, {
   components: componentDefinitions,
   actions: {},
@@ -185,6 +216,6 @@ Every element needs type, props (all listed props, null when unused) and childre
 When a reply leaves clear next moves, end it with a spec block holding one Suggestions element; the user sends one with a click. Leave it out when nothing obvious follows.
 For ask_user, pass form as a complete spec object {root, elements, state} instead of patch lines. Bind each input's value to {"$bindState":"/answers/<key>"} and seed state.answers with an initial value per key. Scratch adds the send button and returns the answers object. Use a form when the question has several parts or needs context alongside it; for one simple choice, options alone are enough.
 For mcp_call's preview, pass a complete spec object {root, elements} built only from ${[...previewTypes].join(", ")}. Lay the call out the way the user knows the thing it creates or changes, such as a ticket: a Card titled with its summary, KeyValue for its fields, Text for its body. Scratch shows the exact arguments beneath it and adds the buttons.
-For a writing proposal, call offer_writing_help first. Its returned id can be shown in either companion surface with {"type":"WritingSuggestion","props":{"id":"<returned id>"},"children":[]}. That card includes the proposal, source links or question, and the appropriate user actions. Do not recreate its action buttons in prose or fabricate offer ids. Add to chat prepares context for the user's next message; it does not send a message or accept an edit.
+For a writing proposal, call offer_writing_help first. Its returned id can be shown in either companion surface with {"type":"WritingSuggestion","props":{"id":"<returned id>"},"children":[]}, or its converging branches can be composed in a reply or in offer_writing_help's view using Card/Stack/Callout with TraceStep and TraceOutcome. That card includes the proposal, source links or question, and the appropriate user actions. Do not recreate its action buttons in prose or fabricate offer ids. Add to chat prepares context for the user's next message; it does not send a message or accept an edit.
 Components:
 ${componentLines.join("\n")}`;

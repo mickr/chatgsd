@@ -1,8 +1,17 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { Editor } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
 import { expect, it } from "vitest";
-import { pendingTraceContext, traceRecord } from "./traceRecord";
+import {
+  changedMeaningQuotes,
+  isTraceRecord,
+  locateMeaningAnchors,
+  mapMeaningAnchors,
+  pendingTraceContext,
+  traceRecord,
+} from "./traceRecord";
 import { provenanceLedger } from "./provenance";
 import type { PreparedWritingOffer } from "./writingOffers";
 import { TraceRecordCard } from "../../components/agent/TraceRecordCard";
@@ -92,4 +101,28 @@ it("takes a step only in the conversation to the message it came from, or shows 
 it("keeps each ledger entry's conversation item", () => {
   const [entry] = provenanceLedger([{ id: "m1", type: "user", text: "Bring a rug" }]);
   expect(entry).toMatchObject({ id: "e1", itemId: "m1" });
+});
+
+it("validates saved trace records and maps meaning anchors across live edits", () => {
+  const valid = traceRecord("run-1", prepared("outcome"))!;
+  expect(isTraceRecord(valid as unknown as Record<string, unknown>)).toBe(true);
+  expect(isTraceRecord({ id: "trace:bad", type: "trace", offer: { quote: 1 } })).toBe(false);
+  expect(isTraceRecord({ ...valid, provenance: "bad" } as unknown as Record<string, unknown>)).toBe(false);
+
+  const editor = new Editor({ extensions: [StarterKit], content: "<p>Pack light. Something to sit on.</p>" });
+  let anchors = locateMeaningAnchors(editor.state.doc, [
+    { key: "meaning-abc", kind: "choice", quote: "Something to sit on." },
+    { key: "wording-xyz", kind: "choice", quote: "Pack light." },
+  ]);
+  expect(anchors).toHaveLength(1);
+  expect(changedMeaningQuotes(editor.state.doc, anchors)).toEqual([]);
+
+  const insertPos = 1 + editor.getText().indexOf("to sit on.");
+  const tr = editor.state.tr.insertText("soft ", insertPos);
+  editor.view.dispatch(tr);
+  anchors = mapMeaningAnchors(editor.state.doc, anchors, tr.mapping.map.bind(tr.mapping));
+  expect(changedMeaningQuotes(editor.state.doc, anchors)).toEqual([
+    { key: "meaning-abc", quote: "Something soft to sit on." },
+  ]);
+  editor.destroy();
 });

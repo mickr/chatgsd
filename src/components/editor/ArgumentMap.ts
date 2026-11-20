@@ -1,17 +1,43 @@
 import { Extension, type Editor } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { stepTargetIndex, traceActivePath, type TraceRole } from "../../lib/agent/writingOffers";
 
 /**
  * A note passage the reasoning ran through. index is its place in the whole
  * trace, number its place among the steps you can see in the note; via names
- * the ledger steps (web, service, you, note, edit) between the previous
- * passage and this one that have no place in the note.
+ * the ledger steps (web, service, you, chat, note, edit) leading into it.
  */
-export interface ArgumentMapStep { from: number; to: number; sure: boolean; index: number; number: number; via: string[] }
-/** The passages an offer's reasoning ran through, ending at the passage it decided on. */
+export interface ArgumentMapStep {
+  from: number;
+  to: number;
+  sure: boolean;
+  index: number;
+  number: number;
+  via: string[];
+  role?: TraceRole;
+}
+
+/** One directed connection in the margin map, either between two note passages or from an off-page root. */
+export interface ArgumentMapEdge {
+  /** Source visible step's trace index, or null when the branch begins outside the note. */
+  from: number | null;
+  /** Target visible step's trace index, or `length` for the outcome diamond. */
+  to: number;
+  via: string[];
+  unsure: boolean;
+  role: TraceRole;
+  /** Trace step indices traversed along this connection, for active/branch highlighting. */
+  steps: number[];
+}
+
+/** The passages an offer's reasoning ran through, converging on the passage it decided on. */
 export interface ArgumentMapState {
   steps: ArgumentMapStep[];
+  /** Directed connections across converging branches; omitted in legacy linear fixtures. */
+  edges?: ArgumentMapEdge[];
+  /** Trace indices (and `length` for the outcome) on the focused step's branch. */
+  branch?: number[];
   /** The passage the offer is about. In an outcome trace, block is the whole highlight it sits in. */
   decision: { from: number; to: number; via: string[]; block?: { from: number; to: number } };
   /** The step being read: a trace index, or the trace's length for the decision. */
@@ -21,18 +47,91 @@ export interface ArgumentMapState {
 }
 
 type Range = { from: number; to: number };
-/** The map of a prepared offer: its note passages in order, with the ledger steps between them. */
-export function argumentMapFor(prepared: { trace: (Range | null)[]; source: Range; provenance: ({ kind: string } | null)[];
-  offer: { trace: { sure: boolean }[] }; outcome?: Range }, active: number | null): ArgumentMapState {
+/** The map of a prepared offer: its note passages, converging branches, and the ledger steps along each. */
+export function argumentMapFor(prepared: {
+  trace: (Range | null)[];
+  source: Range;
+  provenance: ({ kind: string } | null)[];
+  offer: { trace: { sure: boolean; leads_to?: number | null; role?: TraceRole }[] };
+  outcome?: Range;
+}, active: number | null): ArgumentMapState {
+  const rawTrace = prepared.offer.trace;
+  const n = prepared.trace.length;
+  const inDegree = new Array<number>(n + 1).fill(0);
+  for (let i = 0; i < n; i++) inDegree[stepTargetIndex(rawTrace, i)]++;
+
+  const edges: ArgumentMapEdge[] = [];
+  const seenOffPage = new Set<number>();
+
+  // Walk from every visible note step to the next visible note step (or outcome) on its branch.
+  for (let i = 0; i < n; i++) {
+    if (!prepared.trace[i]) continue;
+    const stepMeta = rawTrace[i];
+    const via: string[] = [];
+    const edgeSteps = [i];
+    let unsure = !(stepMeta?.sure ?? true);
+    let tensions = stepMeta?.role === "tensions";
+    let curr = stepTargetIndex(rawTrace, i);
+    for (let hops = 0; hops <= n && curr < n && !prepared.trace[curr]; hops++) {
+      seenOffPage.add(curr);
+      edgeSteps.push(curr);
+      via.push(prepared.provenance[curr]?.kind ?? "note");
+      if (rawTrace[curr]?.sure === false) unsure = true;
+      if (rawTrace[curr]?.role === "tensions") tensions = true;
+      curr = stepTargetIndex(rawTrace, curr);
+    }
+    edges.push({ from: i, to: curr, via, unsure, role: tensions ? "tensions" : "supports", steps: edgeSteps });
+  }
+
+  // Walk any branch that starts off-page (no preceding note passage) into its first visible target or outcome.
+  for (let i = 0; i < n; i++) {
+    if (prepared.trace[i] || inDegree[i] > 0 || seenOffPage.has(i)) continue;
+    const via: string[] = [];
+    const edgeSteps: number[] = [];
+    let unsure = false;
+    let tensions = false;
+    let curr = i;
+    for (let hops = 0; hops <= n && curr < n && !prepared.trace[curr]; hops++) {
+      const already = seenOffPage.has(curr);
+      seenOffPage.add(curr);
+      edgeSteps.push(curr);
+      via.push(prepared.provenance[curr]?.kind ?? "note");
+      if (rawTrace[curr]?.sure === false) unsure = true;
+      if (rawTrace[curr]?.role === "tensions") tensions = true;
+      curr = stepTargetIndex(rawTrace, curr);
+      if (already) break;
+    }
+    if (prepared.trace[curr] || curr === n)
+      edges.push({ from: null, to: curr, via, unsure, role: tensions ? "tensions" : "supports", steps: edgeSteps });
+  }
+
+  const incomingVia = (targetIndex: number) =>
+    edges.filter(edge => edge.to === targetIndex).flatMap(edge => edge.via);
+
   const steps: ArgumentMapStep[] = [];
-  let via: string[] = [];
   prepared.trace.forEach((range, index) => {
-    if (!range) { via.push(prepared.provenance[index]?.kind ?? "note"); return; }
-    steps.push({ ...range, sure: prepared.offer.trace[index]?.sure ?? true, index, number: steps.length + 1, via });
-    via = [];
+    if (!range) return;
+    const role = rawTrace[index]?.role;
+    steps.push({
+      ...range,
+      sure: rawTrace[index]?.sure ?? true,
+      index,
+      number: steps.length + 1,
+      via: incomingVia(index),
+      ...(role === "tensions" ? { role } : {}),
+    });
   });
+
+  const branch = [...traceActivePath(rawTrace, active)];
   const block = prepared.outcome && { from: prepared.outcome.from, to: prepared.outcome.to };
-  return { steps, decision: { ...prepared.source, via, ...(block ? { block } : {}) }, active, length: prepared.trace.length };
+  return {
+    steps,
+    edges,
+    branch,
+    decision: { ...prepared.source, via: incomingVia(n), ...(block ? { block } : {}) },
+    active,
+    length: n,
+  };
 }
 
 const argumentMapKey = new PluginKey<ArgumentMapState | null>("argumentMap");
@@ -60,19 +159,29 @@ export const ArgumentMap = Extension.create({
           if (!decision) return null;
           const block = decision.block && mapRange(decision.block, map);
           if (block) decision.block = block; else delete decision.block;
-          return { ...previous, decision,
-            steps: previous.steps.map(step => mapRange(step, map)).filter((step): step is ArgumentMapStep => !!step) };
+          const steps = previous.steps.map(step => mapRange(step, map)).filter((step): step is ArgumentMapStep => !!step);
+          const surviving = new Set(steps.map(step => step.index));
+          surviving.add(previous.length);
+          const edges = previous.edges?.filter(edge =>
+            (edge.from === null || surviving.has(edge.from)) && surviving.has(edge.to));
+          return { ...previous, decision, steps, ...(edges ? { edges } : {}) };
         },
       },
       props: {
         decorations(state) {
           const map = argumentMapKey.getState(state);
           if (!map) return null;
-          const decorations = map.steps.map(step => Decoration.inline(step.from, step.to, {
-            class: `argument-map-step${map.active === step.index ? " argument-map-active" : ""}`,
-            "data-step": String(step.number),
-            ...(step.sure ? {} : { "data-unsure": "true" }),
-          }));
+          const branchSet = new Set(map.branch ?? []);
+          const decorations = map.steps.map(step => {
+            const isActive = map.active === step.index;
+            const onBranch = !isActive && branchSet.has(step.index);
+            return Decoration.inline(step.from, step.to, {
+              class: `argument-map-step${isActive ? " argument-map-active" : onBranch ? " argument-map-branch" : ""}`,
+              "data-step": String(step.number),
+              ...(step.sure ? {} : { "data-unsure": "true" }),
+              ...(step.role === "tensions" ? { "data-role": "tensions" } : {}),
+            });
+          });
           const outcomeActive = map.active === map.length;
           const { block } = map.decision;
           // The whole highlight reads as one outcome; only the sentence the question is about is marked within it.

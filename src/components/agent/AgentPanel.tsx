@@ -52,6 +52,7 @@ import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
+import { surfaceFromRecord, TraceLookupContext } from "./ui/writingOfferContext";
 import { mapStepBlock, writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
 import { isAntigravityModel, type WritingScores } from "../../services/agent";
 import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
@@ -381,6 +382,14 @@ export function AgentPanel({
     setReviewIndex(next);
     agent.editor?.commands.scrollToAgentChange(changes[next].id);
   };
+  const traceLookup = useCallback((offerId: string) => {
+    for (let idx = conversation.items.length - 1; idx >= 0; idx--) {
+      const item = conversation.items[idx];
+      if (item.type === "trace" && (item.offerId === offerId || item.id === offerId))
+        return surfaceFromRecord(item);
+    }
+    return null;
+  }, [conversation.items]);
   const offer = agent.writingOffer;
   const offerControls: WritingOfferControls | null = offer ? {
     id: offer.id, offer: offer.prepared, stale: offer.stale, busy: running || sending || waiting || agent.companionChecking || !!reason,
@@ -391,6 +400,8 @@ export function AgentPanel({
     onHighlight: agent.highlightWritingOffer,
     map: { open: !!agent.argumentMap, active: agent.argumentMap?.active ?? null, onToggle: agent.toggleArgumentMap,
       onFocus: agent.focusArgumentStep,
+      onConfirm: agent.confirmArgumentStep,
+      onCheckSource: (step) => { void agent.requestWritingHelp("evidence", { step }); },
       onRealign: (step, correction) => { void agent.requestWritingHelp("realign", { answer: correction, step }); } },
     onDismiss: agent.dismissWritingSuggestion,
     onAddToChat: () => {
@@ -539,6 +550,7 @@ export function AgentPanel({
           <McpServices onManage={onManageServers} />
         </div>
         <OpenNoteContext.Provider value={openNote}>
+          <TraceLookupContext.Provider value={traceLookup}>
           <WritingOfferContext.Provider value={offerControls}>
           <div
             ref={scroll}
@@ -678,6 +690,7 @@ export function AgentPanel({
           <PlanNotice />
           </div>
           </WritingOfferContext.Provider>
+          </TraceLookupContext.Provider>
         </OpenNoteContext.Provider>
         {changes.length > 0 && (
           <div className="agent-panel-review" aria-label="Review external changes">

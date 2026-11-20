@@ -15,21 +15,29 @@
   transition: opacity 160ms ease;
 }
 .argument-map-arrow[data-unsure] { stroke-dasharray: 3 3; }
-.argument-map-arrow[data-active] { opacity: .85; }
+.argument-map-arrow[data-role="tensions"] { stroke: #d97706; opacity: .65; }
+.argument-map-arrow[data-branch] { opacity: .7; }
+.argument-map-arrow[data-active] { opacity: .9; }
+.argument-map-overlay[data-branch-focus] .argument-map-arrow:not([data-branch]):not([data-active]) { opacity: .18; }
+.argument-map-overlay[data-branch-focus] .argument-map-node:not([data-branch]):not([data-active]):not([data-decision]) { opacity: .45; }
 #argument-map-arrowhead path { fill: var(--color-text); opacity: .6; }
+#argument-map-arrowhead-tension path { fill: #d97706; opacity: .8; }
 .argument-map-node {
   pointer-events: auto;
   cursor: pointer;
+  transition: opacity 160ms ease;
 }
 .argument-map-node circle, .argument-map-node rect {
   fill: var(--color-bg);
   stroke: currentColor;
   stroke-width: 1.4;
-  transition: fill 160ms ease;
+  transition: fill 160ms ease, stroke 160ms ease;
 }
 .argument-map-node[data-unsure] circle { stroke-dasharray: 2.5 2; }
+.argument-map-node[data-role="tensions"] circle { stroke: #d97706; }
 .argument-map-node[data-decision] rect { fill: currentColor; }
 .argument-map-node[data-active] circle { fill: var(--color-text); }
+.argument-map-node[data-role="tensions"][data-active] circle { fill: #d97706; stroke: #d97706; }
 .argument-map-node text {
   fill: currentColor;
   font-size: 9px;
@@ -46,12 +54,17 @@
   transition: background-color 160ms ease;
 }
 .argument-map-step { background: color-mix(in srgb, var(--color-selection) 45%, transparent); }
+.argument-map-step[data-role="tensions"] { background: color-mix(in srgb, #f59e0b 18%, transparent); }
 .argument-map-step[data-unsure] {
   background: none;
   text-decoration: underline dashed color-mix(in srgb, var(--color-text) 55%, transparent);
   text-underline-offset: 4px;
 }
+.argument-map-step[data-role="tensions"][data-unsure] {
+  text-decoration-color: #d97706;
+}
 .argument-map-decision { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.argument-map-branch { background: color-mix(in srgb, var(--color-selection) 75%, transparent); }
 .argument-map-active { background: var(--color-selection); }
 
 @media (prefers-reduced-motion: reduce) {

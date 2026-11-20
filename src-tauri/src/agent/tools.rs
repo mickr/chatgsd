@@ -14,7 +14,7 @@ const MAX_LIST_LIMIT: u64 = 100;
 const SEARCH_RESULT_LIMIT: usize = 8;
 
 /// Increment when saved native threads need a new dynamic tool catalog.
-pub const CATALOG_VERSION: u32 = 4;
+pub const CATALOG_VERSION: u32 = 6;
 
 pub struct ToolSpec {
     pub name: &'static str,
@@ -34,14 +34,15 @@ pub fn catalog(web_access: bool, read_only: bool) -> Vec<ToolSpec> {
                 "required":["key","kind","status","summary","quote","next"],"additionalProperties":false}},
             "required":["revision","entry"],"additionalProperties":false}) },
         ToolSpec { name: "read_document", description: "Read the current live note, including unsaved typing, and the user's selection. Always call before editing. Short notes come back whole; a long note comes back as an outline with line numbers and its opening, so pass start_line and end_line (1-based, inclusive, up to 400 lines) to read further. Pass null for both to start.", parameters: json!({"type":"object","properties":{"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["start_line","end_line"],"additionalProperties":false}) },
-        ToolSpec { name: "offer_writing_help", description: "Offer one grounded writing interaction without changing the note. Read the live note first. kind rewrite proposes plain-text replacement for quote, with a distinct alternative when the writer wants to compare versions; question asks one useful question at quote; evidence returns source detail for a claim, using only URLs successfully opened by research in this run; move previews moving the entire quoted top-level paragraph immediately BEFORE the entire earlier destination paragraph. For an explicitly requested return to a held thought, include its key in thought_key only when this offer fulfills it. Otherwise use null. trace is the path of reasoning that led to this offer, for every kind: one to five steps in the order they drove your decision, each the exact passage you relied on (quote), what you took from it and how it led to the next step (reading, one short sentence), sure false where you inferred something the note doesn't say, so the writer can catch a misreading, and source: null for a passage in the note, or, when a ledger of this conversation is supplied, the id of the entry the step came from (something the writer said, research, a connected service, another note, an edit), quoting that entry's exact text. quote, destination and trace quotes must copy exact visible plain text from the note (not markdown syntax). explanation is brief. Use null for irrelevant replacement/question/destination; sources are empty when unused. For a question, options gives two to four short answers the writer might pick, each under 80 characters and in their voice; use [] for other kinds or when the answer is open. The user can review, edit, accept or dismiss. An offer is not an applied edit. Do not repeat the offer in chat.", parameters: json!({"type":"object","properties":{
+        ToolSpec { name: "offer_writing_help", description: "Offer one grounded writing interaction without changing the note. Read the live note first. kind rewrite proposes plain-text replacement for quote, with a distinct alternative when the writer wants to compare versions; question asks one useful question at quote; evidence returns source detail for a claim, using only URLs successfully opened by research in this run; move previews moving the entire quoted top-level paragraph immediately BEFORE the entire earlier destination paragraph. For an explicitly requested return to a held thought, include its key in thought_key only when this offer fulfills it. Otherwise use null. trace is the reasoning graph that led to this offer, for every kind: one to seven steps, each the exact passage you relied on (quote), what you took from it and how it connects (reading, one short sentence), sure false where you inferred something the note doesn't say, source: null for a passage in the note or the id of a supplied conversation ledger entry (quoting that entry's exact text), leads_to: the later 1-based step number (greater than this step's 1-based index) that this step feeds into, or null when this step converges directly into the offer's outcome/decision (use parallel branches with leads_to: null or shared merge steps whenever independent premises converge rather than forcing a linear chain), and role: \"supports\" when backing the target or \"tensions\" when pulling against or qualifying it. view is null for automatic layout, or an optional Scratch UI spec {root, elements} built from display blocks plus TraceStep and TraceOutcome to group complex converging branches. quote, destination and note trace quotes must copy exact visible plain text from the note (not markdown syntax). explanation is brief. Use null for irrelevant replacement/question/destination; sources are empty when unused. For a question, options gives two to four short answers the writer might pick, each under 80 characters and in their voice; use [] for other kinds or when the answer is open. The user can review, edit, accept or dismiss. An offer is not an applied edit. Do not repeat the offer in chat.", parameters: json!({"type":"object","properties":{
             "kind":{"type":"string","enum":["rewrite","question","evidence","move"]},
             "quote":{"type":"string"},"explanation":{"type":"string"},
             "replacement":{"type":["string","null"]},"alternative":{"type":["string","null"]},"thought_key":{"type":["string","null"]},"question":{"type":["string","null"]},"destination":{"type":["string","null"]},
-            "trace":{"type":"array","maxItems":5,"items":{"type":"object","properties":{"quote":{"type":"string"},"reading":{"type":"string"},"sure":{"type":"boolean"},"source":{"type":["string","null"]}},"required":["quote","reading","sure","source"],"additionalProperties":false}},
+            "trace":{"type":"array","maxItems":7,"items":{"type":"object","properties":{"quote":{"type":"string"},"reading":{"type":"string"},"sure":{"type":"boolean"},"source":{"type":["string","null"]},"leads_to":{"type":["integer","null"]},"role":{"type":"string","enum":["supports","tensions"]}},"required":["quote","reading","sure","source","leads_to","role"],"additionalProperties":false}},
+            "view":{"type":["object","null"]},
             "options":{"type":"array","maxItems":4,"items":{"type":"string"}},
             "sources":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"title":{"type":"string"},"url":{"type":"string"},"excerpt":{"type":"string"}},"required":["title","url","excerpt"],"additionalProperties":false}}
-        },"required":["kind","quote","explanation","replacement","alternative","thought_key","question","destination","trace","options","sources"],"additionalProperties":false}) },
+        },"required":["kind","quote","explanation","replacement","alternative","thought_key","question","destination","trace","view","options","sources"],"additionalProperties":false}) },
         ToolSpec { name: "edit_document", description: "Apply 1 to 20 precise replacements atomically, in order. Each old_text must be nonempty and match exactly once in the markdown from read_document; include surrounding text to make it unique. Preserve unchanged markdown.", parameters: json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}},"required":["edits"],"additionalProperties":false}) },
         ToolSpec { name: "replace_selection", description: "Replace the selection captured when the user sent their message.", parameters: json!({"type":"object","properties":{"new_text":{"type":"string"}},"required":["new_text"],"additionalProperties":false}) },
         ToolSpec { name: "ask_user", description: "Ask the user one short clarifying question and wait for the answer. Use it when the request is ambiguous in a way that changes what you would write and the answer isn't in this note or other notes. Give 2 to 4 short options when the choices are discrete, or an empty options array for a free-text answer. For a question with several parts or that needs context alongside it, also pass form: a Scratch UI spec {root, elements, state} with inputs bound to /answers/<key>; otherwise form is null.", parameters: json!({"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"form":{"type":["object","null"]}},"required":["question","options","form"],"additionalProperties":false}) },
@@ -519,6 +520,31 @@ mod tests {
         }
         for name in ["edit_document", "replace_selection", "edit_note", "ask_user", "read_notes", "list_projects", "search_projects", "mcp_tools", "mcp_call", "cua_click", "unknown"] {
             assert!(!companion_tool(name), "{name} must not run during an unsolicited check-in");
+        }
+    }
+
+    #[test]
+    fn tool_schemas_never_put_null_or_empty_values_inside_enums() {
+        fn check_enums(node: &serde_json::Value, path: &str) {
+            if let Some(values) = node.get("enum").and_then(serde_json::Value::as_array) {
+                assert!(!values.is_empty(), "{path}: enum must not be empty");
+                for value in values {
+                    let s = value.as_str().unwrap_or_else(|| panic!("{path}: Gemini requires string enum values, got {value}"));
+                    assert!(!s.is_empty(), "{path}: enum value must not be empty");
+                }
+            }
+            if let Some(map) = node.as_object() {
+                for (key, child) in map {
+                    check_enums(child, &format!("{path}.{key}"));
+                }
+            } else if let Some(items) = node.as_array() {
+                for (idx, child) in items.iter().enumerate() {
+                    check_enums(child, &format!("{path}[{idx}]"));
+                }
+            }
+        }
+        for tool in catalog(true, false) {
+            check_enums(&tool.parameters, tool.name);
         }
     }
 

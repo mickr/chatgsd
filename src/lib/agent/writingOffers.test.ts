@@ -182,9 +182,40 @@ it("traces the reasoning behind any kind of offer, keeping what the agent read a
   expect(writingOfferChatText(offer)).toContain('1. "First premise."\n(unsure) You set out the premise here.');
   for (const trace of [
     ["First premise."], [{ quote: "First premise.", reading: "Read." }], [{ ...step("First premise."), sure: "yes" }],
-    [step("First premise."), step("First premise."), step("First premise."), step("First premise."), step("First premise."), step("First premise.")],
+    Array.from({ length: 8 }, () => step("First premise.")),
     [step("Not in the note.")],
+    [{ ...step("First premise."), leads_to: 1 }],
+    [{ ...step("First premise."), leads_to: 2 }],
+    [{ ...step("First premise."), role: "contradicts" }],
   ]) expect(() => prepareWritingOffer(editor, { ...rewrite(), trace })).toThrow();
+});
+
+it("models converging argument branches, synthesis merges, active branch paths, and playback order", async () => {
+  const { isConvergentTrace, stepTargetIndex, traceActivePath, traceBranches, tracePlaybackOrder } = await import("./writingOffers");
+  const editor = open("<p>Premise A.</p><p>Counterpoint B.</p><p>Synthesis C.</p><p>Final claim.</p>");
+  const prepared = prepareWritingOffer(editor, {
+    ...rewrite("Final claim.", "Refined final claim."),
+    trace: [
+      { ...step("Premise A.", "Opening support."), leads_to: 3, role: "supports" },
+      { ...step("Counterpoint B.", "Pulls against A."), leads_to: 3, role: "tensions" },
+      { ...step("Synthesis C.", "Reconciles A and B."), leads_to: null },
+    ],
+  });
+  const { trace } = prepared.offer;
+  expect(isConvergentTrace(trace)).toBe(true);
+  expect([0, 1, 2].map(i => stepTargetIndex(trace, i))).toEqual([2, 2, 3]);
+  expect(traceBranches(trace).map(seg => ({ steps: seg.steps, mergesInto: seg.mergesInto, synthesis: seg.synthesis, tensions: seg.tensions }))).toEqual([
+    { steps: [0], mergesInto: 2, synthesis: false, tensions: false },
+    { steps: [1], mergesInto: 2, synthesis: false, tensions: true },
+    { steps: [2], mergesInto: 3, synthesis: true, tensions: false },
+  ]);
+  expect(tracePlaybackOrder(trace)).toEqual([0, 1, 2, 3]);
+  expect([...traceActivePath(trace, 0)].sort()).toEqual([0, 2, 3]);
+  expect([...traceActivePath(trace, 2)].sort()).toEqual([0, 1, 2, 3]);
+  const chat = writingOfferChatText(prepared);
+  expect(chat).toContain('1. "Premise A." → step 3');
+  expect(chat).toContain('2. "Counterpoint B." → step 3\n[tension]');
+  expect(chat).toContain('3. "Synthesis C." → outcome');
 });
 
 it("lets a trace step cite the conversation ledger, but only with that entry's own text", () => {
@@ -376,4 +407,51 @@ it("finds the block the cursor reads beside for each map step", async () => {
   // A step only in the conversation reads beside the passage it leads to.
   expect(text(mapStepBlock(editor.state.doc, prepared, 1))).toBe("Second point.");
   expect(text(mapStepBlock(editor.state.doc, prepared, 3))).toBe("The outcome.");
+});
+
+it("resolves unsure steps already answered in conversation or memory, suppresses redundant background gaps, and holds back unsure direct rewrites", async () => {
+  const { appliesDirectly } = await import("./writingOffers");
+  const editor = open("<p>Keep writing here.</p><p>Latency dropped 40%.</p>");
+  editor.commands.setTextSelection(2);
+  const ledger = [{ id: "e1", kind: "you" as const, label: "Answered: Which metric?", text: "Question: Which metric?\nAnswer: p99 tail latency.", itemId: "q1" }];
+
+  // Unsure rewrite without a prior answer does not auto-apply unseen; the writer sees the assumption first.
+  const unconfirmedRewrite = prepareWritingOffer(editor, {
+    ...rewrite("Latency dropped 40%.", "Tail latency dropped 40%."),
+    trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false)],
+  });
+  expect(unconfirmedRewrite.offer.trace[0].sure).toBe(false);
+  expect(appliesDirectly(editor, unconfirmedRewrite)).toBe(false);
+
+  // With the earlier answer in the ledger, the unsure step upgrades to sure: true and preserves `resolved` on refresh.
+  const settledRewrite = prepareWritingOffer(editor, {
+    ...rewrite("Latency dropped 40%.", "Tail latency dropped 40%."),
+    trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false)],
+  }, undefined, ledger);
+  expect(settledRewrite.offer.trace[0].sure).toBe(true);
+  expect(settledRewrite.resolved?.[0]?.itemId).toBe("q1");
+  expect(appliesDirectly(editor, settledRewrite)).toBe(true);
+  editor.commands.insertContentAt(1, "Note: ");
+  expect(refreshWritingOffer(editor, settledRewrite)?.resolved?.[0]?.itemId).toBe("q1");
+
+  // An unrequested background question whose uncertainty was already answered is flagged as a suppressed gap,
+  // whereas an explicit "Trace my argument" request stays visible with the step settled.
+  const backgroundGap = prepareWritingOffer(editor, {
+    ...rewrite("Latency dropped 40%."),
+    kind: "question",
+    replacement: null,
+    question: "Is this p99 or median latency?",
+    trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false)],
+  }, undefined, ledger);
+  expect(backgroundGap.suppressedGap).toBe(true);
+
+  const explicitTrace = prepareWritingOffer(editor, {
+    ...rewrite("Latency dropped 40%."),
+    kind: "question",
+    replacement: null,
+    question: "Is this p99 or median latency?",
+    trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false)],
+  }, "question", ledger);
+  expect(explicitTrace.suppressedGap).toBeUndefined();
+  expect(explicitTrace.offer.trace[0].sure).toBe(true);
 });

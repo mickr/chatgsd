@@ -22,6 +22,7 @@ export function hasWritingOfferCard(items: readonly { type: string; text?: strin
       const element = spec.elements[key];
       if (!element) continue;
       if (element.type === "WritingSuggestion" && element.props.id === id) return true;
+      if ((element.type === "TraceStep" || element.type === "TraceOutcome") && element.props.offerId === id) return true;
       pending.push(...element.children ?? []);
     }
     return false;

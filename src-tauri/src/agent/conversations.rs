@@ -282,13 +282,26 @@ fn readable_model(items: &[Value]) -> String {
     result
 }
 
+fn display_instruction(text: &str) -> &str {
+    if !text.starts_with("Inline agent request.")
+        && !text.starts_with("Inline edit request. Apply the instruction directly in the current note.")
+    {
+        return text;
+    }
+    let separator = "\n\nUser instruction:\n\n";
+    text.find(separator)
+        .map_or(text, |start| &text[start + separator.len()..])
+}
+
 fn readable_transcript(items: &[Value]) -> String {
     let mut result = String::new();
     for item in items {
         match item.get("type").and_then(Value::as_str) {
             Some("user" | "text") => {
-                let role = if item["type"] == "user" { "user" } else { "assistant" };
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                let is_user = item["type"] == "user";
+                let role = if is_user { "user" } else { "assistant" };
+                if let Some(raw) = item.get("text").and_then(Value::as_str) {
+                    let text = if is_user { display_instruction(raw) } else { raw };
                     let _ = write!(result, "\n{role}:\n{text}\n");
                 }
                 if let Some(selection) = item.get("selection").and_then(Value::as_str) {
@@ -307,6 +320,13 @@ fn readable_transcript(items: &[Value]) -> String {
                 }
                 if let Some(learned) = item.pointer("/offer/explanation").and_then(Value::as_str) {
                     let _ = write!(result, "What we learned:\n{learned}\n");
+                }
+                if let Some(answer) = item.get("answer").and_then(Value::as_str) {
+                    let _ = write!(result, "User answer:\n{answer}\n");
+                }
+                for confirmation in item["confirmed"].as_array().into_iter().flatten() {
+                    let _ = write!(result, "User confirmed step {}:\n{}\n",
+                        confirmation["step"].as_u64().map_or(0, |step| step + 1), confirmation["reading"].as_str().unwrap_or_default());
                 }
                 for correction in item["corrections"].as_array().into_iter().flatten() {
                     let _ = write!(result, "User correction at step {}:\n{}\n",
@@ -774,9 +794,16 @@ pub struct MemoryView {
 }
 
 async fn memory_view_account(app: &AppHandle, email: &str) -> Result<String, String> {
+    let requested = account_key(email)?;
+    if requested == super::antigravity::ACCOUNT_KEY {
+        if !super::antigravity::is_ready(app).await {
+            return Err("Sign in to Antigravity to see this note's working memory.".into());
+        }
+        return Ok(requested);
+    }
     let status = super::codex::account::status(app).await;
     let account = account_key(&status.account.ok_or("Sign in to see this note's working memory.")?.email)?;
-    if account != account_key(email)? { return Err("The signed-in account changed.".into()); }
+    if account != requested { return Err("The signed-in account changed.".into()); }
     Ok(account)
 }
 
@@ -860,21 +887,33 @@ pub async fn agent_observe_wording(app: AppHandle, folder: PathBuf, document_id:
 #[tauri::command]
 pub async fn agent_begin_conversation(app: AppHandle, note_id: String, title: String) -> Result<String, String> {
     let status = super::codex::account::status(&app).await;
-    let account = status.account.ok_or("Sign in to keep this conversation.")?.email;
+    let codex_account = status.account.map(|account| account.email);
+    if codex_account.is_none() && !super::antigravity::is_ready(&app).await {
+        return Err("Sign in to keep this conversation.".into());
+    }
     let folder = super::notes_folder(&app).await?;
     let session_id = uuid::Uuid::new_v4().to_string();
     begin(&app, &folder, &note_id, &session_id, &title).await?;
-    initialize_codex(&app, &folder, &session_id, &account).await?;
+    if let Some(account) = codex_account {
+        initialize_codex(&app, &folder, &session_id, &account).await?;
+    }
     Ok(session_id)
 }
 
 /// What an argument trace leaves in a note's memory: what the writer said they
-/// meant at a step (their words, kept as a choice), or what the trace learned
-/// (the agent's reading, kept as an insight).
+/// meant at a step (their words, kept as a choice), a live quote update for one
+/// of those choices as the writer edits, or what the trace learned (an insight).
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TraceMemory {
-    Meaning { quote: String, meant: String, read_as: String },
+    Meaning {
+        #[serde(default)]
+        key: Option<String>,
+        quote: String,
+        meant: String,
+        read_as: String,
+    },
+    Reanchor { key: String, quote: String },
     Insight { quote: Option<String>, outcome: String, learned: String },
 }
 
@@ -884,23 +923,61 @@ fn clipped(text: &str, max: usize) -> String {
     format!("{}…", text.chars().take(max - 1).collect::<String>())
 }
 
-fn trace_entry(record: TraceMemory) -> Result<Entry, String> {
-    let key = |prefix: &str, value: &str| {
-        let digest = Sha256::digest(value.trim().as_bytes());
-        format!("{prefix}-{}", &format!("{digest:x}")[..24])
-    };
+fn trace_key(prefix: &str, value: &str) -> String {
+    let digest = Sha256::digest(value.trim().as_bytes());
+    format!("{prefix}-{}", &format!("{digest:x}")[..24])
+}
+
+fn apply_trace_memory(memory: &mut WorkingMemory, record: TraceMemory) -> Result<(), String> {
     match record {
-        TraceMemory::Meaning { quote, meant, read_as } => {
-            if quote.trim().is_empty() || meant.trim().is_empty() { return Err("A correction needs the passage and what the writer meant.".into()); }
-            Ok(Entry { key: key("meaning", &quote), kind: Kind::Choice, status: Status::Open,
-                summary: clipped(&format!("The writer means: {meant}"), 400), quote: Some(clipped(&quote, 500)),
-                next: (!read_as.trim().is_empty()).then(|| clipped(&format!("It had been read as: {read_as}"), 400)) })
+        TraceMemory::Meaning { key, quote, meant, read_as } => {
+            if quote.trim().is_empty() || meant.trim().is_empty() {
+                return Err("A correction needs the passage and what the writer meant.".into());
+            }
+            let clipped_quote = clipped(&quote, 500);
+            let resolved_key = key
+                .filter(|k| k.starts_with("meaning-"))
+                .or_else(|| {
+                    memory.entries.iter()
+                        .find(|e| e.kind == Kind::Choice && e.key.starts_with("meaning-") && e.quote.as_deref() == Some(clipped_quote.as_str()))
+                        .map(|e| e.key.clone())
+                })
+                .unwrap_or_else(|| trace_key("meaning", &quote));
+            let entry = Entry {
+                key: resolved_key,
+                kind: Kind::Choice,
+                status: Status::Open,
+                summary: clipped(&format!("The writer means: {meant}"), 400),
+                quote: Some(clipped_quote),
+                next: (!read_as.trim().is_empty()).then(|| clipped(&format!("It had been read as: {read_as}"), 400)),
+            };
+            memory.update(Update { revision: memory.revision, entry })
+        }
+        TraceMemory::Reanchor { key, quote } => {
+            if !key.starts_with("meaning-") || quote.trim().is_empty() {
+                return Err("Reanchoring needs a meaning key and nonempty passage.".into());
+            }
+            let Some(mut entry) = memory.entries.iter()
+                .find(|item| item.key == key && item.kind == Kind::Choice)
+                .cloned() else {
+                return Ok(());
+            };
+            entry.quote = Some(clipped(&quote, 500));
+            memory.update(Update { revision: memory.revision, entry })
         }
         TraceMemory::Insight { quote, outcome, learned } => {
-            if outcome.trim().is_empty() || learned.trim().is_empty() { return Err("An insight needs its outcome and what was learned.".into()); }
-            Ok(Entry { key: key("insight", &outcome), kind: Kind::Insight, status: Status::Open,
-                summary: clipped(&learned, 400), quote: quote.filter(|q| !q.trim().is_empty()).map(|q| clipped(&q, 500)),
-                next: Some(clipped(&format!("Traced back from: {outcome}"), 400)) })
+            if outcome.trim().is_empty() || learned.trim().is_empty() {
+                return Err("An insight needs its outcome and what was learned.".into());
+            }
+            let entry = Entry {
+                key: trace_key("insight", &outcome),
+                kind: Kind::Insight,
+                status: Status::Open,
+                summary: clipped(&learned, 400),
+                quote: quote.filter(|q| !q.trim().is_empty()).map(|q| clipped(&q, 500)),
+                next: Some(clipped(&format!("Traced back from: {outcome}"), 400)),
+            };
+            memory.update(Update { revision: memory.revision, entry })
         }
     }
 }
@@ -908,9 +985,8 @@ fn trace_entry(record: TraceMemory) -> Result<Entry, String> {
 #[tauri::command]
 pub async fn agent_record_trace_memory(app: AppHandle, folder: PathBuf, document_id: String, email: String,
     record: TraceMemory) -> Result<(), String> {
-    let entry = trace_entry(record)?;
     update_writer_memory(&app, &folder, &document_id, &email, |memory| {
-        memory.update(Update { revision: memory.revision, entry })
+        apply_trace_memory(memory, record)
     }).await
 }
 
@@ -919,19 +995,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trace_memory_keys_a_correction_by_its_passage_and_labels_insights_as_the_agents() {
-        let meaning = |meant: &str| trace_entry(TraceMemory::Meaning { quote: "Something to sit on.".into(),
-            meant: meant.into(), read_as: "A packing aid.".into() }).unwrap();
-        let first = meaning("A picnic rug");
-        assert_eq!(first.key, meaning("A cushion").key);
+    fn trace_memory_keys_a_correction_by_its_passage_reanchors_on_edit_and_labels_insights() {
+        let mut memory = WorkingMemory::default();
+        apply_trace_memory(&mut memory, TraceMemory::Meaning {
+            key: None,
+            quote: "Something to sit on.".into(),
+            meant: "A picnic rug".into(),
+            read_as: "A packing aid.".into(),
+        }).unwrap();
+        let first = memory.entries[0].clone();
         assert!(first.key.starts_with("meaning-"));
         assert!(matches!(first.kind, Kind::Choice));
         assert_eq!(first.summary, "The writer means: A picnic rug");
         assert_eq!(first.next.as_deref(), Some("It had been read as: A packing aid."));
-        let insight = trace_entry(TraceMemory::Insight { quote: None, outcome: "x".repeat(600), learned: "The opening edit set the tone.".into() }).unwrap();
+
+        // Reanchoring follows the writer's wording edit without losing what they meant,
+        // and a later correction on that edited quote updates the same entry in place.
+        apply_trace_memory(&mut memory, TraceMemory::Reanchor {
+            key: first.key.clone(),
+            quote: "Something soft to sit on.".into(),
+        }).unwrap();
+        assert_eq!(memory.entries.len(), 1);
+        assert_eq!(memory.entries[0].quote.as_deref(), Some("Something soft to sit on."));
+        assert_eq!(memory.entries[0].summary, "The writer means: A picnic rug");
+
+        apply_trace_memory(&mut memory, TraceMemory::Meaning {
+            key: None,
+            quote: "Something soft to sit on.".into(),
+            meant: "A folded wool blanket".into(),
+            read_as: "A cushion.".into(),
+        }).unwrap();
+        assert_eq!(memory.entries.len(), 1);
+        assert_eq!(memory.entries[0].key, first.key);
+        assert_eq!(memory.entries[0].summary, "The writer means: A folded wool blanket");
+
+        apply_trace_memory(&mut memory, TraceMemory::Insight {
+            quote: None,
+            outcome: "x".repeat(600),
+            learned: "The opening edit set the tone.".into(),
+        }).unwrap();
+        let insight = &memory.entries[1];
         assert!(matches!(insight.kind, Kind::Insight));
-        assert!(insight.next.unwrap().chars().count() <= 400);
-        assert!(trace_entry(TraceMemory::Meaning { quote: " ".into(), meant: "m".into(), read_as: String::new() }).is_err());
+        assert!(insight.next.as_ref().unwrap().chars().count() <= 400);
+        assert!(apply_trace_memory(&mut memory, TraceMemory::Meaning {
+            key: None, quote: " ".into(), meant: "m".into(), read_as: String::new(),
+        }).is_err());
+        assert_eq!(
+            display_instruction("Inline agent request.\nSurrounding\n\nUser instruction:\n\nKeep it brief"),
+            "Keep it brief"
+        );
     }
 
     fn index() -> Index {

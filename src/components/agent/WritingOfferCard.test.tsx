@@ -301,3 +301,122 @@ it("connects the card to its passage: the quote takes you there, and looking at 
   render({ ...props, stale: true });
   expect(container.querySelector<HTMLButtonElement>(".writing-offer-passage")!.disabled).toBe(true);
 });
+
+it("renders a dynamic GenUI convergent branch layout with thread filters and honours safe custom views", () => {
+  const convergent: WritingOffer = {
+    ...rewrite,
+    trace: [
+      { quote: "Premise one.", reading: "Supports the claim.", sure: true, leads_to: null },
+      { quote: "Web counterpoint.", reading: "Qualifies the scope.", sure: false, source: "e1", leads_to: null, role: "tensions" },
+    ],
+  };
+  const map = { open: true, active: 0, onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn() };
+  const baseProps = controls(convergent);
+  render({
+    ...baseProps,
+    map,
+    offer: {
+      ...baseProps.offer,
+      trace: [{ from: 1, to: 10 }, null],
+      provenance: [null, { id: "e1", kind: "web", label: "Research: scope", text: "Web counterpoint." }],
+    },
+  });
+  expect(container.querySelector(".argument-map-genui")).not.toBeNull();
+  expect(container.textContent).toContain("Premise 1 → Outcome");
+  expect(container.textContent).toContain("Tension · Counterpoint → Outcome");
+  expect(container.querySelectorAll(".argument-map-step-row")).toHaveLength(3);
+
+  // Clicking a thread pill focuses that branch in the margin and filters the GenUI view.
+  click("Tension");
+  expect(map.onFocus).toHaveBeenCalledWith(1);
+  expect(container.querySelectorAll(".argument-map-step-row")).toHaveLength(2);
+  click("All threads (2)");
+  expect(container.querySelectorAll(".argument-map-step-row")).toHaveLength(3);
+
+  // A custom model-authored view cannot hide omitted steps or the outcome.
+  const withCustomView: WritingOffer = {
+    ...convergent,
+    view: {
+      root: "custom",
+      elements: {
+        custom: { type: "Card", props: { title: "Custom synthesis" }, children: ["s1"] },
+        s1: { type: "TraceStep", props: { offerId: null, step: 1 }, children: [] },
+      },
+    } as WritingOffer["view"],
+  };
+  const customProps = controls(withCustomView);
+  render({
+    ...customProps,
+    map,
+    offer: {
+      ...customProps.offer,
+      trace: [{ from: 1, to: 10 }, null],
+      provenance: [null, { id: "e1", kind: "web", label: "Research: scope", text: "Web counterpoint." }],
+    },
+  });
+  expect(container.textContent).toContain("Custom synthesis");
+  // Step 2 and TraceOutcome were omitted by the spec and automatically appended!
+  expect(container.querySelectorAll(".argument-map-step-row")).toHaveLength(3);
+});
+
+it("surfaces 1-click clarifications on unsure assumptions both on the collapsed card and inside the open trace", () => {
+  const traced: WritingOffer = {
+    ...rewrite,
+    trace: [
+      { quote: "The premise.", reading: "You start from the premise.", sure: true },
+      { quote: "The leap.", reading: "I took this as a causal claim.", sure: false },
+    ],
+  };
+  const onToggle = vi.fn();
+  const onFocus = vi.fn();
+  const onConfirm = vi.fn();
+  const onCheckSource = vi.fn();
+  const onRealign = vi.fn();
+  const baseProps = controls(traced);
+
+  // When the map is closed, the card surfaces the unsure assumption with 1-click Confirm / Correct / Check a source.
+  render({
+    ...baseProps,
+    map: { open: false, active: null, onToggle, onFocus, onRealign, onConfirm, onCheckSource },
+  });
+  const callout = container.querySelector('[aria-label="Unverified assumption"]');
+  expect(callout).not.toBeNull();
+  expect(callout!.textContent).toContain("I assumed this · I took this as a causal claim.");
+  click("Confirm assumption");
+  expect(onConfirm).toHaveBeenCalledExactlyOnceWith(1);
+  click("Check a source");
+  expect(onCheckSource).toHaveBeenCalledExactlyOnceWith(1);
+
+  // Clicking "Correct it" from the collapsed callout opens the map focused on that step with the correction box open.
+  click("Correct it");
+  expect(onToggle).toHaveBeenCalledOnce();
+  expect(onFocus).toHaveBeenCalledWith(1);
+  render({
+    ...baseProps,
+    map: { open: true, active: 1, onToggle, onFocus, onRealign, onConfirm, onCheckSource },
+  });
+  expect(container.querySelector('[aria-label="What you meant at step 2"]')).not.toBeNull();
+
+  // Rendered after an earlier conversation turn settled step 1 and the writer confirmed step 2:
+  const settled: WritingOffer = {
+    ...rewrite,
+    trace: [
+      { quote: "The premise.", reading: "Settled from your answer.", sure: true },
+      { quote: "The leap.", reading: "Confirmed causal link.", sure: true },
+    ],
+  };
+  const settledProps = controls(settled);
+  render({
+    ...settledProps,
+    id: "writing-settled",
+    map: { open: true, active: 0, onToggle, onFocus, onRealign, onConfirm, onCheckSource },
+    offer: {
+      ...settledProps.offer,
+      resolved: [{ id: "e1", kind: "you", label: "Answered: Why?", text: "Because of the incentive shift." }, null],
+      confirmedSteps: [false, true],
+    },
+  });
+  const rows = container.querySelectorAll(".argument-map-steps > li");
+  expect(rows[0].textContent).toContain("Answered earlier · Settled from your answer.");
+  expect(rows[1].textContent).toContain("Confirmed · Confirmed causal link.");
+});
