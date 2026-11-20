@@ -4,8 +4,10 @@ import type { QuestionAnswer, QuestionItem } from "../../context/AgentContext";
 import { AgentSpec } from "./ui/AgentSpec";
 
 /**
- * An ask_user question. While the run waits it takes an answer from its form,
- * an option, or the composer; afterwards it collapses to what was answered.
+ * A question from the agent: ask_user, or an MCP call waiting for approval.
+ * While the run waits it takes an answer from its form, an option, or the
+ * composer; afterwards it collapses to what was answered. An approval shows
+ * the call above its options, and keeps it a click away once answered.
  */
 export const AgentQuestion = memo(function AgentQuestion({
   item,
@@ -42,6 +44,17 @@ export const AgentQuestion = memo(function AgentQuestion({
       aria-label="Question from ChatGPT"
     >
       <p className="text-xs font-medium leading-relaxed whitespace-pre-wrap break-words">{item.question}</p>
+      {item.preview &&
+        (pending && item.answer === null ? (
+          <AgentSpec spec={item.preview} />
+        ) : (
+          <details className="text-[11px] text-text-muted">
+            <summary className="cursor-pointer select-none hover:text-text">Show the call</summary>
+            <div className="mt-2">
+              <AgentSpec spec={item.preview} />
+            </div>
+          </details>
+        ))}
       {item.answer !== null ? (
         <p className="text-xs text-text-muted">
           You answered: <span className="text-text">{item.answer}</span>

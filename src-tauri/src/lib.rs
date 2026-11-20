@@ -3415,6 +3415,7 @@ pub fn run() {
             agent::mcp::mcp_cancel_authorize,
             agent::mcp::mcp_sign_out_server,
             agent::mcp::mcp_set_tool_policy,
+            agent::mcp::mcp_set_server_hint,
             agent::projects::projects_list,
             agent::projects::projects_create,
             agent::projects::projects_rename,

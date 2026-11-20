@@ -75,9 +75,9 @@ pub(super) async fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
 /// The saved servers, with the programs as `mcp.json` has them now. A program
 /// keeps what was saved about it (on or off, its tools, the user's choices
 /// for them) for as long as the file names it.
-fn with_programs(saved: Vec<ServerConfig>, programs: Vec<(String, config::Launch)>) -> Vec<ServerConfig> {
+fn with_programs(saved: Vec<ServerConfig>, programs: Vec<config::Program>) -> Vec<ServerConfig> {
     let (mut known, mut servers): (Vec<_>, Vec<_>) = saved.into_iter().partition(ServerConfig::is_program);
-    for (name, launch) in programs {
+    for config::Program { name, launch, hint } in programs {
         if servers.len() >= super::MAX_SERVERS {
             break;
         }
@@ -88,6 +88,7 @@ fn with_programs(saved: Vec<ServerConfig>, programs: Vec<(String, config::Launch
         };
         server.name = super::unique_name(&servers, &name, None);
         server.launch = Some(launch);
+        server.hint = hint;
         servers.push(server);
     }
     servers
@@ -141,7 +142,7 @@ mod tests {
     fn server(id: &str) -> ServerConfig {
         ServerConfig {
             id: id.into(), name: "Tracker".into(), url: "https://mcp.example.com/mcp".into(), enabled: true,
-            local: false, auto_name: false, client_id: None, launch: None, tools: Vec::new(), policies: HashMap::new(), added_at: 1,
+            local: false, auto_name: false, client_id: None, launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: 1,
         }
     }
 
@@ -198,11 +199,12 @@ mod tests {
         }).await.unwrap();
         assert!(!std::fs::read_to_string(root.join(SERVERS_FILE)).unwrap().contains("secret"), "the file stays the only place a program is defined");
 
-        write(r#"{"mcpServers":{"files":{"command":"uvx","args":["files"]}}}"#);
+        write(r#"{"mcpServers":{"files":{"command":"uvx","args":["files"],"hint":"Show a file as a card."}}}"#);
         let store = read(&root).await.unwrap();
         assert_eq!(store.servers.len(), 2, "a program the file no longer names is gone");
         let server = store.server(&files).unwrap();
         assert_eq!(server.launch.as_ref().unwrap().line(), "uvx files");
+        assert_eq!(server.hint.as_deref(), Some("Show a file as a card."), "a program's hint is the file's");
         assert!(!server.enabled);
         assert_eq!(server.policies.len(), 1);
 
@@ -214,6 +216,7 @@ mod tests {
         write(r#"{"mcpServers":{"files":{"command":"uvx"},"tracker":{"url":"https://mcp.example.com/mcp"}}}"#);
         let store = read(&root).await.unwrap();
         assert!(!store.server(&files).unwrap().enabled, "an unreadable file loses nothing that was saved");
+        assert_eq!(store.server(&files).unwrap().hint, None, "a hint taken out of the file is gone");
         assert!(store.problem.as_deref().unwrap().contains("tracker"));
         std::fs::remove_dir_all(root).unwrap();
     }

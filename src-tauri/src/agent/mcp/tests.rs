@@ -186,7 +186,7 @@ impl Home {
         store::update(&root, |store| {
             store.servers.push(ServerConfig {
                 id: id.clone(), name: "127.0.0.1".into(), url: url.into(), enabled: true, local, auto_name: true,
-                client_id: None, launch: None, tools: Vec::new(), policies: HashMap::new(), added_at: 0,
+                client_id: None, launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: 0,
             });
             Ok(())
         }).await.unwrap();

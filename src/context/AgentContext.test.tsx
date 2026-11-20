@@ -379,14 +379,27 @@ describe("AgentProvider ask_user", () => {
 
   it("asks before an MCP tool runs and returns the user's choice to the waiting call", async () => {
     await startRunAndAsk({
-      question: 'Allow Tracker to run create_issue?\n{\n  "title": "Book the ferry"\n}',
-      options: ["Allow once", "Always allow", "Don't allow"],
+      question: "Allow Tracker to run create_issue?",
+      options: ["Create ticket", "Always allow", "Don't allow"],
       form: null,
+      call: { server: "Tracker", tool: "create_issue", arguments: { title: "Book the ferry" } },
+      preview: {
+        root: "ticket",
+        elements: { ticket: { type: "Card", props: { title: "Book the ferry" }, children: [] } },
+      },
     }, "mcp_approval");
 
     expect(current.pendingQuestion).toMatchObject({
-      question: expect.stringContaining("Allow Tracker to run create_issue?"),
-      options: ["Allow once", "Always allow", "Don't allow"],
+      question: "Allow Tracker to run create_issue?",
+      options: ["Create ticket", "Always allow", "Don't allow"],
+      form: null,
+      preview: {
+        root: "approval",
+        elements: {
+          approval: { children: ["preview/ticket", "call"] },
+          "call/0": { type: "KeyValue", props: { items: [{ label: "title", value: "Book the ferry" }] } },
+        },
+      },
     });
     await act(async () => {
       await current.answerQuestion("Always allow");

@@ -28,7 +28,7 @@ const onManage = vi.fn();
 const server = (change: Partial<McpServer>): McpServer => ({
   id: "s1", name: "Tracker", key: "tracker", url: "https://mcp.tracker.example/mcp", command: null, transport: "http",
   enabled: true, local: false,
-  clientId: null, auth: "oauth", status: "connected", detail: null, tools: [], ...change,
+  clientId: null, auth: "oauth", status: "connected", detail: null, hint: null, tools: [], ...change,
 });
 let renders = 0;
 // The component is memoized and the context is mocked, so each render is keyed anew.

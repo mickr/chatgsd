@@ -6,8 +6,9 @@
 //! ```
 //!
 //! The file is the definition: settings writes to it, and an edit made by
-//! hand counts the same. Entries ChatGSD doesn't run, and anything else in
-//! the file, are left as they are.
+//! hand counts the same. An entry may also carry a `hint`: the user's own
+//! words to the agent about using the server. Entries ChatGSD doesn't run,
+//! and anything else in the file, are left as they are.
 use super::store;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "mcp.json";
 const SERVERS: &str = "mcpServers";
+pub const HINT: &str = "hint";
 
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -90,10 +92,17 @@ impl Launch {
     }
 }
 
+/// One server `mcp.json` says to run.
+pub struct Program {
+    pub name: String,
+    pub launch: Launch,
+    pub hint: Option<String>,
+}
+
 /// What `mcp.json` says to run, and the entries it has that ChatGSD can't.
 #[derive(Default)]
 pub struct Config {
-    pub servers: Vec<(String, Launch)>,
+    pub servers: Vec<Program>,
     pub skipped: Vec<String>,
 }
 
@@ -115,7 +124,11 @@ fn entries(document: &Map<String, Value>) -> Config {
     for (name, entry) in document.get(SERVERS).and_then(Value::as_object).into_iter().flatten() {
         let launch = serde_json::from_value::<Launch>(entry.clone()).ok().filter(|launch| !launch.command.trim().is_empty());
         match launch {
-            Some(launch) if !name.trim().is_empty() => config.servers.push((name.clone(), launch)),
+            Some(launch) if !name.trim().is_empty() => config.servers.push(Program {
+                name: name.clone(),
+                launch,
+                hint: super::clean(entry.get(HINT).and_then(Value::as_str).map(str::to_owned), super::MAX_HINT_CHARS),
+            }),
             _ => config.skipped.push(name.clone()),
         }
     }
@@ -136,63 +149,6 @@ pub async fn change(root: &Path, change: impl FnOnce(&mut Map<String, Value>) ->
     change(servers)?;
     tokio::fs::create_dir_all(root).await.map_err(|error| format!("Couldn't save {FILE}: {error}"))?;
     store::save(&path(root), &document).await
-}
-
-/// A server another app on this Mac is already set up with.
-pub struct Found {
-    pub name: String,
-    pub source: Source,
-}
-
-pub enum Source {
-    Program(Launch),
-    Address(String),
-}
-
-#[derive(Deserialize)]
-struct CodexConfig {
-    #[serde(default)]
-    mcp_servers: BTreeMap<String, toml::Value>,
-}
-
-#[derive(Deserialize)]
-struct CodexServer {
-    command: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    cwd: Option<String>,
-    url: Option<String>,
-    enabled: Option<bool>,
-}
-
-fn codex_servers(config: &str) -> Vec<Found> {
-    let Ok(config) = toml::from_str::<CodexConfig>(config) else { return Vec::new() };
-    config.mcp_servers.into_iter().filter_map(|(name, entry)| {
-        let server: CodexServer = entry.try_into().ok()?;
-        if server.enabled == Some(false) {
-            return None;
-        }
-        let source = match (server.command, server.url) {
-            (Some(command), _) => Source::Program(Launch { command, args: server.args, env: server.env, cwd: server.cwd }),
-            (None, Some(url)) => Source::Address(url),
-            (None, None) => return None,
-        };
-        Some(Found { name, source })
-    }).collect()
-}
-
-/// The servers in Codex's own configuration, which the user set up for the
-/// Codex CLI or app. Nothing is run from it: the user adds the ones they want.
-pub async fn codex() -> Vec<Found> {
-    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
-    let Some(home) = home else { return Vec::new() };
-    match tokio::fs::read_to_string(home.join("config.toml")).await {
-        Ok(config) => codex_servers(&config),
-        Err(_) => Vec::new(),
-    }
 }
 
 #[cfg(test)]
@@ -231,7 +187,7 @@ mod tests {
         std::fs::write(path(&root), r#"{
             "theme": "dark",
             "mcpServers": {
-                "files": {"type": "stdio", "command": "npx", "args": ["-y", "files-server"], "env": {"ROOT": "/tmp"}},
+                "files": {"type": "stdio", "command": "npx", "args": ["-y", "files-server"], "env": {"ROOT": "/tmp"}, "hint": " Show a file as a card. "},
                 "tracker": {"type": "http", "url": "https://mcp.example.com/mcp"},
                 "broken": {"command": 7}
             }
@@ -239,9 +195,10 @@ mod tests {
         let mut config = read(&root).await.unwrap();
         config.skipped.sort();
         assert_eq!(config.servers.len(), 1);
-        assert_eq!(config.servers[0].0, "files");
-        assert_eq!(config.servers[0].1.line(), "npx -y files-server");
-        assert_eq!(config.servers[0].1.env["ROOT"], "/tmp");
+        assert_eq!(config.servers[0].name, "files");
+        assert_eq!(config.servers[0].launch.line(), "npx -y files-server");
+        assert_eq!(config.servers[0].launch.env["ROOT"], "/tmp");
+        assert_eq!(config.servers[0].hint.as_deref(), Some("Show a file as a card."));
         assert_eq!(config.skipped, ["broken", "tracker"]);
 
         let launch = Launch::parse("uvx notes-server", "KEY=secret").unwrap();
@@ -264,41 +221,5 @@ mod tests {
         assert!(change(&root, |_| Ok(())).await.is_err(), "a file that can't be read is never overwritten");
         assert_eq!(std::fs::read_to_string(path(&root)).unwrap(), "{ not json");
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn codex_servers_are_found_by_command_or_address() {
-        let found = codex_servers(r#"
-            model = "gpt-5"
-
-            [mcp_servers.browser]
-            command = "/Applications/Browser.app/Contents/MacOS/browser"
-            args = ["mcp"]
-            tool_timeout_sec = 900
-
-            [mcp_servers.browser.env]
-            MODE = "quiet"
-
-            [mcp_servers.tracker]
-            url = "https://mcp.example.com/mcp"
-            bearer_token_env_var = "TRACKER_TOKEN"
-
-            [mcp_servers.off]
-            command = "off-server"
-            enabled = false
-
-            [mcp_servers.empty]
-            startup_timeout_sec = 5
-        "#);
-        assert_eq!(found.iter().map(|found| found.name.as_str()).collect::<Vec<_>>(), ["browser", "tracker"]);
-        match &found[0].source {
-            Source::Program(launch) => {
-                assert_eq!(launch.line(), "/Applications/Browser.app/Contents/MacOS/browser mcp");
-                assert_eq!(launch.env["MODE"], "quiet");
-            }
-            Source::Address(_) => panic!("browser is a program"),
-        }
-        assert!(matches!(&found[1].source, Source::Address(url) if url == "https://mcp.example.com/mcp"));
-        assert!(codex_servers("not toml [").is_empty());
     }
 }

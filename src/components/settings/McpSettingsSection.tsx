@@ -54,6 +54,8 @@ function showConfig() {
 const fieldLabel = "block text-xs font-medium";
 const fieldHint = "text-xs text-text-muted leading-relaxed";
 const quietLink = "text-xs text-text-muted hover:text-text";
+const textArea =
+  "block w-full resize-y rounded-md border border-border bg-bg px-3 py-2 text-sm text-text placeholder:text-text-muted focus-visible:outline-none focus-visible:border-accent";
 
 /** The optional fields: a name, a pasted token, and a hand-made OAuth client. */
 function OptionalFields({
@@ -226,6 +228,56 @@ function EditServer({ server, redirectUri, onDone }: { server: McpServer; redire
   );
 }
 
+/** The user's own words to the agent about one server. A program's are kept in `mcp.json`. */
+function EditHint({ server, onDone }: { server: McpServer; onDone: () => void }) {
+  const [hint, setHint] = useState(server.hint ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await mcp.setServerHint(server.id, hint);
+      onDone();
+    } catch (reason) {
+      setError(errorMessage(reason));
+      setSaving(false);
+    }
+  };
+  const id = `mcp-hint-${server.id}`;
+  return (
+    <form className="space-y-3 border-t border-border border-dashed pt-3" onSubmit={(event) => void save(event)} aria-label={`Hint for ${server.name}`}>
+      <div className="space-y-1.5">
+        <label htmlFor={id} className={fieldLabel}>Hint for the agent</label>
+        <textarea
+          id={id}
+          rows={3}
+          maxLength={1000}
+          value={hint}
+          placeholder="Show a ticket as a card with its key, status and assignee. Before creating one, show it the same way and call the button Create ticket."
+          onChange={(event) => setHint(event.target.value)}
+          aria-describedby={`${id}-hint`}
+          className={textArea}
+        />
+        <p id={`${id}-hint`} className={fieldHint}>
+          In your own words: when to use this server, how to lay out what it returns, and what to show before it
+          changes anything. The agent follows it as your instruction.
+          {server.transport === "stdio" && " It is kept with the server in mcp.json."}
+        </p>
+      </div>
+      {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+      <div className="flex items-center gap-2">
+        <Button type="submit" variant="outline" size="md" disabled={saving}>
+          {saving ? "Saving…" : "Save"}
+        </Button>
+        <Button type="button" variant="ghost" size="md" disabled={saving} onClick={onDone}>Cancel</Button>
+      </div>
+    </form>
+  );
+}
+
 const rowAction = "hover:text-text disabled:opacity-50 disabled:hover:text-text-muted";
 
 const ServerRow = memo(function ServerRow({
@@ -238,6 +290,7 @@ const ServerRow = memo(function ServerRow({
   onRemove: (server: McpServer) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [hinting, setHinting] = useState(false);
   const [working, setWorking] = useState(false);
   const run = (action: Promise<void>, failure: string) => {
     setWorking(true);
@@ -322,8 +375,15 @@ const ServerRow = memo(function ServerRow({
           </ul>
         </details>
       )}
+      {server.hint && !hinting && (
+        <p className="text-xs text-text-muted leading-relaxed line-clamp-2" title={server.hint}>
+          Hint: {server.hint}
+        </p>
+      )}
       {editing ? (
         <EditServer server={server} redirectUri={redirectUri} onDone={() => setEditing(false)} />
+      ) : hinting ? (
+        <EditHint server={server} onDone={() => setHinting(false)} />
       ) : (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted">
           <button
@@ -349,6 +409,9 @@ const ServerRow = memo(function ServerRow({
           ) : (
             <button type="button" className={rowAction} onClick={() => setEditing(true)}>Edit</button>
           )}
+          <button type="button" className={rowAction} onClick={() => setHinting(true)}>
+            {server.hint ? "Edit hint" : "Add hint"}
+          </button>
           <button type="button" className={`${rowAction} ml-auto`} onClick={() => onRemove(server)}>Remove</button>
         </div>
       )}
@@ -433,7 +496,7 @@ function AddLocalServer({ onAdded }: { onAdded: () => void }) {
           placeholder="API_KEY=…"
           onChange={change("env")}
           aria-describedby="mcp-local-env-hint"
-          className="block w-full resize-y rounded-md border border-border bg-bg px-3 py-2 font-mono text-sm text-text placeholder:text-text-muted focus-visible:outline-none focus-visible:border-accent"
+          className={`${textArea} font-mono`}
         />
         <p id="mcp-local-env-hint" className={fieldHint}>
           Optional, one NAME=value per line. They are given to this server only and kept in mcp.json on this Mac.
@@ -535,7 +598,7 @@ const FoundRow = memo(function FoundRow({ found, onAdded }: { found: McpFoundSer
   const add = () => {
     setAdding(true);
     void mcp
-      .addFoundServer(found.name)
+      .addFoundServer(found.id)
       .then(announceAdded, (reason) => toast.error(`Couldn't add ${found.name}: ${errorMessage(reason)}`))
       .finally(() => {
         setAdding(false);
@@ -547,8 +610,9 @@ const FoundRow = memo(function FoundRow({ found, onAdded }: { found: McpFoundSer
       <div className="min-w-0 space-y-0.5">
         <p className="text-sm font-medium truncate">{found.name}</p>
         <p className="font-mono text-xs text-text-muted truncate" title={found.detail}>{found.detail}</p>
+        <p className="text-xs text-text-muted truncate">Set up in {found.places.join(", ")}</p>
       </div>
-      <Button variant="outline" size="sm" disabled={adding} aria-label={`Add ${found.name} from Codex`} onClick={add}>
+      <Button variant="outline" size="sm" disabled={adding} aria-label={`Add ${found.name}`} onClick={add}>
         {adding ? "Adding…" : "Add"}
       </Button>
     </li>
@@ -652,15 +716,16 @@ export function McpSettingsSection() {
         {config && config.found.length > 0 && (
           <div className="mt-6 space-y-2.5">
             <div className="space-y-1">
-              <h3 className="text-sm font-medium">Already set up in Codex</h3>
+              <h3 className="text-sm font-medium">Already set up on this Mac</h3>
               <p className={fieldHint}>
-                Servers from Codex's configuration on this Mac. Nothing here is used until you add it; a server
-                that runs on this Mac is copied into mcp.json with its variables.
+                Servers your other apps are set up with, such as Codex, Claude and Cursor, each listed once.
+                Nothing here is used until you add it; a server that runs on this Mac is copied into mcp.json
+                with its variables.
               </p>
             </div>
             <ul className="divide-y divide-border divide-dashed rounded-[10px] border border-border">
               {config.found.map((found) => (
-                <FoundRow key={found.name} found={found} onAdded={loadConfig} />
+                <FoundRow key={found.id} found={found} onAdded={loadConfig} />
               ))}
             </ul>
           </div>

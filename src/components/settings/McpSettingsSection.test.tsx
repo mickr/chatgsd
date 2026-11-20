@@ -19,6 +19,7 @@ vi.mock("../../services/mcp", async (original) => ({
   addLocalServer: vi.fn(),
   addFoundServer: vi.fn(),
   loadConfig: vi.fn(() => Promise.resolve({ problem: null, found: [] })),
+  setServerHint: vi.fn(() => Promise.resolve()),
   revealConfig: vi.fn(() => Promise.resolve()),
   updateServer: vi.fn(() => Promise.resolve()),
   removeServer: vi.fn(() => Promise.resolve()),
@@ -38,7 +39,7 @@ let container: HTMLDivElement;
 const tracker: McpServer = {
   id: "s1", name: "Tracker", key: "tracker", url: "https://mcp.tracker.example/mcp", command: null, transport: "http",
   enabled: true, local: false,
-  clientId: null, auth: "oauth", status: "connected", detail: null,
+  clientId: null, auth: "oauth", status: "connected", detail: null, hint: null,
   tools: [
     { name: "search_issues", title: null, description: "Find issues", readOnly: true, policy: "allow" },
     { name: "create_issue", title: null, description: "Open an issue", readOnly: false, policy: "ask" },
@@ -169,7 +170,7 @@ it("removes a server only after confirming", async () => {
 
 const files: McpServer = {
   id: "program-1", name: "files", key: "files", url: "", command: "npx -y files-server ~/Documents", transport: "stdio",
-  enabled: true, local: true, clientId: null, auth: "none", status: "connected", detail: null,
+  enabled: true, local: true, clientId: null, auth: "none", status: "connected", detail: null, hint: null,
   tools: [{ name: "read_file", title: null, description: "Read a file", readOnly: true, policy: "allow" }],
 };
 
@@ -225,16 +226,44 @@ it("follows mcp.json on opening and on coming back, and says what it can't use",
   expect(container.textContent).not.toContain("isn't valid JSON");
 });
 
-it("offers the servers Codex has and adds one when asked", async () => {
-  vi.mocked(mcp.loadConfig).mockResolvedValue({ problem: null, found: [{ name: "browser", detail: "/Applications/Browser.app/Contents/MacOS/browser mcp" }] });
+it("offers the servers other apps have, each once, and adds one when asked", async () => {
+  vi.mocked(mcp.loadConfig).mockResolvedValue({
+    problem: null,
+    found: [
+      { id: "1f", name: "browser", detail: "/Applications/Browser.app/Contents/MacOS/browser mcp", places: ["Codex", "Cursor"] },
+      { id: "2a", name: "framework (shop)", detail: "php artisan mcp", places: ["Claude Code (shop)"] },
+    ],
+  });
   vi.mocked(mcp.addFoundServer).mockResolvedValue({ ...files, id: "program-2", name: "browser" });
   await render([]);
   await settle();
-  expect(container.textContent).toContain("Already set up in Codex");
+  expect(container.textContent).toContain("Already set up on this Mac");
+  expect(container.textContent).toContain("Set up in Codex, Cursor");
+  expect(container.textContent).toContain("Set up in Claude Code (shop)");
   expect(mcp.addFoundServer).not.toHaveBeenCalled();
-  await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Add browser from Codex"]')!.click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Add browser"]')!.click(); });
   await settle();
-  expect(mcp.addFoundServer).toHaveBeenCalledWith("browser");
+  expect(mcp.addFoundServer).toHaveBeenCalledWith("1f");
   expect(toast.success).toHaveBeenCalledWith("Connected to browser.");
   expect(mcp.loadConfig).toHaveBeenCalledTimes(2);
+});
+
+it("takes a hint for the agent about a server, in the user's words", async () => {
+  await render([tracker, { ...files, hint: "Show a file as a card." }]);
+  await settle();
+  expect(container.textContent).toContain("Hint: Show a file as a card.");
+  expect(button("Edit hint")).toBeDefined();
+
+  act(() => button("Add hint").click());
+  const field = container.querySelector<HTMLTextAreaElement>("#mcp-hint-s1")!;
+  expect(field.value).toBe("");
+  type(field, "Show an issue as a ticket and call the button Create ticket.");
+  await act(async () => { button("Save").click(); });
+  await settle();
+  expect(mcp.setServerHint).toHaveBeenCalledWith("s1", "Show an issue as a ticket and call the button Create ticket.");
+  expect(container.querySelector("#mcp-hint-s1")).toBeNull();
+
+  act(() => button("Edit hint").click());
+  expect(container.querySelector<HTMLTextAreaElement>("#mcp-hint-program-1")!.value).toBe("Show a file as a card.");
+  expect(container.textContent).toContain("kept with the server in mcp.json");
 });

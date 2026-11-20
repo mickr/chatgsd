@@ -18,6 +18,7 @@ import * as notes from "../services/notes";
 import type { Settings } from "../types/note";
 import type { Spec } from "@json-render/core";
 import { uiGuide } from "../lib/agent/ui/catalog";
+import { approvalSpec } from "../lib/agent/ui/approval";
 import { renderableSpec } from "../lib/agent/ui/content";
 import { clipPreview } from "../lib/agent/selection";
 import { useCoeditingObserver } from "../lib/agent/useCoeditingObserver";
@@ -62,6 +63,8 @@ export type TranscriptItem =
       question: string;
       options: string[];
       form: Spec | null;
+      /** What an MCP call waiting for approval would send, shown above its options. */
+      preview?: Spec | null;
       answer: string | null;
     }
   | { id: string; type: "activity"; text: string }
@@ -1023,6 +1026,7 @@ export function AgentProvider({
               question,
               options,
               form,
+              preview: request.name === "mcp_approval" ? approvalSpec(request.args) : null,
               answer: null,
             },
           ],

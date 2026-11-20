@@ -122,6 +122,19 @@ export const componentDefinitions = {
 
 export type ComponentType = keyof typeof componentDefinitions;
 
+/** The blocks a preview of an MCP call may use: none that takes input or acts. */
+export const previewTypes: ReadonlySet<string> = new Set<ComponentType>([
+  "Stack",
+  "Card",
+  "Heading",
+  "Text",
+  "List",
+  "Table",
+  "KeyValue",
+  "Checklist",
+  "Callout",
+]);
+
 export const catalog = defineCatalog(schema, {
   components: componentDefinitions,
   actions: {},
@@ -171,6 +184,7 @@ A spec block is a fenced block tagged spec with one JSON Patch operation per lin
 Every element needs type, props (all listed props, null when unused) and children (element IDs, [] for none).
 When a reply leaves clear next moves, end it with a spec block holding one Suggestions element; the user sends one with a click. Leave it out when nothing obvious follows.
 For ask_user, pass form as a complete spec object {root, elements, state} instead of patch lines. Bind each input's value to {"$bindState":"/answers/<key>"} and seed state.answers with an initial value per key. Scratch adds the send button and returns the answers object. Use a form when the question has several parts or needs context alongside it; for one simple choice, options alone are enough.
+For mcp_call's preview, pass a complete spec object {root, elements} built only from ${[...previewTypes].join(", ")}. Lay the call out the way the user knows the thing it creates or changes, such as a ticket: a Card titled with its summary, KeyValue for its fields, Text for its body. Scratch shows the exact arguments beneath it and adds the buttons.
 For a writing proposal, call offer_writing_help first. Its returned id can be shown in either companion surface with {"type":"WritingSuggestion","props":{"id":"<returned id>"},"children":[]}. That card includes the proposal, source links or question, and the appropriate user actions. Do not recreate its action buttons in prose or fabricate offer ids. Add to chat prepares context for the user's next message; it does not send a message or accept an edit.
 Components:
 ${componentLines.join("\n")}`;

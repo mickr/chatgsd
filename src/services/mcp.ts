@@ -37,6 +37,8 @@ export interface McpServer {
   auth: "oauth" | "token" | "none";
   status: McpConnection;
   detail: string | null;
+  /** What the user told the agent about using this server and showing what it returns. */
+  hint: string | null;
   tools: McpTool[];
 }
 export interface McpServerInput {
@@ -55,11 +57,14 @@ export interface McpLocalServerInput {
   /** `NAME=value` lines. */
   env?: string;
 }
-/** A server Codex is set up with that ChatGSD doesn't have. */
+/** A server another app on this Mac is set up with that ChatGSD doesn't have. */
 export interface McpFoundServer {
+  id: string;
   name: string;
   /** The command it runs, or its address. */
   detail: string;
+  /** The apps it is set up in, such as Codex or Cursor. */
+  places: string[];
 }
 export interface McpConfig {
   /** What is wrong with `mcp.json`, in words for the user. */
@@ -76,10 +81,10 @@ export const addServer = (request: McpServerInput) =>
 /** Writes the server into `mcp.json` and starts it. */
 export const addLocalServer = (request: McpLocalServerInput) =>
   invoke<McpServer>("mcp_add_local_server", { request });
-/** Follows `mcp.json` as it is now, and lists what Codex has that could be added. */
+/** Follows `mcp.json` as it is now, and lists what other apps have that could be added. */
 export const loadConfig = () => invoke<McpConfig>("mcp_load_config");
-export const addFoundServer = (name: string) =>
-  invoke<McpServer>("mcp_add_found_server", { name });
+export const addFoundServer = (id: string) =>
+  invoke<McpServer>("mcp_add_found_server", { id });
 /** Shows `mcp.json` in Finder, creating it if there is none yet. */
 export const revealConfig = () => invoke<void>("mcp_reveal_config");
 export const updateServer = (id: string, request: McpServerInput) =>
@@ -100,6 +105,9 @@ export const signOutServer = (id: string) =>
   invoke<void>("mcp_sign_out_server", { id });
 export const setToolPolicy = (id: string, tool: string, policy: McpToolPolicy) =>
   invoke<void>("mcp_set_tool_policy", { id, tool, policy });
+/** Saves the user's hint to the agent about a server; empty removes it. */
+export const setServerHint = (id: string, hint: string) =>
+  invoke<void>("mcp_set_server_hint", { id, hint });
 export const onServersChanged = (handler: (servers: McpServer[]) => void) =>
   listen<McpServer[]>("mcp:changed", ({ payload }) => handler(payload));
 
