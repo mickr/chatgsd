@@ -396,7 +396,11 @@ function AppWorkspace({ editorRef, onEditorReady }: {
       const isInput =
         target.tagName === "INPUT" || target.tagName === "TEXTAREA";
       const isInNoteList = target.closest("[data-note-list]");
-      if (!isInEditor && !isInput && !isInNoteList) {
+      // Highlighted text in the agent panel gets the same menu as the note.
+      const isPanelSelection =
+        !!target.closest(".agent-panel-inner") &&
+        !!window.getSelection()?.toString().trim();
+      if (!isInEditor && !isInput && !isInNoteList && !isPanelSelection) {
         e.preventDefault();
       }
     };
