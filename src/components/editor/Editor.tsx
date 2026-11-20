@@ -1126,6 +1126,15 @@ export function Editor({
           class: "underline cursor-pointer",
         },
       }),
+      // Shift+Cmd+B toggles the sidebar (handled by the app). Bold also binds
+      // it, so claim it here first and leave bold on Cmd+B alone.
+      Extension.create({
+        name: "sidebarShortcut",
+        priority: 1000,
+        addKeyboardShortcuts() {
+          return { "Mod-B": () => true };
+        },
+      }),
       // Convert markdown link syntax [text](url) into real links when typed
       Extension.create({
         name: "markdownLinkInputRule",
@@ -2323,8 +2332,8 @@ export function Editor({
               onClick={onToggleSidebar}
               title={
                 isSidebarActive
-                  ? `Hide sidebar (${mod}${isMac ? "" : "+"}\\)`
-                  : `Show sidebar (${mod}${isMac ? "" : "+"}\\)`
+                  ? `Hide sidebar (${mod}${isMac ? "⇧" : "+Shift+"}B)`
+                  : `Show sidebar (${mod}${isMac ? "⇧" : "+Shift+"}B)`
               }
               className="shrink-0"
             >

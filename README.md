@@ -302,7 +302,7 @@ ChatGSD is designed to be usable without a mouse. Here are the essentials to get
 | `Cmd+Option+Enter` | Ask the agent about the selection |
 | `Cmd+R`           | Reload current note    |
 | `Cmd+,`           | Open settings          |
-| `Cmd+\`           | Toggle sidebar         |
+| `Cmd+Shift+B`     | Toggle sidebar         |
 | `Cmd+B/I`         | Bold/Italic            |
 | `Cmd+=/-/0`       | Zoom in/out/reset      |
 | `↑/↓`             | Navigate notes         |

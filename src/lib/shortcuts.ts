@@ -20,7 +20,7 @@ export const shortcutCategories: ShortcutCategory[] = [
       { keys: [mod, alt, "B"], description: "Toggle agent panel" },
       { keys: [mod, alt, "→"], description: "Focus agent sidebar" },
       { keys: [mod, alt, "←"], description: "Focus note" },
-      { keys: [mod, "\\"], description: "Toggle sidebar" },
+      { keys: [mod, shift, "B"], description: "Toggle sidebar" },
       { keys: [mod, ","], description: "Settings" },
       { keys: [mod, "/"], description: "Keyboard shortcuts" },
       { keys: [mod, "W"], description: "Close window" },

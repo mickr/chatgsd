@@ -290,8 +290,8 @@ function AppWorkspace({ editorRef, onEditorReady }: {
         return;
       }
 
-      // Cmd+\ - Toggle sidebar
-      if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+      // Cmd+Shift+B - Toggle sidebar
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
         e.preventDefault();
         toggleSidebar();
         return;
