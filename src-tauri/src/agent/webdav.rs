@@ -194,7 +194,7 @@ pub fn default_label_for(url: &Url) -> String {
     let host = url.host_str().unwrap_or("WebDAV");
     let leaf = url
         .path_segments()
-        .and_then(|segments| segments.filter(|s| !s.is_empty()).next_back());
+        .and_then(|mut segments| segments.rfind(|s| !s.is_empty()));
     match leaf {
         Some(segment) if segment != "dav" => format!("{host} ({segment})"),
         _ => host.to_owned(),
@@ -520,7 +520,13 @@ pub fn parse_multistatus_xml(xml: &str, base_path: &str) -> Vec<DavEntry> {
             let decoded = urlencoding::decode(part)
                 .map(|cow| cow.into_owned())
                 .unwrap_or_else(|_| part.to_owned());
-            if decoded.is_empty() || decoded == "." || decoded == ".." || decoded.contains('\0') {
+            if decoded.is_empty()
+                || decoded == "."
+                || decoded == ".."
+                || decoded.contains('/')
+                || decoded.contains('\\')
+                || decoded.contains('\0')
+            {
                 valid = false;
                 break;
             }
@@ -549,6 +555,71 @@ pub fn parse_multistatus_xml(xml: &str, base_path: &str) -> Vec<DavEntry> {
 fn is_markdown_path(rel_path: &str) -> bool {
     let lower = rel_path.to_ascii_lowercase();
     lower.ends_with(".md") || lower.ends_with(".markdown")
+}
+
+/// Resolves `rel_path` strictly inside `mirror_dir`, rejecting any non-normal
+/// path component (`..`, root, prefix) and refusing to traverse or overwrite
+/// any symlink inside the mirror.
+async fn safe_mirror_path(mirror_dir: &Path, rel_path: &str) -> Result<PathBuf, String> {
+    let mut joined = mirror_dir.to_path_buf();
+    let mut count = 0usize;
+
+    for component in Path::new(rel_path).components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                let text = segment.to_string_lossy();
+                if text.is_empty()
+                    || text == "."
+                    || text == ".."
+                    || text.contains('/')
+                    || text.contains('\\')
+                    || text.contains('\0')
+                {
+                    return Err("Rejected unsafe WebDAV path segment".into());
+                }
+                joined.push(segment);
+                count += 1;
+            }
+            _ => return Err("Rejected non-normal WebDAV path component".into()),
+        }
+    }
+
+    if count == 0 {
+        return Err("Rejected empty WebDAV path".into());
+    }
+
+    let canonical_mirror = tokio::fs::canonicalize(mirror_dir)
+        .await
+        .map_err(|error| format!("Couldn't resolve mirror folder: {error}"))?;
+
+    let mut current = canonical_mirror.clone();
+    for component in Path::new(rel_path).components() {
+        if let std::path::Component::Normal(segment) = component {
+            current.push(segment);
+            match tokio::fs::symlink_metadata(&current).await {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return Err("Refused to write through a symlink inside the mirror folder".into());
+                    }
+                    let resolved = tokio::fs::canonicalize(&current)
+                        .await
+                        .map_err(|error| format!("Couldn't verify mirror path: {error}"))?;
+                    if !resolved.starts_with(&canonical_mirror) {
+                        return Err("Rejected path escaping the mirror folder".into());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // Remaining components do not exist yet; parent has been verified.
+                    break;
+                }
+                Err(error) => {
+                    return Err(format!("Couldn't inspect mirror path: {error}"));
+                }
+            }
+        }
+    }
+
+    Ok(canonical_mirror.join(rel_path))
 }
 
 async fn access_token_for(app: &tauri::AppHandle, remote: &RemoteConfig) -> Result<Option<String>, String> {
@@ -673,13 +744,20 @@ pub async fn authorize_and_sync(
     sync_remote(app, remote, mirror_dir).await
 }
 
-async fn write_conflict_sidecar(abs_path: &Path, remote_bytes: &[u8]) -> Result<PathBuf, String> {
-    let stem = abs_path
+async fn write_conflict_sidecar(mirror_dir: &Path, rel_path: &str, remote_bytes: &[u8]) -> Result<PathBuf, String> {
+    let rel = Path::new(rel_path);
+    let stem = rel
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("note");
-    let ext = abs_path.extension().and_then(|s| s.to_str()).unwrap_or("md");
-    let sidecar = abs_path.with_file_name(format!("{stem}.remote.{ext}"));
+    let ext = rel.extension().and_then(|s| s.to_str()).unwrap_or("md");
+    let sidecar_rel = match rel.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            format!("{}/{stem}.remote.{ext}", parent.to_string_lossy())
+        }
+        _ => format!("{stem}.remote.{ext}"),
+    };
+    let sidecar = safe_mirror_path(mirror_dir, &sidecar_rel).await?;
     tokio::fs::write(&sidecar, remote_bytes)
         .await
         .map_err(|error| format!("Couldn't write conflict copy: {error}"))?;
@@ -732,9 +810,11 @@ pub async fn sync_remote(
         if entry.is_collection || !is_markdown_path(&entry.rel_path) {
             continue;
         }
+        let abs_path = match safe_mirror_path(mirror_dir, &entry.rel_path).await {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
         seen_paths.insert(entry.rel_path.clone());
-
-        let abs_path = mirror_dir.join(&entry.rel_path);
         let remote_etag = entry.etag.clone().unwrap_or_default();
         let previous = manifest.files.get(&entry.rel_path).cloned();
 
@@ -772,7 +852,7 @@ pub async fn sync_remote(
             if let Ok(local_bytes) = tokio::fs::read(&abs_path).await {
                 let local_sha = sha256_hex(&local_bytes);
                 if local_sha != prev.sha256 && local_sha != remote_sha {
-                    let _ = write_conflict_sidecar(&abs_path, &remote_bytes).await;
+                    let _ = write_conflict_sidecar(mirror_dir, &entry.rel_path, &remote_bytes).await;
                     conflicts += 1;
                     continue;
                 }
@@ -805,7 +885,10 @@ pub async fn sync_remote(
         .cloned()
         .collect();
     for stale in stale_paths {
-        let abs_path = mirror_dir.join(&stale);
+        let Ok(abs_path) = safe_mirror_path(mirror_dir, &stale).await else {
+            manifest.files.remove(&stale);
+            continue;
+        };
         if let Some(prev) = manifest.files.get(&stale) {
             let unmodified = tokio::fs::read(&abs_path)
                 .await
@@ -901,7 +984,7 @@ pub async fn push_saved_file(app: tauri::AppHandle, canonical_path: PathBuf) {
         }
         Ok(PutOutcome::Conflict) => {
             if let Ok((remote_bytes, _)) = get_file(fetcher, &file_url, token.as_deref()).await {
-                let _ = write_conflict_sidecar(&canonical_path, &remote_bytes).await;
+                let _ = write_conflict_sidecar(&mirror_dir, &rel_path, &remote_bytes).await;
             }
             set_status(
                 &remote.id,
@@ -1007,5 +1090,49 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].rel_path, "Client/Notes.md");
         assert_eq!(entries[0].etag.as_deref(), Some("\"7-100\""));
+    }
+
+    #[test]
+    fn rejects_percent_encoded_path_traversal_segments() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/dav/docs/..%2F..%2Fetc/passwd.md</D:href>
+    <D:propstat><D:prop><D:resourcetype/></D:prop></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/docs/..%5C..%5Cescape.md</D:href>
+    <D:propstat><D:prop><D:resourcetype/></D:prop></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/docs/Safe%20Client/Valid.md</D:href>
+    <D:propstat><D:prop><D:resourcetype/></D:prop></D:propstat>
+  </D:response>
+</D:multistatus>"#;
+
+        let entries = parse_multistatus_xml(xml, "/dav/docs");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].rel_path, "Safe Client/Valid.md");
+    }
+
+    #[tokio::test]
+    async fn safe_mirror_path_rejects_traversal_and_symlinks() {
+        let root = std::env::temp_dir().join(format!("chatgsd-webdav-test-{}", uuid::Uuid::new_v4()));
+        let mirror = root.join("mirror");
+        let outside = root.join("outside");
+        tokio::fs::create_dir_all(&mirror).await.unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+
+        assert!(safe_mirror_path(&mirror, "Client/Note.md").await.is_ok());
+        assert!(safe_mirror_path(&mirror, "../outside/escape.md").await.is_err());
+        assert!(safe_mirror_path(&mirror, "/etc/passwd.md").await.is_err());
+        assert!(safe_mirror_path(&mirror, "Client/..\\escape.md").await.is_err());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, mirror.join("linked")).unwrap();
+            assert!(safe_mirror_path(&mirror, "linked/escape.md").await.is_err());
+        }
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }
