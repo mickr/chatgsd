@@ -33,6 +33,8 @@ const MAX_ENTRY = 1500;
 const MAX_LEDGER = 14000;
 const MAX_PINNED_ENTRIES = 12;
 const MAX_PINNED_LEDGER = 7000;
+/** Separates what the writer said from the passage they had selected, in a "you" entry. */
+const SELECTED_PASSAGE = "\nSelected passage: ";
 const NOTE_TOOLS = new Set(["read_notes", "search_notes", "find_in_note", "list_notes", "note_links", "search_projects", "list_projects"]);
 const EDIT_TOOLS = new Set(["edit_document", "replace_selection", "edit_note"]);
 
@@ -133,7 +135,7 @@ function addEntry(item: LedgerItem, entries: Omit<ProvenanceEntry, "id">[], high
     if (!instruction) return;
     const selection = item.selection?.trim();
     entries.push({ kind: "you", label: "You said",
-      text: selection ? `${instruction}\nSelected passage: ${selection}` : instruction });
+      text: selection ? `${instruction}${SELECTED_PASSAGE}${selection}` : instruction });
     return;
   }
   if (item.type === "question") {
@@ -181,7 +183,7 @@ function addEntry(item: LedgerItem, entries: Omit<ProvenanceEntry, "id">[], high
 }
 
 function termsOf(text: string): Set<string> {
-  return new Set((text.toLowerCase().match(/[a-z0-9]{5,}/g) ?? []).slice(0, 64));
+  return new Set((text.toLowerCase().match(/[\p{L}\p{N}]{5,}/gu) ?? []).slice(0, 64));
 }
 
 /** The entries that fit, pinning causal turns for the highlight before filling with the most recent context. */
@@ -271,6 +273,9 @@ const CLARIFY_STOPWORDS = new Set([
   "here", "does", "did", "done", "make", "made", "mean", "means", "meant", "assumed", "assume", "assuming",
   "took", "take", "taken", "read", "reading", "step", "note", "passage", "selected", "question", "answer",
   "answered", "earlier", "learned", "writer", "confirmed", "corrected", "your", "ours", "will",
+  // Three-letter function words pass the length floor and would count as shared content in any two sentences.
+  "the", "and", "for", "are", "was", "not", "but", "you", "all", "any", "can", "had", "has", "her", "him", "his",
+  "how", "its", "our", "out", "who", "why", "may", "nor", "too", "yet", "off", "own", "now", "per", "via",
 ]);
 
 function stemToken(token: string): string {
@@ -283,7 +288,8 @@ function stemToken(token: string): string {
 
 function contentTerms(text: string): Set<string> {
   const terms = new Set<string>();
-  for (const raw of text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []) {
+  // Letters and digits of any script: a note in Russian or French has words to share too.
+  for (const raw of text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []) {
     if (CLARIFY_STOPWORDS.has(raw)) continue;
     const stem = stemToken(raw);
     if (!CLARIFY_STOPWORDS.has(stem) && stem.length >= 3) terms.add(stem);
@@ -306,9 +312,20 @@ function overlapCount(needles: ReadonlySet<string>, haystack: ReadonlySet<string
   return count;
 }
 
+/** One shared word is coincidence: two must match when the reading offers that many. */
+function speaksTo(target: ReadonlySet<string>, tokens: ReadonlySet<string>): boolean {
+  return target.size > 0 && overlapCount(target, tokens) >= Math.min(2, target.size);
+}
+
+/** A "you" entry without the passage that was selected with it: only what the writer wrote. */
+function writersWords(entry: ProvenanceEntry): string {
+  return `${entry.label}\n${entry.text.split(SELECTED_PASSAGE)[0]}`;
+}
+
 /**
- * Checks whether an unsure trace step (`sure: false`) was already answered by a
- * saved writer `meaning-*` choice or an earlier writer turn in the conversation ledger.
+ * Looks for an earlier answer to an unsure trace step (`sure: false`): a saved
+ * writer `meaning-*` choice or an earlier writer turn in the conversation ledger.
+ * It matches on shared words, so a match is a lead to show the writer, never proof.
  */
 export function findPriorStepAnswer(
   step: { quote: string; reading: string; sure: boolean; source?: string | null },
@@ -317,10 +334,16 @@ export function findPriorStepAnswer(
 ): ProvenanceEntry | null {
   if (step.sure || step.source) return null;
 
+  const quoteTerms = contentTerms(step.quote);
+  const readingTerms = contentTerms(step.reading);
+  const readingSpecific = new Set([...readingTerms].filter(term => !quoteTerms.has(term)));
+  const quoteNorm = normal(step.quote).toLowerCase();
+
   for (let idx = memory.length - 1; idx >= 0; idx--) {
     const item = memory[idx];
     if (item.kind !== "choice" || !item.key.startsWith("meaning-") || !item.quote) continue;
-    if (sameAnchoredPassage(item.quote, step.quote)) {
+    // The same passage can hold several assumptions: the saved meaning has to be about this one.
+    if (sameAnchoredPassage(item.quote, step.quote) && overlapCount(readingTerms, contentTerms(item.summary)) >= 1) {
       return {
         id: item.key,
         kind: "you",
@@ -330,11 +353,7 @@ export function findPriorStepAnswer(
     }
   }
 
-  const quoteTerms = contentTerms(step.quote);
-  const readingTerms = contentTerms(step.reading);
-  const readingSpecific = new Set([...readingTerms].filter(term => !quoteTerms.has(term)));
-  const quoteNorm = normal(step.quote).toLowerCase();
-
+  const targetTerms = readingSpecific.size > 0 ? readingSpecific : readingTerms;
   for (let idx = ledger.length - 1; idx >= 0; idx--) {
     const entry = ledger[idx];
     if (entry.kind === "trace") {
@@ -347,9 +366,7 @@ export function findPriorStepAnswer(
       const writerTokens = contentTerms(writerLines);
       const hasAnchor = (quoteNorm.length >= 8 && normal(entry.label).toLowerCase().includes(quoteNorm)) ||
         (quoteTerms.size > 0 && overlapCount(quoteTerms, traceTokens) >= 1);
-      const targetTerms = readingSpecific.size > 0 ? readingSpecific : readingTerms;
-      if (hasAnchor && targetTerms.size > 0 && overlapCount(targetTerms, writerTokens) >= 1)
-        return entry;
+      if (hasAnchor && speaksTo(targetTerms, writerTokens)) return entry;
       continue;
     }
 
@@ -357,18 +374,13 @@ export function findPriorStepAnswer(
     const fullText = `${entry.label}\n${entry.text}`;
     const entryNorm = normal(fullText).toLowerCase();
     const entryTokens = contentTerms(fullText);
-    const targetTerms = readingSpecific.size > 0 ? readingSpecific : readingTerms;
-    if (!targetTerms.size) continue;
+    // Selecting a passage says nothing about it: the answer has to be in the writer's own words.
+    if (!speaksTo(targetTerms, contentTerms(writersWords(entry)))) continue;
 
-    if (quoteNorm.length >= 8 && entryNorm.includes(quoteNorm) && overlapCount(targetTerms, entryTokens) >= 1)
-      return entry;
+    if (quoteNorm.length >= 8 && entryNorm.includes(quoteNorm)) return entry;
 
     if (!quoteTerms.size || overlapCount(quoteTerms, entryTokens) < 1) continue;
-    const needed = Math.min(2, targetTerms.size);
-    const matchedTarget = overlapCount(targetTerms, entryTokens);
-    const totalMatched = overlapCount(new Set([...quoteTerms, ...readingTerms]), entryTokens);
-    if (matchedTarget >= needed && totalMatched >= 2)
-      return entry;
+    if (overlapCount(new Set([...quoteTerms, ...readingTerms]), entryTokens) >= 2) return entry;
   }
 
   return null;

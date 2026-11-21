@@ -3,7 +3,7 @@ import { Editor, Extension, type JSONContent } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { afterEach, expect, it, vi } from "vitest";
 import { AgentChanges, agentChangesKey, ScratchDocument } from "../../components/editor/AgentChanges";
-import { applyWritingOffer, prepareWritingOffer, refreshWritingOffer, writingOfferChatText } from "./writingOffers";
+import { applyWritingOffer, locateOutcome, prepareWritingOffer, refreshWritingOffer, writingOfferChatText } from "./writingOffers";
 
 const editors: Editor[] = [];
 const paragraphAttributes = Extension.create({
@@ -409,7 +409,7 @@ it("finds the block the cursor reads beside for each map step", async () => {
   expect(text(mapStepBlock(editor.state.doc, prepared, 3))).toBe("The outcome.");
 });
 
-it("resolves unsure steps already answered in conversation or memory, suppresses redundant background gaps, and holds back unsure direct rewrites", async () => {
+it("points an unsure step at an earlier answer without settling it, suppresses redundant background gaps, and holds back unsure direct rewrites", async () => {
   const { appliesDirectly } = await import("./writingOffers");
   const editor = open("<p>Keep writing here.</p><p>Latency dropped 40%.</p>");
   editor.commands.setTextSelection(2);
@@ -423,19 +423,21 @@ it("resolves unsure steps already answered in conversation or memory, suppresses
   expect(unconfirmedRewrite.offer.trace[0].sure).toBe(false);
   expect(appliesDirectly(editor, unconfirmedRewrite)).toBe(false);
 
-  // With the earlier answer in the ledger, the unsure step upgrades to sure: true and preserves `resolved` on refresh.
-  const settledRewrite = prepareWritingOffer(editor, {
+  // An earlier answer found by matching words is a lead for the writer, not their confirmation: the step stays
+  // unsure, so the agent still may not rewrite on it unseen. Only the agent citing the answer, or the writer
+  // confirming, settles it.
+  const hintedRewrite = prepareWritingOffer(editor, {
     ...rewrite("Latency dropped 40%.", "Tail latency dropped 40%."),
     trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false)],
   }, undefined, ledger);
-  expect(settledRewrite.offer.trace[0].sure).toBe(true);
-  expect(settledRewrite.resolved?.[0]?.itemId).toBe("q1");
-  expect(appliesDirectly(editor, settledRewrite)).toBe(true);
+  expect(hintedRewrite.offer.trace[0].sure).toBe(false);
+  expect(hintedRewrite.resolved?.[0]?.itemId).toBe("q1");
+  expect(appliesDirectly(editor, hintedRewrite)).toBe(false);
   editor.commands.insertContentAt(1, "Note: ");
-  expect(refreshWritingOffer(editor, settledRewrite)?.resolved?.[0]?.itemId).toBe("q1");
+  expect(refreshWritingOffer(editor, hintedRewrite)?.resolved?.[0]?.itemId).toBe("q1");
 
-  // An unrequested background question whose uncertainty was already answered is flagged as a suppressed gap,
-  // whereas an explicit "Trace my argument" request stays visible with the step settled.
+  // An unrequested background question whose every uncertainty has an earlier answer to point to is held back,
+  // whereas an explicit "Trace my argument" request stays visible, with the lead beside the assumption.
   const backgroundGap = prepareWritingOffer(editor, {
     ...rewrite("Latency dropped 40%."),
     kind: "question",
@@ -453,5 +455,133 @@ it("resolves unsure steps already answered in conversation or memory, suppresses
     trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false)],
   }, "question", ledger);
   expect(explicitTrace.suppressedGap).toBeUndefined();
-  expect(explicitTrace.offer.trace[0].sure).toBe(true);
+  expect(explicitTrace.offer.trace[0].sure).toBe(false);
+  expect(explicitTrace.resolved?.[0]?.itemId).toBe("q1");
+
+  // A background question with one answered uncertainty and one open one is still worth asking.
+  const partlyOpen = prepareWritingOffer(editor, {
+    ...rewrite("Latency dropped 40%."),
+    kind: "question",
+    replacement: null,
+    question: "Is this p99 or median latency?",
+    trace: [step("Latency dropped 40%.", "I took this as p99 latency.", false),
+      step("Keep writing here.", "I took here to mean this section.", false)],
+  }, undefined, ledger);
+  expect(partlyOpen.suppressedGap).toBeUndefined();
+});
+
+it("keeps a map step the writer edits on the map, marked as changed, and only goes stale with the offer's own passage", () => {
+  const editor = open("<p>First premise here.</p><p>Second premise here.</p><p>A rough sentence.</p>");
+  const offer = prepareWritingOffer(editor, {
+    ...rewrite(), trace: [step("First premise here."), step("Second premise here.")],
+  });
+  let current = offer;
+  const apply = (run: (tr: typeof editor.state.tr) => typeof editor.state.tr) => {
+    const tr = run(editor.state.tr);
+    editor.view.dispatch(tr);
+    return refreshWritingOffer(editor, current, tr);
+  };
+
+  // Fixing a word inside step 1's passage: the step stays where the edit left it.
+  current = apply(tr => tr.insertText("very ", 7))!;
+  expect(current.edited).toEqual([true, false]);
+  expect(editor.state.doc.textBetween(current.trace[0]!.from, current.trace[0]!.to)).toBe("First very premise here.");
+  expect(current.traceBlocks).toHaveLength(2);
+  // Later typing elsewhere keeps carrying it, and a refresh with no edit to map leaves it in place.
+  current = apply(tr => tr.insertText("Earlier. ", 1))!;
+  expect(editor.state.doc.textBetween(current.trace[0]!.from, current.trace[0]!.to)).toBe("First very premise here.");
+  expect(refreshWritingOffer(editor, current)?.trace[0]).toEqual(current.trace[0]);
+
+  // Cutting step 2's paragraph leaves the step on the map with no place in the note.
+  const second = current.trace[1]!;
+  current = apply(tr => tr.delete(second.from - 1, second.to + 1))!;
+  expect(current.edited).toEqual([true, true]);
+  expect(current.trace[1]).toBeNull();
+
+  // Putting step 1 back as it was finds it by its quote again.
+  const first = current.trace[0]!;
+  current = apply(tr => tr.insertText("First premise here.", first.from, first.to))!;
+  expect(current.edited).toEqual([false, true]);
+
+  // A fresh offer is still held to exact quotes, and the offer's own passage still makes it stale.
+  expect(() => prepareWritingOffer(editor, { ...rewrite(), trace: [step("Second premise here.")] })).toThrow();
+  expect(apply(tr => tr.insertText("x", editor.state.doc.content.size - 3))).toBeNull();
+});
+
+it("keeps each map step at the place it was drawn, whatever its words do elsewhere in the note", () => {
+  const editor = open("<p>Costs are rising fast now.</p><p>Other.</p><p>A rough sentence.</p>");
+  let current = prepareWritingOffer(editor, { ...rewrite(), trace: [step("Costs are rising fast now.")] });
+  const apply = (run: (tr: typeof editor.state.tr) => typeof editor.state.tr) => {
+    const tr = run(editor.state.tr);
+    editor.view.dispatch(tr);
+    return refreshWritingOffer(editor, current, tr)!;
+  };
+  const stepText = () => editor.state.doc.textBetween(current.trace[0]!.from, current.trace[0]!.to);
+
+  // The writer repeats the sentence further down. The step they never touched is not "changed", and the card still works.
+  current = apply(tr => tr.insertText(" Costs are rising fast now.", 35));
+  expect(current.edited).toBeUndefined();
+  expect(current.trace[0]).toEqual({ from: 1, to: 27 });
+  expect(refreshWritingOffer(editor, current)?.trace[0]).toEqual({ from: 1, to: 27 });
+
+  // Rewording the step leaves its old words only in the copy. The step is still the sentence that was reworded.
+  current = apply(tr => tr.insertText("climbing", 11, 17));
+  expect(current.edited).toEqual([true]);
+  expect(stepText()).toBe("Costs are climbing fast now.");
+
+  // Breaking the paragraph inside the step keeps the part that stayed, instead of calling it gone.
+  current = apply(tr => tr.split(10));
+  expect(current.edited).toEqual([true]);
+  expect(stepText()).toBe("Costs are");
+});
+
+it("follows edits one at a time against the note each one left, even when a later one has already landed", () => {
+  const editor = open("<p>First premise here.</p><p>A rough sentence.</p>");
+  const offer = prepareWritingOffer(editor, { ...rewrite(), trace: [step("First premise here.")] });
+  // Two edits land before either is followed, as when React runs the queued updates after both.
+  const first = editor.state.tr.insertText("very ", 7);
+  editor.view.dispatch(first);
+  const second = editor.state.tr.insert(0, editor.schema.nodes.paragraph.create(null, editor.schema.text("Intro.")));
+  editor.view.dispatch(second);
+  const current = refreshWritingOffer(editor, refreshWritingOffer(editor, offer, first)!, second)!;
+  expect(current.edited).toEqual([true]);
+  expect(editor.state.doc.textBetween(current.trace[0]!.from, current.trace[0]!.to)).toBe("First very premise here.");
+});
+
+it("reaches plain text beside a line break, and refuses only a quote that runs across one", () => {
+  const editor = open("<p>Intro line.<br>A rough sentence. After.</p>");
+  const offer = prepareWritingOffer(editor, { ...rewrite(), alternative: "A plainer sentence." });
+  expect(editor.state.doc.textBetween(offer.source.from, offer.source.to)).toBe("A rough sentence.");
+  expect(offer.previewContext).toMatchObject({ before: "Intro line.", after: " After." });
+
+  // A break added elsewhere in the paragraph is not a change to the passage: the offer stays good and lands in place.
+  const tr = editor.state.tr.insert(1, editor.schema.nodes.hardBreak.create());
+  editor.view.dispatch(tr);
+  expect(refreshWritingOffer(editor, offer, tr)).not.toBeNull();
+  applyWritingOffer(editor, refreshWritingOffer(editor, offer)!);
+  expect(editor.getHTML()).toBe("<p><br>Intro line.<br>A clearer sentence. After.</p>");
+
+  expect(() => prepareWritingOffer(editor, rewrite("line.A clearer", "x"))).toThrow("non-text content");
+});
+
+it("finds a highlight again by its text once the note has moved around it, and only when it is there once", () => {
+  const editor = open("<p>Opening.</p><p>First half of it.</p><p>Second half <strong>in bold</strong> here. Tail.</p>");
+  const text = "half of it.\nSecond half in bold here.";
+  const found = locateOutcome(editor.state.doc, text)!;
+  expect(editor.state.doc.textBetween(found.from, found.to, "\n")).toBe(text);
+  expect(locateOutcome(editor.state.doc, "Not in the note")).toBeNull();
+  editor.commands.insertContentAt(editor.state.doc.content.size, "<p>First half of it.</p><p>Second half in bold here.</p>");
+  expect(locateOutcome(editor.state.doc, text)).toBeNull();
+});
+
+it("shows a rewrite instead of making it when a passage it reasoned from changed while the agent was working", async () => {
+  const { appliesDirectly } = await import("./writingOffers");
+  const editor = open("<p>First premise here.</p><p>A rough sentence.</p>");
+  const offer = prepareWritingOffer(editor, { ...rewrite(), trace: [step("First premise here.")] });
+  expect(appliesDirectly(editor, offer)).toBe(true);
+  // The run that made the offer is still going when the writer rewords the premise. Nothing followed that edit.
+  editor.commands.insertContentAt({ from: 1, to: 6 }, "Second");
+  const late = refreshWritingOffer(editor, offer)!;
+  expect(late.edited).toEqual([true]);
+  expect(appliesDirectly(editor, late)).toBe(false);
 });

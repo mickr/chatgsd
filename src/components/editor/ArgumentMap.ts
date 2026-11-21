@@ -5,15 +5,15 @@ import { stepTargetIndex, traceActivePath, type TraceRole } from "../../lib/agen
 
 /**
  * A note passage the reasoning ran through. index is its place in the whole
- * trace, number its place among the steps you can see in the note; via names
- * the ledger steps (web, service, you, chat, note, edit) leading into it.
+ * trace, and index + 1 is the number it carries everywhere; via names the steps
+ * with no place in the note (web, service, you, chat, note, edit, or removed
+ * for a passage since cut) leading into it.
  */
 export interface ArgumentMapStep {
   from: number;
   to: number;
   sure: boolean;
   index: number;
-  number: number;
   via: string[];
   role?: TraceRole;
 }
@@ -24,6 +24,7 @@ export interface ArgumentMapEdge {
   from: number | null;
   /** Target visible step's trace index, or `length` for the outcome diamond. */
   to: number;
+  /** The kind of each step passed through outside the note, in order: the steps after the source, or all of them from an off-page root. */
   via: string[];
   unsure: boolean;
   role: TraceRole;
@@ -62,6 +63,8 @@ export function argumentMapFor(prepared: {
 
   const edges: ArgumentMapEdge[] = [];
   const seenOffPage = new Set<number>();
+  // A step with neither a place in the note nor a ledger entry is a passage the writer has since cut.
+  const offPageKind = (index: number) => prepared.provenance[index]?.kind ?? "removed";
 
   // Walk from every visible note step to the next visible note step (or outcome) on its branch.
   for (let i = 0; i < n; i++) {
@@ -75,7 +78,7 @@ export function argumentMapFor(prepared: {
     for (let hops = 0; hops <= n && curr < n && !prepared.trace[curr]; hops++) {
       seenOffPage.add(curr);
       edgeSteps.push(curr);
-      via.push(prepared.provenance[curr]?.kind ?? "note");
+      via.push(offPageKind(curr));
       if (rawTrace[curr]?.sure === false) unsure = true;
       if (rawTrace[curr]?.role === "tensions") tensions = true;
       curr = stepTargetIndex(rawTrace, curr);
@@ -95,7 +98,7 @@ export function argumentMapFor(prepared: {
       const already = seenOffPage.has(curr);
       seenOffPage.add(curr);
       edgeSteps.push(curr);
-      via.push(prepared.provenance[curr]?.kind ?? "note");
+      via.push(offPageKind(curr));
       if (rawTrace[curr]?.sure === false) unsure = true;
       if (rawTrace[curr]?.role === "tensions") tensions = true;
       curr = stepTargetIndex(rawTrace, curr);
@@ -116,7 +119,6 @@ export function argumentMapFor(prepared: {
       ...range,
       sure: rawTrace[index]?.sure ?? true,
       index,
-      number: steps.length + 1,
       via: incomingVia(index),
       ...(role === "tensions" ? { role } : {}),
     });
@@ -177,7 +179,7 @@ export const ArgumentMap = Extension.create({
             const onBranch = !isActive && branchSet.has(step.index);
             return Decoration.inline(step.from, step.to, {
               class: `argument-map-step${isActive ? " argument-map-active" : onBranch ? " argument-map-branch" : ""}`,
-              "data-step": String(step.number),
+              "data-step": String(step.index + 1),
               ...(step.sure ? {} : { "data-unsure": "true" }),
               ...(step.role === "tensions" ? { "data-role": "tensions" } : {}),
             });

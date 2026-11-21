@@ -12,6 +12,8 @@ import type { Note } from "../types/note";
 import { executeDocumentTool } from "../lib/agent/documentTools";
 import { AgentPanel } from "../components/agent/AgentPanel";
 import { TooltipProvider } from "../components/ui";
+import { toast } from "sonner";
+import type { TraceRecord } from "../lib/agent/traceRecord";
 import {
   AgentProvider,
   useAgent,
@@ -1759,6 +1761,125 @@ describe("structured writing offers", () => {
     expect(current.writingOffer?.stale).toBe(true);
     act(() => current.acceptWritingOffer());
     expect(editor.getText()).toBe("A different thought");
+  });
+  it("keeps the map through an edit to a traced passage, pauses and resumes it, and puts a kept map back on the note", async () => {
+    editor.commands.setContent("<p>Pack light.</p><p>Trip plan</p>");
+    Element.prototype.scrollIntoView = vi.fn();
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("question"); });
+    await deliver({ ...offer, kind: "question", replacement: null, question: "Where does the trip go?",
+      trace: [{ quote: "Pack light.", reading: "You start with the bags.", sure: true }] });
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+
+    // Pausing holds the step being read; playing again carries on from it, or from the top once it has finished.
+    act(() => current.playArgumentMap());
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: false });
+    act(() => current.focusArgumentStep(1));
+    act(() => current.playArgumentMap());
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+
+    // The map is an invitation to fix what it points at. Fixing a step's passage must not take the map away.
+    act(() => { editor.commands.insertContentAt(6, "very "); });
+    expect(editor.getText()).toContain("Pack very light.");
+    expect(current.writingOffer).toMatchObject({ stale: false, prepared: { edited: [true] } });
+    const kept = current.writingOffer!.prepared.trace[0]!;
+    expect(editor.state.doc.textBetween(kept.from, kept.to)).toBe("Pack very light.");
+    expect(current.argumentMap?.id).toBe("run-1");
+
+    // A map kept in the conversation goes back on the note after its card is gone, finding its passages by their
+    // text: the step that no longer reads as quoted is kept, without a place.
+    const record = current.conversation.items.find(item => item.type === "trace") as TraceRecord;
+    act(() => current.dismissWritingSuggestion());
+    expect(current.writingOffer).toBeNull();
+    act(() => current.reopenTrace(record));
+    expect(current.writingOffer).toMatchObject({ id: "run-1", stale: false, prepared: { trace: [null], edited: [true] } });
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+
+    // Without the passage the map led to there is nothing to anchor it to, and the writer is told why.
+    const failed = vi.spyOn(toast, "error").mockImplementation(() => "");
+    act(() => current.dismissWritingSuggestion());
+    act(() => { editor.commands.setContent("<p>A different thought</p>"); });
+    act(() => current.reopenTrace(record));
+    expect(current.writingOffer).toBeNull();
+    expect(failed).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("can't be shown on the note"));
+    failed.mockRestore();
+  });
+  it("stops playback when the note is typed in, reads the open card's steps, and keeps a card being answered", async () => {
+    editor.commands.setContent("<p>Pack light.</p><p>Bring a map.</p><p>Trip plan</p>");
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("question"); });
+    await deliver({ ...offer, kind: "question", replacement: null, question: "Where does the trip go?", trace: [
+      { quote: "Pack light.", reading: "You start with the bags.", sure: false },
+      { quote: "Bring a map.", reading: "You expect to get lost.", sure: true }] });
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+
+    // Playback scrolls each step into view. Left running while the writer types, it would pull the page off their caret.
+    act(() => { editor.commands.insertContentAt(editor.state.doc.content.size - 1, "s"); });
+    expect(current.writingOffer?.stale).toBe(false);
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: false });
+
+    // A map kept in the conversation lists the same step numbers; the panel follows the open card's row.
+    const panel = document.body.appendChild(document.createElement("div"));
+    panel.className = "agent-panel";
+    panel.innerHTML = '<div id="kept" data-trace-step="1"></div><div id="live" data-trace-live="true" data-trace-step="1"></div>';
+    act(() => current.focusArgumentStep(1));
+    const rows = scrolled.mock.contexts.map(element => (element as Element).id).filter(Boolean);
+    expect(rows).toEqual(["live"]);
+    panel.remove();
+
+    // An assumption about a sentence the writer has since reworded can't be confirmed as it stood.
+    act(() => { editor.commands.insertContentAt(6, "very "); });
+    expect(current.writingOffer?.prepared.edited).toEqual([true, false]);
+    act(() => current.confirmArgumentStep(0));
+    expect(current.writingOffer?.prepared.offer.trace[0].sure).toBe(false);
+    expect(current.writingOffer?.prepared.confirmedSteps).toBeUndefined();
+
+    // Half an answer is written. Its own map reopens over it; another map is refused, so the answer isn't lost.
+    const record = current.conversation.items.find(item => item.type === "trace") as TraceRecord;
+    const refused = vi.spyOn(toast, "error").mockImplementation(() => "");
+    act(() => current.setWritingOfferDraft("Somewhere quiet"));
+    act(() => current.toggleArgumentMap());
+    expect(current.argumentMap).toBeNull();
+    act(() => current.reopenTrace(record));
+    expect(current.argumentMap).toEqual({ id: "run-1", active: 0, playing: true });
+    expect(current.writingOfferDraft).toBe("Somewhere quiet");
+    act(() => current.reopenTrace({ ...record, id: "trace:other", offerId: "other" }));
+    expect(current.writingOffer?.id).toBe("run-1");
+    expect(current.writingOfferDraft).toBe("Somewhere quiet");
+    expect(refused).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("isn't lost"));
+
+    // A question the writer already answered comes back saying so, and keeps saying so as the note changes.
+    act(() => current.dismissWritingSuggestion());
+    act(() => current.reopenTrace({ ...record, answer: "The coast." }));
+    expect(current.writingOffer?.prepared.answered).toBe("The coast.");
+    act(() => { editor.commands.insertContentAt(1, "Always "); });
+    expect(current.writingOffer).toMatchObject({ stale: false, prepared: { answered: "The coast." } });
+
+    // The writer is told what is actually in the way: here the passage is in the note twice.
+    act(() => current.dismissWritingSuggestion());
+    act(() => { editor.commands.setContent("<p>Trip plan</p><p>Trip plan</p>"); });
+    act(() => current.reopenTrace(record));
+    expect(current.writingOffer).toBeNull();
+    expect(refused).toHaveBeenLastCalledWith(expect.stringContaining("more than once"));
+    refused.mockRestore();
+  });
+  it("puts a map traced back from a highlight on the note with its highlight, found again by its text", async () => {
+    await readyWithModels();
+    Element.prototype.scrollIntoView = vi.fn();
+    const from = 1 + editor.getText().indexOf("Trip plan");
+    await act(async () => { await current.requestWritingHelp("outcome", { focus: { from, to: from + "Trip plan".length } }); });
+    await deliver({ ...offer, kind: "question", replacement: null, question: "Where does the trip go?",
+      trace: [{ quote: "Trip plan", reading: "You open with a plan.", sure: true }] });
+    const record = current.conversation.items.find(item => item.type === "trace") as TraceRecord;
+    expect(record.outcome?.text).toBe("Trip plan");
+    act(() => current.dismissWritingSuggestion());
+    // Positions saved with the map would be wrong by now; the highlight's words are still there.
+    act(() => { editor.commands.insertContentAt(0, "<p>A new opening.</p>"); });
+    act(() => current.reopenTrace(record));
+    const outcome = current.writingOffer!.prepared.outcome!;
+    expect(editor.state.doc.textBetween(outcome.from, outcome.to)).toBe("Trip plan");
   });
   it("rejects invented anchors before a card can become actionable", async () => {
     await readyWithModels();

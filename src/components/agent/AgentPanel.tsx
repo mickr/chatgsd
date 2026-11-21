@@ -52,7 +52,7 @@ import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { SelectionCard } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
-import { surfaceFromRecord, TraceLookupContext } from "./ui/writingOfferContext";
+import { surfaceFromRecord, TraceLookupContext, TraceReopenContext } from "./ui/writingOfferContext";
 import { mapStepBlock, writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
 import { isAntigravityModel, type WritingScores } from "../../services/agent";
 import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
@@ -398,7 +398,8 @@ export function AgentPanel({
     onAnswer: (answer) => { void agent.requestWritingHelp("question", { answer }); },
     onShow: agent.showWritingOffer,
     onHighlight: agent.highlightWritingOffer,
-    map: { open: !!agent.argumentMap, active: agent.argumentMap?.active ?? null, onToggle: agent.toggleArgumentMap,
+    map: { open: !!agent.argumentMap, active: agent.argumentMap?.active ?? null,
+      playing: !!agent.argumentMap?.playing, onPlay: agent.playArgumentMap, onToggle: agent.toggleArgumentMap,
       onFocus: agent.focusArgumentStep,
       onConfirm: agent.confirmArgumentStep,
       onCheckSource: (step) => { void agent.requestWritingHelp("evidence", { step }); },
@@ -551,6 +552,7 @@ export function AgentPanel({
         </div>
         <OpenNoteContext.Provider value={openNote}>
           <TraceLookupContext.Provider value={traceLookup}>
+          <TraceReopenContext.Provider value={agent.reopenTrace}>
           <WritingOfferContext.Provider value={offerControls}>
           <div
             ref={scroll}
@@ -690,6 +692,7 @@ export function AgentPanel({
           <PlanNotice />
           </div>
           </WritingOfferContext.Provider>
+          </TraceReopenContext.Provider>
           </TraceLookupContext.Provider>
         </OpenNoteContext.Provider>
         {changes.length > 0 && (

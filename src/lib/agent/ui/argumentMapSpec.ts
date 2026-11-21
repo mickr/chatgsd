@@ -14,8 +14,6 @@ export interface TraceSpecInput {
   offerId?: string | null;
   trace: readonly WritingTraceStep[];
   provenance: readonly (ProvenanceEntry | null)[];
-  /** Visible 1-based note step number per trace index, or null for off-page steps. */
-  numbers: readonly (number | null)[];
   view?: Spec | null;
   activeBranchSteps?: ReadonlySet<number> | null;
 }
@@ -93,7 +91,7 @@ function customViewSpec(candidate: unknown, traceLength: number, offerId: string
  * and tensions into structured cards converging on TraceOutcome.
  */
 export function argumentMapSpec(input: TraceSpecInput): Spec {
-  const { trace, provenance, numbers, view, activeBranchSteps } = input;
+  const { trace, provenance, view, activeBranchSteps } = input;
   const offerId = input.offerId ?? null;
   if (view && !activeBranchSteps) {
     const custom = customViewSpec(view, trace.length, offerId);
@@ -121,9 +119,7 @@ export function argumentMapSpec(input: TraceSpecInput): Spec {
       return;
     }
 
-    const targetLabel = segment.mergesInto < trace.length
-      ? (numbers[segment.mergesInto] ? `→ Step ${numbers[segment.mergesInto]}` : `→ Synthesis`)
-      : "→ Outcome";
+    const targetLabel = segment.mergesInto < trace.length ? `→ Step ${segment.mergesInto + 1}` : "→ Outcome";
     const firstSource = provenance[segment.steps[0]];
     const label = segment.synthesis
       ? `Synthesis ${targetLabel}`

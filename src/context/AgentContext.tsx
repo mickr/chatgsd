@@ -38,6 +38,8 @@ import {
   type TraceRecord,
 } from "../lib/agent/traceRecord";
 import {
+  locateOutcome,
+  PassageError,
   prepareWritingOffer,
   refreshWritingOffer,
   applyWritingOffer,
@@ -334,6 +336,10 @@ export interface AgentContextValue {
   /** The open map of how the agent got to the current offer, the step being read, and whether it is playing through. */
   argumentMap: ArgumentMapView | null;
   toggleArgumentMap: () => void;
+  /** Pause the map's playback, or play on from the step being read (from the start once it has reached the outcome). */
+  playArgumentMap: () => void;
+  /** Put a map kept in the conversation back on the note, finding its passages again by their text. */
+  reopenTrace: (record: TraceRecord) => void;
   /** Bring one map step into view: a trace index, or the trace's length for the decision. */
   focusArgumentStep: (index: number) => void;
   /** Confirm an unsure trace assumption in one click, turning it solid and saving it to working memory. */
@@ -1818,9 +1824,14 @@ export function AgentProvider({
           const outcome = current.prepared.outcome && { ...current.prepared.outcome,
             from: transaction.mapping.map(current.prepared.outcome.from, 1),
             to: transaction.mapping.map(current.prepared.outcome.to, -1) };
-          const prepared = refreshWritingOffer(editor, outcome ? { ...current.prepared, outcome } : current.prepared);
+          // Only the passage the offer is about makes it stale: a map step the writer edits stays on the map.
+          // React may run this after a later edit has landed, so it is checked against the document this edit left.
+          const prepared = refreshWritingOffer(editor, outcome ? { ...current.prepared, outcome } : current.prepared,
+            transaction);
           return prepared ? { ...current, prepared } : { ...current, stale: true };
         });
+        // The note is being written in: playback stops where it is, so it never scrolls the page away from the caret.
+        setArgumentMapView(map => map?.playing ? { ...map, playing: false } : map);
         if (!writingOffer) setWritingSuggestion(null);
         setWritingFinding(null);
       }
@@ -1973,6 +1984,50 @@ export function AgentProvider({
     const start = tracePlaybackOrder(currentOffer.prepared.offer.trace)[0] ?? 0;
     setArgumentMapView({ id: currentOffer.id, active: start, playing: true });
   }, [editor, currentOffer, argumentMap]);
+  const playArgumentMap = useCallback(() => {
+    if (!currentOffer || currentOffer.stale) return;
+    const { trace } = currentOffer.prepared.offer;
+    setArgumentMapView(map => {
+      if (!map || map.id !== currentOffer.id) return map;
+      if (map.playing) return { ...map, playing: false };
+      const finished = map.active === null || map.active >= trace.length;
+      return { ...map, active: finished ? tracePlaybackOrder(trace)[0] ?? 0 : map.active, playing: true };
+    });
+  }, [currentOffer]);
+  const reopenTrace = useCallback((record: TraceRecord) => {
+    if (!editor || editor.isDestroyed) return;
+    const fromTheTop = (trace: PreparedWritingOffer["offer"]["trace"]) =>
+      ({ id: record.offerId, active: tracePlaybackOrder(trace)[0] ?? 0, playing: true });
+    // Its card is still open: the map opens over it, and the card stays as the writer has it.
+    if (currentOffer && !currentOffer.stale && currentOffer.id === record.offerId) {
+      setArgumentMapView(fromTheTop(currentOffer.prepared.offer.trace));
+      return;
+    }
+    if (engaged) {
+      toast.error("Send or dismiss the card you're answering first, so what you've written isn't lost.");
+      return;
+    }
+    let prepared: PreparedWritingOffer;
+    try {
+      // The record's own sources stand in for the ledger, a step whose passage has gone is kept without a place,
+      // and the highlight it was traced back from is found again by its text.
+      prepared = prepareWritingOffer(editor, record.offer, record.requested,
+        record.provenance.filter((entry): entry is ProvenanceEntry => !!entry),
+        (record.outcome && locateOutcome(editor.state.doc, record.outcome.text)) ?? undefined,
+        memoryEntriesRef.current, () => null);
+    } catch (error) {
+      const reason = error instanceof PassageError ? error.reason : null;
+      toast.error(reason === "ambiguous" ? "The passage this map led to now appears more than once, so it can't be shown on the note."
+        : reason ? "The passage this map led to has changed, so it can't be shown on the note."
+        : "This saved map can't be read, so it can't be shown on the note.");
+      return;
+    }
+    const confirmedSteps = prepared.offer.trace.map((_, index) => !!record.confirmed?.some(item => item.step === index));
+    publishWritingOffer(record.offerId, { ...prepared,
+      ...(confirmedSteps.some(Boolean) ? { confirmedSteps } : {}),
+      ...(record.answer ? { answered: record.answer } : {}) });
+    setArgumentMapView(fromTheTop(prepared.offer.trace));
+  }, [editor, publishWritingOffer, currentOffer, engaged]);
   const focusArgumentStep = useCallback((index: number) => {
     if (!editor || !currentOffer || currentOffer.stale || argumentMap?.id !== currentOffer.id) return;
     const { prepared } = currentOffer;
@@ -1983,13 +2038,16 @@ export function AgentProvider({
     setArgumentMapView({ id: currentOffer.id, active: clamped, playing: false });
     if (target) scrollPositionIntoView(editor, target.from, "smooth");
     const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    document.querySelector<HTMLElement>(`.agent-panel [data-trace-step="${clamped}"]`)
+    // Maps kept in the conversation list the same steps; only the open card's rows are the ones being read.
+    const row = clamped === prepared.trace.length ? "[data-decision]" : `[data-trace-step="${clamped}"]`;
+    document.querySelector<HTMLElement>(`.agent-panel [data-trace-live]${row}`)
       ?.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
   }, [editor, currentOffer, argumentMap]);
   const confirmArgumentStep = useCallback((step: number) => {
     if (!currentOffer || currentOffer.stale) return;
     const target = currentOffer.prepared.offer.trace[step];
-    if (!target || target.sure) return;
+    // A passage the writer has changed or cut is no longer what the assumption was about.
+    if (!target || target.sure || currentOffer.prepared.edited?.[step]) return;
     const offerId = currentOffer.id;
     const basePrepared = currentOffer.prepared;
     const nextTrace = basePrepared.offer.trace.map((item, idx) =>
@@ -2299,6 +2357,8 @@ export function AgentProvider({
       writingOfferReplay,
       argumentMap: currentMap,
       toggleArgumentMap,
+      playArgumentMap,
+      reopenTrace,
       focusArgumentStep,
       confirmArgumentStep,
       startCompanion,
@@ -2389,6 +2449,8 @@ export function AgentProvider({
       writingOfferReplay,
       currentMap,
       toggleArgumentMap,
+      playArgumentMap,
+      reopenTrace,
       focusArgumentStep,
       confirmArgumentStep,
       startCompanion,

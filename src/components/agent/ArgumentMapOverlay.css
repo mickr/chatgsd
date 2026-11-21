@@ -68,11 +68,18 @@
 .argument-map-active { background: var(--color-selection); }
 
 @media (prefers-reduced-motion: reduce) {
-  .argument-map-arrow, .argument-map-node circle, .argument-map-step, .argument-map-decision { transition: none; }
+  .argument-map-arrow, .argument-map-node circle, .argument-map-via rect, .argument-map-step, .argument-map-decision { transition: none; }
 }
-.argument-map-via rect { fill: var(--color-bg); stroke: currentColor; stroke-width: 1; stroke-dasharray: 2 1.5; }
-.argument-map-via text { fill: currentColor; font-size: 7.5px; font-weight: 600; letter-spacing: .02em; user-select: none; }
-.argument-map-via { pointer-events: auto; }
+/* A step outside the note: a numbered pill on its branch, dotted like its row in the panel, dashed when unsure. */
+.argument-map-via { pointer-events: auto; cursor: pointer; }
+.argument-map-via rect { fill: var(--color-bg); stroke: currentColor; stroke-width: 1.2; stroke-dasharray: 1 2; stroke-linecap: round; transition: fill 160ms ease; }
+.argument-map-via[data-unsure] rect { stroke-dasharray: 2.5 2; stroke-linecap: butt; }
+.argument-map-via text { fill: currentColor; font-size: 9px; font-weight: 600; font-variant-numeric: tabular-nums; user-select: none; }
+.argument-map-via[data-active] rect { fill: var(--color-text); }
+.argument-map-via[data-active] text { fill: var(--color-bg); }
+/* A margin too narrow to draw in: the text makes room while the map is open. 56px leaves a node and three bow lanes. */
+[data-editor-scroll][data-argument-map-gutter="left"] .ProseMirror { padding-left: 56px; }
+[data-editor-scroll][data-argument-map-gutter="right"] .ProseMirror { padding-right: 56px; }
 /* The outcome rail differs from arrows by weight and opacity, never dashes: dashes mean unsure. */
 .argument-map-rail path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; opacity: .5; }
 .argument-map-rail-focus { fill: currentColor; }

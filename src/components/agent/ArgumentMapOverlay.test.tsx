@@ -36,7 +36,7 @@ const render = (map: ArgumentMapState) => act(() => root.render(
     trace={[{ quote: "a", reading: "First.", sure: true }, { quote: "b", reading: "Then.", sure: false }]} />));
 
 it("hangs a rail from the diamond down the whole highlight, thickest over the sentence the question is about", () => {
-  render({ steps: [{ from: 2, to: 8, sure: true, index: 0, number: 1, via: [] }, { from: 42, to: 48, sure: false, index: 2, number: 2, via: ["web"] }],
+  render({ steps: [{ from: 2, to: 8, sure: true, index: 0, via: [] }, { from: 42, to: 48, sure: false, index: 2, via: ["web"] }],
     decision: { from: 61, to: 69, via: [], block: { from: 40, to: 95 } }, active: null, length: 3 });
   const nodes = [...scroll.querySelectorAll(".argument-map-node")];
   expect(nodes.map(node => node.getAttribute("transform"))).toEqual([
@@ -48,7 +48,8 @@ it("hangs a rail from the diamond down the whole highlight, thickest over the se
   const focus = scroll.querySelector(".argument-map-rail-focus")!;
   expect([focus.getAttribute("y"), focus.getAttribute("height")]).toEqual(["220", "20"]);
   expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("web");
-  expect([...scroll.querySelectorAll(".argument-map-node text")].map(text => text.textContent)).toEqual(["1", "2"]);
+  // A node carries its step's place in the whole trace, the number the panel and the agent use for it.
+  expect([...scroll.querySelectorAll(".argument-map-node text")].map(text => text.textContent)).toEqual(["1", "3"]);
 });
 
 it("shows a one-line highlight as the diamond alone", () => {
@@ -88,7 +89,8 @@ it("draws converging branches in distinct bow lanes and marks tension and off-pa
   expect(arrows[0].getAttribute("d")).not.toBe(arrows[1].getAttribute("d"));
   expect(arrows[1].getAttribute("data-role")).toBe("tensions");
   expect(arrows[1].hasAttribute("data-active")).toBe(true);
-  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("web");
+  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("3 web");
+  expect(scroll.querySelector(".argument-map-via")?.hasAttribute("data-unsure")).toBe(true);
 });
 
 it("draws parallel note and web branches converging into an intermediate synthesis step before the outcome", () => {
@@ -118,5 +120,100 @@ it("draws parallel note and web branches converging into an intermediate synthes
   ));
   // Step 1 -> Step 3, Web root -> Step 3, and Step 3 -> Outcome ♦ all render without forcing 1 -> 2 -> 3.
   expect(scroll.querySelectorAll(".argument-map-arrow")).toHaveLength(3);
-  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("web");
+  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("2 web");
+});
+
+const offPageChain = () => argumentMapFor({
+  trace: [{ from: 2, to: 8 }, null, null, { from: 62, to: 68 }],
+  source: { from: 91, to: 99 },
+  provenance: [null, { kind: "web" }, { kind: "service" }, null],
+  offer: { trace: [{ sure: true }, { sure: true }, { sure: true }, { sure: true }] },
+}, 2);
+const chainTrace = [
+  { quote: "a", reading: "Note passage", sure: true },
+  { quote: "b", reading: "What the study found", sure: true, source: "e1" },
+  { quote: "c", reading: "What the archive holds", sure: true, source: "e2" },
+  { quote: "d", reading: "Where they meet", sure: true },
+];
+
+it("gives every step outside the note its own numbered pill that opens that step", () => {
+  const onSelect = vi.fn();
+  act(() => root.render(<ArgumentMapOverlay editor={editor} map={offPageChain()} onSelect={onSelect} trace={chainTrace} />));
+  const pills = [...scroll.querySelectorAll<SVGGElement>(".argument-map-via")];
+  // Two conversation steps on one arrow are two pills, not one pill and a plus sign.
+  expect(pills.map(pill => pill.querySelector("text")?.textContent)).toEqual(["2 web", "3 mcp"]);
+  expect(pills.map(pill => pill.querySelector("title")?.textContent)).toEqual([
+    "Web research: What the study found", "Connected service: What the archive holds"]);
+  expect(pills.map(pill => pill.hasAttribute("data-active"))).toEqual([false, true]);
+  act(() => pills[1].dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(2);
+  // They sit apart along the arrow, in the order the branch read them.
+  const y = (pill: SVGGElement) => Number(/translate\(\S+ (\S+)\)/.exec(pill.getAttribute("transform")!)![1]);
+  expect(y(pills[1]) - y(pills[0])).toBe(14);
+});
+
+it("shows a leading conversation step on a single-thread map, so the numbering has no silent gap", () => {
+  const map = argumentMapFor({
+    trace: [null, { from: 22, to: 28 }], source: { from: 61, to: 69 },
+    provenance: [{ kind: "you" }, null], offer: { trace: [{ sure: true }, { sure: true }] },
+  }, null);
+  act(() => root.render(<ArgumentMapOverlay editor={editor} map={map} onSelect={vi.fn()}
+    trace={[{ quote: "a", reading: "You asked", sure: true, source: "e1" }, { quote: "b", reading: "So", sure: true }]} />));
+  expect(scroll.querySelector(".argument-map-via text")?.textContent).toBe("1 you");
+  expect(scroll.querySelector(".argument-map-node text")?.textContent).toBe("2");
+});
+
+it("asks the text for a gutter when the margin is too narrow to draw in, and keeps branches apart there", () => {
+  // The prose starts 8px from the edge of the note: the window is narrow or the panel is wide.
+  (editor.view.dom as HTMLElement).getBoundingClientRect = () => new DOMRect(8, 0, 600, 2000);
+  const map = argumentMapFor({
+    trace: [{ from: 2, to: 8 }, { from: 12, to: 18 }, { from: 22, to: 28 }],
+    source: { from: 191, to: 199 }, provenance: [null, null, null],
+    offer: { trace: [{ sure: true, leads_to: null }, { sure: true, leads_to: null }, { sure: true, leads_to: null }] },
+  }, null);
+  act(() => root.render(<ArgumentMapOverlay editor={editor} map={map} onSelect={vi.fn()} trace={chainTrace.slice(0, 3)} />));
+  expect(scroll.dataset.argumentMapGutter).toBe("left");
+  act(() => root.render(null));
+  expect(scroll.dataset.argumentMapGutter).toBeUndefined();
+
+  // With the gutter in place there is 42px of margin. Three long nested arcs would each want more bow than
+  // that, and still keep a lane of their own instead of flattening onto the margin's edge.
+  (editor.view.dom as HTMLElement).getBoundingClientRect = () => new DOMRect(56, 0, 600, 2000);
+  act(() => root.render(<ArgumentMapOverlay editor={editor} map={map} onSelect={vi.fn()} trace={chainTrace.slice(0, 3)} />));
+  const bows = [...scroll.querySelectorAll(".argument-map-arrow")]
+    .map(arrow => Number(/C (\S+) /.exec(arrow.getAttribute("d")!)![1]));
+  expect(new Set(bows).size).toBe(3);
+  expect(Math.min(...bows)).toBeGreaterThanOrEqual(2 + 8);
+});
+
+it("asks for the gutter once while the map is open, and never after it has closed", async () => {
+  (editor.view.dom as HTMLElement).getBoundingClientRect = () => new DOMRect(8, 0, 600, 2000);
+  let fontsLoaded!: () => void;
+  Object.defineProperty(document, "fonts", { configurable: true,
+    value: { ready: new Promise<void>(resolve => { fontsLoaded = resolve; }) } });
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", () => {});
+  const map = (active: number): ArgumentMapState => ({ steps: [{ from: 2, to: 8, sure: true, index: 0, via: [] }],
+    decision: { from: 61, to: 69, via: [] }, active, length: 1 });
+  let changes = 0;
+  const observer = new MutationObserver(records => { changes += records.length; });
+  observer.observe(scroll, { attributes: true, attributeFilter: ["data-argument-map-gutter"] });
+
+  render(map(0));
+  // Each step of playback is a new map. Taking the gutter away and putting it back would reflow the note every time.
+  render(map(1));
+  expect(scroll.querySelector(".argument-map-node[data-active]")?.hasAttribute("data-decision")).toBe(true);
+  changes += observer.takeRecords().length;
+  expect(changes).toBe(1);
+
+  // Fonts that finish loading after the map has closed must not leave the note indented.
+  act(() => root.render(null));
+  fontsLoaded();
+  await Promise.resolve();
+  await Promise.resolve();
+  for (const callback of frames.splice(0)) callback(0);
+  expect(scroll.dataset.argumentMapGutter).toBeUndefined();
+  observer.disconnect();
+  Reflect.deleteProperty(document, "fonts");
 });

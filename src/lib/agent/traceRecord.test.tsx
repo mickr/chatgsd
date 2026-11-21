@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   changedMeaningQuotes,
   isTraceRecord,
@@ -15,6 +15,7 @@ import {
 import { provenanceLedger } from "./provenance";
 import type { PreparedWritingOffer } from "./writingOffers";
 import { TraceRecordCard } from "../../components/agent/TraceRecordCard";
+import { TraceReopenContext } from "../../components/agent/ui/writingOfferContext";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -69,6 +70,14 @@ it("shows a kept map with its sources and corrections", () => {
   expect(steps[0].textContent).toContain("You said");
   expect(steps[1].textContent).toContain("You meant: A picnic rug.");
   expect(steps[2].textContent).toContain("What we learned: The rug came from your first message.");
+  // Kept maps number their steps the way the live map did, conversation steps included.
+  expect([...steps].slice(0, 2).map(step => step.querySelector(".argument-map-steps-number")?.textContent)).toEqual(["1", "2"]);
+  // On its own the card is a record; it offers the way back to the note only where the panel provides one.
+  expect([...container.querySelectorAll("button")].some(item => item.textContent === "Show on note")).toBe(false);
+  const reopen = vi.fn();
+  act(() => root.render(<TraceReopenContext.Provider value={reopen}><TraceRecordCard record={record} /></TraceReopenContext.Provider>));
+  act(() => [...container.querySelectorAll("button")].find(item => item.textContent === "Show on note")!.click());
+  expect(reopen).toHaveBeenCalledExactlyOnceWith(record);
   act(() => root.unmount());
 });
 

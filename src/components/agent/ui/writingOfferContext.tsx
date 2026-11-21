@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Spec } from "@json-render/core";
 import { toast } from "sonner";
@@ -6,6 +6,7 @@ import {
   isConvergentTrace,
   traceActivePath,
   traceBranches,
+  tracePlaybackOrder,
   type PreparedWritingOffer,
   type WritingOffer,
   type WritingRequest,
@@ -32,8 +33,9 @@ export interface WritingOfferControls {
   onHighlight?: (on: boolean) => void;
   onDismiss: () => void;
   onAddToChat: () => void;
-  /** The map of how the agent got here: open or not, the step being read, and a way to confirm, correct, or verify one. */
-  map?: { open: boolean; active: number | null; onToggle: () => void; onFocus: (index: number) => void;
+  /** The map of how the agent got here: open or not, the step being read, whether it is playing through, and a way to confirm, correct, or verify a step. */
+  map?: { open: boolean; active: number | null; playing?: boolean; onPlay?: () => void;
+    onToggle: () => void; onFocus: (index: number) => void;
     onRealign: (step: number, correction: string) => void; onConfirm?: (step: number) => void;
     onCheckSource?: (step: number) => void };
 }
@@ -43,15 +45,21 @@ export interface TraceSurface {
   id: string;
   offer: WritingOffer;
   provenance: readonly (ProvenanceEntry | null)[];
+  /** An earlier answer that may settle each unsure step, offered beside it until the writer confirms. */
   resolved?: readonly (ProvenanceEntry | null)[];
   confirmedSteps?: readonly boolean[];
-  numbers: readonly (number | null)[];
+  /** Whether each step has a place in the note. A step is numbered by its place in the trace either way. */
+  anchored: readonly boolean[];
+  /** Note steps whose passage the writer has changed since the map was made. */
+  edited?: readonly boolean[];
   requested?: WritingRequest;
   outcome?: { text: string; paragraphs: number } | null;
   corrections?: readonly TraceCorrection[];
   confirmed?: readonly TraceConfirmation[];
   unavailable?: boolean;
   active?: number | null;
+  playing?: boolean;
+  onPlay?: () => void;
   branch?: ReadonlySet<number>;
   editingStep?: number | null;
   onClearEditingStep?: () => void;
@@ -65,6 +73,8 @@ export interface TraceSurface {
 export const WritingOfferContext = createContext<WritingOfferControls | null>(null);
 export const TraceSurfaceContext = createContext<TraceSurface | null>(null);
 export const TraceLookupContext = createContext<((offerId: string) => TraceSurface | null) | null>(null);
+/** Puts a saved map back on the note it was drawn over. */
+export const TraceReopenContext = createContext<((record: TraceRecord) => void) | null>(null);
 /** Provided by AgentSpec so nested dynamic GenUI specs render without circular module imports. */
 export const SpecRendererContext = createContext<((spec: Spec) => ReactNode) | null>(null);
 
@@ -73,7 +83,7 @@ export function surfaceFromRecord(record: TraceRecord): TraceSurface {
     id: record.offerId,
     offer: record.offer,
     provenance: record.provenance,
-    numbers: stepNumbers(record.anchored ?? record.provenance.map(source => !source)),
+    anchored: record.anchored ?? record.provenance.map(source => !source),
     requested: record.requested,
     outcome: record.outcome,
     corrections: record.corrections,
@@ -94,11 +104,14 @@ function surfaceFromControls(
     provenance: prepared.provenance,
     resolved: prepared.resolved,
     confirmedSteps: prepared.confirmedSteps,
-    numbers: stepNumbers(prepared.trace.map(range => !!range)),
+    anchored: prepared.trace.map(range => !!range),
+    edited: prepared.edited,
     requested: prepared.requested,
     outcome: prepared.outcome ?? null,
     unavailable: controls.stale || controls.busy,
     active,
+    playing: controls.map?.playing,
+    onPlay: controls.map?.onPlay,
     branch: traceActivePath(prepared.offer.trace, active),
     editingStep,
     onClearEditingStep,
@@ -161,12 +174,6 @@ function useProposalReveal(text: string, editing: boolean) {
   return visible;
 }
 
-/** Each step's number among the steps anchored in the note, or null for one that isn't. */
-export function stepNumbers(anchored: readonly boolean[]): (number | null)[] {
-  let count = 0;
-  return anchored.map(inNote => (inNote ? ++count : null));
-}
-
 export const PROVENANCE: Record<ProvenanceEntry["kind"], string> = {
   you: "You said", chat: "Earlier discussion", web: "Web research", service: "Connected service",
   note: "Other notes", edit: "My edit", trace: "Earlier map",
@@ -208,7 +215,7 @@ export function TraceStepItem({ surface, index, as = "div" }: {
   const step = surface.offer.trace[index];
   const [correcting, setCorrecting] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [resolvedExpanded, setResolvedExpanded] = useState(false);
+  const [earlierExpanded, setEarlierExpanded] = useState(false);
   const [correction, setCorrection] = useState("");
   const { editingStep, onClearEditingStep } = surface;
   useEffect(() => {
@@ -220,8 +227,11 @@ export function TraceStepItem({ surface, index, as = "div" }: {
   if (!step) return null;
 
   const entry = surface.provenance[index];
-  const resolvedEntry = surface.resolved?.[index] ?? null;
-  const number = surface.numbers[index];
+  const number = index + 1;
+  const anchored = !!surface.anchored[index];
+  const edited = !!surface.edited?.[index];
+  // An earlier answer found by matching words: shown as a lead while the step is still an assumption.
+  const earlier = step.sure ? null : surface.resolved?.[index] ?? null;
   const url = entry?.kind === "web" ? entry.urls?.map(safeSourceUrl).find(Boolean) : null;
   const savedCorrection = surface.corrections
     ? [...surface.corrections].reverse().find(item => item.step === index)
@@ -241,47 +251,51 @@ export function TraceStepItem({ surface, index, as = "div" }: {
 
   return <Tag className={as === "div" ? "argument-map-step-row" : undefined}
     data-trace-step={index}
+    data-trace-live={surface.onFocus ? true : undefined}
     data-active={isActive || undefined}
     data-branch={onBranch || undefined}
     data-unsure={!step.sure || undefined}
     data-role={step.role === "tensions" ? "tensions" : undefined}
     data-source={entry?.kind}
-    data-offpage={number ? undefined : true}>
-    <span className="argument-map-steps-number" aria-hidden="true">{number ?? ""}</span>
+    data-offpage={anchored ? undefined : true}>
+    <span className="argument-map-steps-number" aria-hidden="true">{number}</span>
     <div className="argument-map-steps-body">
-      {(entry || step.role === "tensions") && <span className="argument-map-steps-source">
+      {(entry || edited || step.role === "tensions") && <span className="argument-map-steps-source">
         {step.role === "tensions" && <span className="argument-map-steps-tension">Tension</span>}
-        {step.role === "tensions" && entry ? " · " : ""}
+        {step.role === "tensions" && (entry || edited) ? " · " : ""}
         {entry && <>
           <strong>{PROVENANCE[entry.kind]}</strong>
           {entry.label === "You said" || entry.label === "Earlier reply" ? "" : ` · ${entry.label.replace(/^Research: /, "")}`}
           {url && <a href={url} onClick={(event) => { event.preventDefault(); openSource(url); }}> ↗</a>}
         </>}
+        {/* The quote below is what the agent read; the note has moved on from it. */}
+        {edited && <strong>{anchored ? "You've changed this since" : "No longer in the note"}</strong>}
       </span>}
-      {number ? (surface.onFocus
+      {anchored ? (surface.onFocus
         ? <button type="button" className="argument-map-steps-quote" onClick={() => surface.onFocus?.(index)}
             aria-label={`Show step ${number} in the note`}>{step.quote}</button>
         : <span className="argument-map-steps-quote">{step.quote}</span>)
-        : <OffPageStep entry={entry} quote={step.quote} expanded={expanded}
+        : entry ? <OffPageStep entry={entry} quote={step.quote} expanded={expanded}
             onFocus={surface.onFocus ? () => surface.onFocus?.(index) : undefined}
-            onExpand={() => setExpanded(value => !value)} />}
+            onExpand={() => setExpanded(value => !value)} />
+        : <blockquote className="argument-map-steps-excerpt">{step.quote}</blockquote>}
       <p>
         {!step.sure && <span className="argument-map-steps-unsure">I assumed this · </span>}
         {step.sure && isConfirmed && <span className="argument-map-steps-confirmed">Confirmed · </span>}
-        {step.sure && !isConfirmed && resolvedEntry && <span className="argument-map-steps-resolved">Answered earlier · </span>}
         {step.reading}
       </p>
-      {step.sure && !isConfirmed && resolvedEntry && <>
+      {earlier && <>
         <span className="argument-map-steps-links">
+          <span className="argument-map-steps-resolved">You may have answered this already</span>
           <button type="button" onClick={() => {
-            if (!showTranscriptItem(resolvedEntry.itemId)) setResolvedExpanded(value => !value);
-          }} aria-expanded={resolvedExpanded}>{resolvedExpanded ? "Hide earlier answer" : "Show in conversation"}</button>
+            if (!showTranscriptItem(earlier.itemId)) setEarlierExpanded(value => !value);
+          }} aria-expanded={earlierExpanded}>{earlierExpanded ? "Hide earlier answer" : "Show earlier answer"}</button>
         </span>
-        {resolvedExpanded && <pre className="argument-map-steps-full" aria-label={`${resolvedEntry.label} in full`}>{resolvedEntry.text}</pre>}
+        {earlierExpanded && <pre className="argument-map-steps-full" aria-label={`${earlier.label} in full`}>{earlier.text}</pre>}
       </>}
       {savedCorrection && <p className="agent-trace-record-correction"><strong>You meant:</strong> {savedCorrection.meant}</p>}
       {(surface.onConfirm || surface.onRealign || surface.onCheckSource) && (correcting ? <form className="argument-map-steps-correct" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-        <textarea aria-label={`What you meant at step ${index + 1}`} rows={2} maxLength={4000} autoFocus value={correction}
+        <textarea aria-label={`What you meant at step ${number}`} rows={2} maxLength={4000} autoFocus value={correction}
           placeholder="What did you mean here?" onChange={(event) => setCorrection(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setCorrecting(false); }
@@ -294,7 +308,8 @@ export function TraceStepItem({ surface, index, as = "div" }: {
           <button type="button" onClick={() => setCorrecting(false)}>Cancel</button>
         </div>
       </form> : !step.sure ? <div className="argument-map-steps-actions" role="group" aria-label="Clarify assumption">
-        {surface.onConfirm && (
+        {/* The assumption was about the words quoted above, which the note no longer has there. */}
+        {surface.onConfirm && !edited && (
           <button type="button" className="argument-map-steps-confirm" disabled={unavailable}
             onClick={() => surface.onConfirm?.(index)}>Confirm assumption</button>
         )}
@@ -322,7 +337,7 @@ export function TraceOutcomeItem({ surface, as = "div" }: { surface: TraceSurfac
   const Tag = as;
 
   return <Tag className={as === "div" ? "argument-map-step-row" : undefined}
-    data-decision data-active={isActive || undefined}>
+    data-decision data-trace-live={surface.onFocus ? true : undefined} data-active={isActive || undefined}>
     <span className="argument-map-steps-number" aria-hidden="true" />
     {outcome && surface.onFocus ? <div className="argument-map-steps-body">
       <span className="argument-map-steps-source">
@@ -371,6 +386,25 @@ function ArgumentMapSteps({ surface }: { surface: TraceSurface }) {
   const convergent = isConvergentTrace(offer.trace) || !!offer.view;
   const segments = useMemo(() => traceBranches(offer.trace), [offer.trace]);
   const [selectedBranch, setSelectedBranch] = useState<number | null>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const { active, onFocus } = surface;
+  // Up and down walk the map in the order it plays, taking the keyboard's place with them.
+  const stepWithKeys = (event: KeyboardEvent<HTMLElement>) => {
+    if (!onFocus || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
+    if ((event.target as HTMLElement).closest("textarea, input, pre")) return;
+    const order = tracePlaybackOrder(offer.trace);
+    const at = active == null ? -1 : order.indexOf(active);
+    const next = order[Math.max(0, Math.min(order.length - 1, at + (event.key === "ArrowDown" ? 1 : at < 0 ? 0 : -1)))];
+    event.preventDefault();
+    onFocus(next);
+    const row = next === offer.trace.length ? "[data-decision]" : `[data-trace-step="${next}"]`;
+    list.current?.querySelector<HTMLElement>(`${row} button`)?.focus({ preventScroll: true });
+  };
+  const playback = surface.onPlay && <div className="argument-map-steps-links">
+    <button type="button" disabled={surface.unavailable} onClick={surface.onPlay}>
+      {surface.playing ? "Pause" : "Play through"}</button>
+    <span className="argument-map-steps-hint" aria-hidden="true">↑ ↓ to step</span>
+  </div>;
 
   const activeBranchSteps = useMemo(() => {
     if (selectedBranch === null || !segments[selectedBranch]) return null;
@@ -383,15 +417,15 @@ function ArgumentMapSteps({ surface }: { surface: TraceSurface }) {
       offerId: surface.id,
       trace: offer.trace,
       provenance: surface.provenance,
-      numbers: surface.numbers,
       view: offer.view,
       activeBranchSteps,
     });
-  }, [convergent, renderSpec, surface.id, offer.trace, offer.view, surface.provenance, surface.numbers, activeBranchSteps]);
+  }, [convergent, renderSpec, surface.id, offer.trace, offer.view, surface.provenance, activeBranchSteps]);
 
   if (spec && renderSpec) {
     return <TraceSurfaceContext.Provider value={surface}>
-      <div className="argument-map-genui" aria-label="How I got here">
+      <div ref={list} className="argument-map-genui" aria-label="How I got here" onKeyDown={stepWithKeys}>
+        {playback}
         {segments.length > 1 && !offer.view && (
           <div className="argument-map-branch-bar" role="group" aria-label="Converging threads">
             <button type="button" className="agent-panel-chip" aria-pressed={selectedBranch === null}
@@ -400,15 +434,14 @@ function ArgumentMapSteps({ surface }: { surface: TraceSurface }) {
             </button>
             {segments.map((segment, idx) => {
               const firstStep = segment.steps[0];
-              const num = surface.numbers[firstStep];
               const src = surface.provenance[firstStep];
               const label = segment.synthesis
                 ? "Synthesis"
                 : segment.tensions
-                  ? `Tension${num ? ` · #${num}` : ""}`
+                  ? `Tension · #${firstStep + 1}`
                   : src
                     ? PROVENANCE[src.kind]
-                    : `Branch ${idx + 1}${num ? ` · #${num}` : ""}`;
+                    : `Branch ${idx + 1} · #${firstStep + 1}`;
               return <button key={idx} type="button" className="agent-panel-chip"
                 data-tension={segment.tensions || undefined}
                 aria-pressed={selectedBranch === idx}
@@ -427,12 +460,15 @@ function ArgumentMapSteps({ surface }: { surface: TraceSurface }) {
     </TraceSurfaceContext.Provider>;
   }
 
-  return <ol className="argument-map-steps" aria-label="How I got here">
-    {offer.trace.map((step, index) => (
-      <TraceStepItem key={`${index}:${step.quote}`} surface={surface} index={index} as="li" />
-    ))}
-    <TraceOutcomeItem surface={surface} as="li" />
-  </ol>;
+  return <div ref={list} className="argument-map-genui" onKeyDown={stepWithKeys}>
+    {playback}
+    <ol className="argument-map-steps" aria-label="How I got here">
+      {offer.trace.map((step, index) => (
+        <TraceStepItem key={`${index}:${step.quote}`} surface={surface} index={index} as="li" />
+      ))}
+      <TraceOutcomeItem surface={surface} as="li" />
+    </ol>
+  </div>;
 }
 
 function OfferView(controls: WritingOfferControls) {
@@ -503,6 +539,7 @@ function OfferView(controls: WritingOfferControls) {
       if (!unavailable && draft.trim()) onAnswer(draft.trim());
     }}>
       {passage}
+      {prepared.answered && <p className="agent-trace-record-correction"><strong>You answered:</strong> {prepared.answered}</p>}
       {!!offer.options?.length && <div className="writing-offer-options" role="group" aria-label="Suggested answers">
         {offer.options.map((option) => <button type="button" key={option} className="agent-panel-chip" disabled={unavailable}
           onClick={() => { if (!unavailable) onAnswer(option); }}>{option}</button>)}
@@ -548,7 +585,7 @@ function OfferView(controls: WritingOfferControls) {
           {unsureSteps.length > 1 && <span className="writing-offer-assumption-more"> (+{unsureSteps.length - 1} more)</span>}
         </p>
         <div className="argument-map-steps-actions" role="group" aria-label="Clarify assumption">
-          {map.onConfirm && (
+          {map.onConfirm && !prepared.edited?.[unsureSteps[0].idx] && (
             <button type="button" className="argument-map-steps-confirm" disabled={unavailable}
               onClick={() => map.onConfirm?.(unsureSteps[0].idx)}>Confirm assumption</button>
           )}

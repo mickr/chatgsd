@@ -1,9 +1,9 @@
-import { memo, useMemo } from "react";
+import { memo, useContext, useMemo } from "react";
 import type { TraceRecord } from "../../lib/agent/traceRecord";
 import { isConvergentTrace, traceBranches } from "../../lib/agent/writingOffers";
 import { argumentMapSpec } from "../../lib/agent/ui/argumentMapSpec";
 import { AgentSpec } from "./ui/AgentSpec";
-import { surfaceFromRecord, TraceOutcomeItem, TraceStepItem, TraceSurfaceContext } from "./ui/writingOfferContext";
+import { surfaceFromRecord, TraceOutcomeItem, TraceReopenContext, TraceStepItem, TraceSurfaceContext } from "./ui/writingOfferContext";
 import "./WritingOfferCard.css";
 
 /** An argument map kept in the conversation: how the agent got there, its converging branches, and what the writer corrected. */
@@ -11,13 +11,13 @@ export const TraceRecordCard = memo(function TraceRecordCard({ record }: { recor
   const { offer, outcome, corrections, confirmed } = record;
   const subject = outcome?.text ?? offer.quote;
   const surface = useMemo(() => surfaceFromRecord(record), [record]);
+  const reopen = useContext(TraceReopenContext);
   const convergent = isConvergentTrace(offer.trace) || !!offer.view;
   const branchCount = useMemo(() => (convergent ? traceBranches(offer.trace).length : 1), [convergent, offer.trace]);
   const spec = useMemo(() => (convergent ? argumentMapSpec({
     offerId: surface.id,
     trace: offer.trace,
     provenance: surface.provenance,
-    numbers: surface.numbers,
     view: offer.view,
   }) : null), [convergent, surface, offer.trace, offer.view]);
 
@@ -47,6 +47,9 @@ export const TraceRecordCard = memo(function TraceRecordCard({ record }: { recor
           <TraceOutcomeItem surface={surface} as="li" />
         </ol>
       )}
+      {reopen && <div className="argument-map-steps-links">
+        <button type="button" onClick={() => reopen(record)}>Show on note</button>
+      </div>}
     </details>
   );
 });

@@ -327,7 +327,7 @@ it("renders a dynamic GenUI convergent branch layout with thread filters and hon
   expect(container.querySelectorAll(".argument-map-step-row")).toHaveLength(3);
 
   // Clicking a thread pill focuses that branch in the margin and filters the GenUI view.
-  click("Tension");
+  click("Tension · #2");
   expect(map.onFocus).toHaveBeenCalledWith(1);
   expect(container.querySelectorAll(".argument-map-step-row")).toHaveLength(2);
   click("All threads (2)");
@@ -397,11 +397,12 @@ it("surfaces 1-click clarifications on unsure assumptions both on the collapsed 
   });
   expect(container.querySelector('[aria-label="What you meant at step 2"]')).not.toBeNull();
 
-  // Rendered after an earlier conversation turn settled step 1 and the writer confirmed step 2:
+  // An earlier turn may have answered step 1, and the writer confirmed step 2. Only the confirmation settles a step:
+  // the earlier answer is put beside the assumption for the writer to judge.
   const settled: WritingOffer = {
     ...rewrite,
     trace: [
-      { quote: "The premise.", reading: "Settled from your answer.", sure: true },
+      { quote: "The premise.", reading: "Taken from your answer.", sure: false },
       { quote: "The leap.", reading: "Confirmed causal link.", sure: true },
     ],
   };
@@ -417,6 +418,100 @@ it("surfaces 1-click clarifications on unsure assumptions both on the collapsed 
     },
   });
   const rows = container.querySelectorAll(".argument-map-steps > li");
-  expect(rows[0].textContent).toContain("Answered earlier · Settled from your answer.");
+  expect(rows[0].textContent).toContain("I assumed this · Taken from your answer.");
+  expect(rows[0].textContent).toContain("You may have answered this already");
+  expect(rows[0].hasAttribute("data-unsure")).toBe(true);
+  act(() => [...rows[0].querySelectorAll("button")].find(item => item.textContent === "Show earlier answer")!.click());
+  expect(rows[0].querySelector("pre")?.textContent).toBe("Because of the incentive shift.");
+  act(() => (rows[0].querySelector(".argument-map-steps-confirm") as HTMLButtonElement).click());
+  expect(onConfirm).toHaveBeenLastCalledWith(0);
   expect(rows[1].textContent).toContain("Confirmed · Confirmed causal link.");
+  expect(rows[1].textContent).not.toContain("You may have answered");
+});
+
+it("numbers every step by its place in the trace, and says when the writer has changed or cut a step's passage", () => {
+  const traced: WritingOffer = { ...rewrite, trace: [
+    { quote: "Bring a rug", reading: "You asked for comfort.", sure: true, source: "e1" },
+    { quote: "The premise.", reading: "You start here.", sure: true },
+    { quote: "The leap.", reading: "Then you jump.", sure: true },
+  ] };
+  const map = { open: true, active: null, onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn() };
+  const props = controls(traced);
+  render({ ...props, map, offer: { ...props.offer,
+    trace: [null, { from: 1, to: 10 }, null], edited: [false, true, true],
+    provenance: [{ id: "e1", kind: "you", label: "You said", text: "Bring a rug" }, null, null] } });
+  const rows = [...container.querySelectorAll(".argument-map-steps > li")];
+  // The conversation step is step 1 here, as it is for the agent and in the margin: no blank, no renumbering.
+  expect(rows.slice(0, 3).map(row => row.querySelector(".argument-map-steps-number")?.textContent)).toEqual(["1", "2", "3"]);
+  expect(rows[1].textContent).toContain("You've changed this since");
+  expect(rows[1].querySelector("button.argument-map-steps-quote")?.getAttribute("aria-label")).toBe("Show step 2 in the note");
+  // A cut passage has nowhere to go and no conversation to show: it is quoted, and said to be gone.
+  expect(rows[2].textContent).toContain("No longer in the note");
+  expect(rows[2].querySelector("blockquote")?.textContent).toBe("The leap.");
+  expect([...rows[2].querySelectorAll("button")].map(item => item.textContent)).toEqual(["Not what I meant"]);
+  act(() => (rows[2].querySelector(".argument-map-steps-realign") as HTMLButtonElement).click());
+  expect(container.querySelector('[aria-label="What you meant at step 3"]')).not.toBeNull();
+});
+
+it("pauses and resumes the map's playback, and steps through it with the arrow keys", () => {
+  const traced: WritingOffer = { ...rewrite, trace: [
+    { quote: "The premise.", reading: "You start here.", sure: true },
+    { quote: "The leap.", reading: "Then you jump.", sure: true },
+  ] };
+  const map = { open: true, active: 0, playing: true, onPlay: vi.fn(), onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn() };
+  const props = controls(traced);
+  const offer = { ...props.offer, trace: [{ from: 1, to: 10 }, { from: 12, to: 20 }] };
+  render({ ...props, offer, map });
+  click("Pause");
+  expect(map.onPlay).toHaveBeenCalledOnce();
+  render({ ...props, offer, map: { ...map, playing: false } });
+  expect(button("Play through")).toBeDefined();
+
+  const press = (target: Element, key: string) => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    act(() => { target.dispatchEvent(event); });
+    return event.defaultPrevented;
+  };
+  const rows = [...container.querySelectorAll(".argument-map-steps > li")];
+  expect(press(rows[0].querySelector("button")!, "ArrowDown")).toBe(true);
+  expect(map.onFocus).toHaveBeenLastCalledWith(1);
+  // The keyboard goes with it, so the next press carries on from there.
+  expect(document.activeElement).toBe(rows[1].querySelector("button"));
+  render({ ...props, offer, map: { ...map, playing: false, active: 1 } });
+  press(document.activeElement!, "ArrowDown");
+  expect(map.onFocus).toHaveBeenLastCalledWith(2);
+  render({ ...props, offer, map: { ...map, playing: false, active: 2 } });
+  press(document.activeElement!, "ArrowDown");
+  expect(map.onFocus).toHaveBeenLastCalledWith(2);
+  press(document.activeElement!, "ArrowUp");
+  expect(map.onFocus).toHaveBeenLastCalledWith(1);
+
+  // Arrows inside the correction box move the caret, not the map.
+  act(() => (rows[0].querySelector(".argument-map-steps-realign") as HTMLButtonElement).click());
+  map.onFocus.mockClear();
+  expect(press(container.querySelector("textarea")!, "ArrowDown")).toBe(false);
+  expect(map.onFocus).not.toHaveBeenCalled();
+});
+
+it("does not offer to confirm an assumption about words the note no longer has, and shows an answer already given", () => {
+  const question: WritingOffer = { ...base, kind: "question", question: "Which launch?", trace: [
+    { quote: "It ships soon.", reading: "I took soon to mean this quarter.", sure: false },
+    { quote: "The plan holds.", reading: "I took the plan to be the launch plan.", sure: false },
+  ] };
+  const map = { open: true, active: null, onToggle: vi.fn(), onFocus: vi.fn(), onRealign: vi.fn(), onConfirm: vi.fn() };
+  const props = controls(question);
+  const offer = { ...props.offer, trace: [{ from: 1, to: 10 }, { from: 12, to: 20 }], edited: [true, false], answered: "The spring one." };
+  render({ ...props, map, offer });
+  const rows = [...container.querySelectorAll(".argument-map-steps > li[data-trace-step]")];
+  const actions = (row: Element) => [...row.querySelectorAll(".argument-map-steps-actions button")].map(item => item.textContent);
+  // The reading was of the quoted words. Confirming it now would save a meaning for a sentence that isn't there.
+  expect(actions(rows[0])).toEqual(["Correct it"]);
+  expect(actions(rows[1])).toEqual(["Confirm assumption", "Correct it"]);
+  // These are the rows the open card is reading, which is how the panel tells them from a kept map's.
+  expect(rows.every(row => row.hasAttribute("data-trace-live"))).toBe(true);
+  expect(container.querySelector(".writing-offer-question")?.textContent).toContain("You answered: The spring one.");
+
+  // Collapsed, the card leads with the first assumption: the same rule holds there.
+  render({ ...props, map: { ...map, open: false }, offer });
+  expect([...container.querySelectorAll(".writing-offer-assumption button")].map(item => item.textContent)).toEqual(["Correct it"]);
 });

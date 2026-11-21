@@ -37,13 +37,23 @@ it("accepts a cited step only with text really in that entry", () => {
   expect(() => citedEntry(ledger, "e9", "anything")).toThrow(/No context entry/);
 });
 
-it("anchors a conversation step in the note when its text is there, and numbers it with the visible steps", () => {
+it("anchors a conversation step in the note when its text is there, leaving the one that isn't on the arrow into it", () => {
   const map = argumentMapFor({
     trace: [null, { from: 10, to: 15 }, { from: 20, to: 25 }], source: { from: 30, to: 40 },
     provenance: [{ kind: "you" }, { kind: "edit" }, null],
     offer: { trace: [{ sure: true }, { sure: true }, { sure: true }] },
   }, null);
-  expect(map.steps.map(step => [step.index, step.number, step.via])).toEqual([[1, 1, ["you"]], [2, 2, []]]);
+  // Steps keep their place in the trace as their number, so the writer and the agent count the same way.
+  expect(map.steps.map(step => [step.index, step.via])).toEqual([[1, ["you"]], [2, []]]);
+});
+
+it("keeps a note step whose passage was cut as a removed step on its branch, not as a source", () => {
+  const map = argumentMapFor({
+    trace: [{ from: 1, to: 5 }, null, { from: 10, to: 15 }], source: { from: 20, to: 30 },
+    provenance: [null, null, null],
+    offer: { trace: [{ sure: true }, { sure: true }, { sure: true }] },
+  }, null);
+  expect(map.edges?.[0]).toMatchObject({ from: 0, to: 2, via: ["removed"], steps: [0, 1] });
 });
 
 it("maps note passages in order and badges the arrow that runs through ledger steps", () => {
@@ -52,7 +62,7 @@ it("maps note passages in order and badges the arrow that runs through ledger st
     provenance: [null, { kind: "web" }, { kind: "service" }, null],
     offer: { trace: [{ sure: true }, { sure: true }, { sure: false }, { sure: true }] },
   }, 1);
-  expect(map.steps.map(step => [step.index, step.number, step.via])).toEqual([[0, 1, []], [3, 2, ["web", "service"]]]);
+  expect(map.steps.map(step => [step.index, step.via])).toEqual([[0, []], [3, ["web", "service"]]]);
   expect(map.decision.via).toEqual([]);
   expect(map.length).toBe(4);
 });
@@ -172,4 +182,46 @@ it("finds when an earlier writer turn or saved meaning already answered an unsur
     [],
     [{ key: "meaning-cost", kind: "choice", summary: "The writer means: Nominal 1937 construction cost", quote: "The bridge cost $35 million." }],
   )?.id).toBe("meaning-cost");
+});
+
+it("does not take an earlier answer about something else for an answer to this assumption", () => {
+  const quote = "Users will get the new billing page soon.";
+  const assumption = { quote, reading: "I took soon to mean the launch this quarter.", sure: false };
+
+  // A meaning saved on the same sentence, about a different word in it.
+  expect(findPriorStepAnswer(assumption, [], [
+    { key: "meaning-users", kind: "choice", summary: "The writer means: workspace admins", quote },
+  ])).toBeNull();
+
+  // A message that only had the passage selected: the one shared word is in an unrelated instruction.
+  expect(findPriorStepAnswer(assumption, provenanceLedger([
+    { id: "u1", type: "user", text: "Move this above the launch section", selection: quote },
+  ]))).toBeNull();
+  // The words the reading needs are only in the passage that was selected, not in what the writer said.
+  expect(findPriorStepAnswer(assumption, provenanceLedger([
+    { id: "u1", type: "user", text: "Tighten this", selection: `${quote} The launch is this quarter.` },
+  ]))).toBeNull();
+
+  // An earlier map the writer confirmed, sharing one word with the reading.
+  expect(findPriorStepAnswer(assumption, provenanceLedger([
+    { id: "t1", type: "trace", offer: { quote, explanation: "Who the page is for." },
+      confirmed: [{ step: 1, reading: "users means admins at launch" }] },
+  ]))).toBeNull();
+
+  // The writer saying what they meant by it still counts.
+  expect(findPriorStepAnswer(assumption, provenanceLedger([
+    { id: "u2", type: "user", text: "By soon I mean the launch this quarter", selection: quote },
+  ]))?.itemId).toBe("u2");
+});
+
+it("finds an earlier answer in a note that isn't written in Latin letters", () => {
+  const ledger = provenanceLedger([
+    { id: "u1", type: "user", text: "Стоимость аренды растёт из-за налогов на недвижимость" },
+  ]);
+  const lead = findPriorStepAnswer({ quote: "Стоимость аренды растёт.",
+    reading: "Аренда растёт из-за налогов на недвижимость", sure: false }, ledger);
+  expect(lead?.id).toBe("e1");
+  // The same bar as anywhere else: an unrelated message is not an answer.
+  expect(findPriorStepAnswer({ quote: "Стоимость аренды растёт.", reading: "Аренда растёт из-за налогов на недвижимость", sure: false },
+    provenanceLedger([{ id: "u1", type: "user", text: "Перенеси этот абзац выше" }]))).toBeNull();
 });

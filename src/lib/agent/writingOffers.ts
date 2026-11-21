@@ -60,17 +60,19 @@ export interface PreparedWritingOffer {
   /** Whole node positions, suitable for the companion cursor. */
   sourceBlock: WritingRange;
   destination: WritingRange | null;
-  /** Each trace step's text in the note, or null for a ledger step whose text isn't in the note. */
+  /** Each trace step's text in the note, or null for a step with no place there: a ledger step, or a passage since removed. */
   trace: (WritingRange | null)[];
+  /** Note steps whose passage the writer has changed since the map was made; absent when none has. */
+  edited?: boolean[];
   /** The note steps' whole nodes, in order, for the companion cursor. */
   traceBlocks: WritingRange[];
   /** Each trace step's ledger entry, or null for a step in the note. */
   provenance: (ProvenanceEntry | null)[];
-  /** Earlier conversation/memory entries that automatically answered unsure steps. */
+  /** An earlier answer that may settle each unsure step. A lead shown beside it: the step stays unsure until the writer confirms. */
   resolved?: (ProvenanceEntry | null)[];
   /** Steps explicitly confirmed by the writer on the active card. */
   confirmedSteps?: boolean[];
-  /** True when an unrequested background question's uncertainty was already answered earlier. */
+  /** True when every uncertainty behind an unrequested background question has an earlier answer to point to. */
   suppressedGap?: true;
   /** The ledger the offer was made against, kept so a refresh checks it the same way. */
   ledger?: ProvenanceEntry[];
@@ -78,6 +80,8 @@ export interface PreparedWritingOffer {
   memory?: PriorMemoryChoice[];
   /** For an outcome trace, the whole highlight the trace works back from, its opening text and how many paragraphs it spans. */
   outcome?: WritingRange & { text: string; paragraphs: number };
+  /** What the writer already answered to this question, on a kept map put back on the note. */
+  answered?: string;
 }
 /** The highlight an outcome trace started from; text is checked when the offer is first prepared. */
 export interface WritingOutcome { from: number; to: number; text?: string }
@@ -295,30 +299,53 @@ function parseOffer(args: unknown): WritingOffer {
 
 interface LocatedPassage { text: WritingRange; block: WritingRange; node: ProseMirrorNode; topLevel: boolean }
 
-/** Text-only inline content keeps UTF-16 offsets identical to ProseMirror positions. */
+/** Why a quote has no single place in the note. The message is written for the agent that quoted it. */
+export class PassageError extends Error {
+  constructor(readonly reason: "missing" | "ambiguous" | "unsupported", message: string) { super(message); }
+}
+
+/**
+ * A block's stretches of plain text, each with where it starts. A link to another
+ * note or a line break ends one stretch and starts the next; within a stretch,
+ * UTF-16 offsets are ProseMirror positions.
+ */
+function textRuns(node: ProseMirrorNode, pos: number): { text: string; from: number }[] {
+  const runs: { text: string; from: number }[] = [];
+  let open = false;
+  node.forEach((child, offset) => {
+    if (!child.isText) { open = false; return; }
+    if (!open) runs.push({ text: "", from: pos + 1 + offset });
+    open = true;
+    runs[runs.length - 1].text += child.text;
+  });
+  return runs;
+}
+
+/** The one place a quote sits in the note, within one stretch of plain text. */
 function locate(doc: ProseMirrorNode, quote: string): LocatedPassage {
   const matches: LocatedPassage[] = [];
   let unsupported = false;
   doc.descendants((node, pos, parent) => {
     if (!node.isTextblock) return;
-    let textOnly = true;
-    node.forEach(child => { if (!child.isText) textOnly = false; });
-    if (!textOnly) {
-      if (node.textContent.includes(quote)) unsupported = true;
-      return false;
+    const runs = textRuns(node, pos);
+    let found = false;
+    for (const run of runs) {
+      for (let offset = run.text.indexOf(quote); offset !== -1; offset = run.text.indexOf(quote, offset + 1)) {
+        found = true;
+        matches.push({ text: { from: run.from + offset, to: run.from + offset + quote.length },
+          block: { from: pos, to: pos + node.nodeSize }, node, topLevel: parent === doc });
+        if (matches.length > 1) return false;
+      }
     }
-    const content = node.textContent;
-    for (let offset = content.indexOf(quote); offset !== -1; offset = content.indexOf(quote, offset + 1)) {
-      matches.push({ text: { from: pos + 1 + offset, to: pos + 1 + offset + quote.length },
-        block: { from: pos, to: pos + node.nodeSize }, node, topLevel: parent === doc });
-      if (matches.length > 1) return false;
-    }
+    // Only a quote that runs across a link or a line break is out of reach, not everything else in its paragraph.
+    const plain = (runs[0]?.text.length ?? 0) === node.content.size;
+    if (!found && !plain && node.textContent.includes(quote)) unsupported = true;
     return false;
   });
-  if (unsupported) throw new Error("That passage includes non-text content. Choose a plain text passage.");
-  if (matches.length !== 1) throw new Error(matches.length
-    ? "That passage appears more than once. Quote enough text to identify it uniquely."
-    : "That passage has changed or is not a single text passage. Ask for a fresh suggestion.");
+  if (unsupported) throw new PassageError("unsupported", "That passage includes non-text content. Choose a plain text passage.");
+  if (matches.length !== 1) throw matches.length
+    ? new PassageError("ambiguous", "That passage appears more than once. Quote enough text to identify it uniquely.")
+    : new PassageError("missing", "That passage has changed or is not a single text passage. Ask for a fresh suggestion.");
   return matches[0];
 }
 
@@ -342,6 +369,60 @@ function tryLocate(doc: ProseMirrorNode, quote: string): LocatedPassage | null {
   try { return locate(doc, quote); } catch { return null; }
 }
 
+/**
+ * A carried range that still holds text, with its block; otherwise nothing. A
+ * passage the writer split in two keeps the part in its first paragraph.
+ */
+function passageAt(doc: ProseMirrorNode, range: WritingRange | null): Pick<LocatedPassage, "text" | "block"> | null {
+  if (!range || range.from < 0 || range.to > doc.content.size || range.from >= range.to) return null;
+  const $from = doc.resolve(range.from);
+  if (!$from.parent.isTextblock) return null;
+  const to = Math.min(range.to, $from.end());
+  if (to <= range.from) return null;
+  return { text: { from: range.from, to }, block: { from: $from.before(), to: $from.after() } };
+}
+
+/** Where an existing map has a note step now; null when it has no place to carry and the step is looked for by its words. */
+export type StepRelocation = (index: number) => WritingRange | null;
+
+/** An edit that just happened: how positions moved, and the document it left. */
+export interface AppliedEdit { mapping: { map: (pos: number, assoc?: number) => number }; doc: ProseMirrorNode }
+
+/**
+ * Finds a highlight again by its text, for a kept map going back on the note:
+ * the range that text spans, or null unless the note holds it exactly once.
+ */
+export function locateOutcome(doc: ProseMirrorNode, text: string): WritingOutcome | null {
+  const blocks: { start: number; at: number; node: ProseMirrorNode }[] = [];
+  let flat = "";
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return;
+    if (blocks.length) flat += "\n";
+    blocks.push({ start: flat.length, at: pos + 1, node });
+    node.forEach(child => { if (child.isText) flat += child.text; });
+    return false;
+  });
+  const found = text ? flat.indexOf(text) : -1;
+  if (found < 0 || flat.indexOf(text, found + 1) >= 0) return null;
+  const position = (offset: number, end: boolean) => {
+    let block = blocks[0];
+    for (const candidate of blocks) {
+      if (candidate.start > offset) break;
+      block = candidate;
+    }
+    let left = offset - block.start;
+    let result = block.at;
+    block.node.forEach((child, childOffset) => {
+      if (left < 0 || !child.isText) return;
+      const size = child.text!.length;
+      if (left < size || (end && left === size)) { result = block.at + childOffset + left; left = -1; }
+      else left -= size;
+    });
+    return result;
+  };
+  return { from: position(found, false), to: position(found + text.length, true), text };
+}
+
 /** Locate a unique plain-text quote in the document, or null when absent or ambiguous. */
 export function locateQuoteRange(doc: ProseMirrorNode, quote: string): WritingRange | null {
   return tryLocate(doc, quote)?.text ?? null;
@@ -352,9 +433,22 @@ export function validateMemoryAnchor(editor: Editor, quote: unknown): void {
   locate(editor.state.doc, text(quote, 500, "The memory anchor"));
 }
 
-/** Preparing an offer is read-only. It cannot select, focus, scroll, or edit the note. */
+/**
+ * Checks an offer against the note and anchors it there. Preparing is read-only:
+ * it cannot select, focus, scroll, or edit the note. A fresh offer must quote
+ * every note step exactly. With relocate, a map that already exists keeps a step
+ * whose passage has since changed, marked as edited, instead of failing.
+ */
 export function prepareWritingOffer(editor: Editor, args: unknown, requested?: WritingRequest,
-  ledger?: ProvenanceEntry[], outcome?: WritingOutcome, memory?: readonly PriorMemoryChoice[]): PreparedWritingOffer {
+  ledger?: ProvenanceEntry[], outcome?: WritingOutcome, memory?: readonly PriorMemoryChoice[],
+  relocate?: StepRelocation): PreparedWritingOffer {
+  return prepareIn(editor.state.doc, editor, args, requested, ledger, outcome, memory, relocate);
+}
+
+/** prepareWritingOffer against a given document: the live one, or the one a particular edit left. */
+function prepareIn(doc: ProseMirrorNode, editor: Editor, args: unknown, requested?: WritingRequest,
+  ledger?: ProvenanceEntry[], outcome?: WritingOutcome, memory?: readonly PriorMemoryChoice[],
+  relocate?: StepRelocation): PreparedWritingOffer {
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || !scope?.noteId) throw new Error("Open a note before reviewing a writing offer.");
   const offer = parseOffer(args);
@@ -362,10 +456,10 @@ export function prepareWritingOffer(editor: Editor, args: unknown, requested?: W
     throw new Error("The writer requested two distinct rewrites. Provide both replacement and alternative for this passage.");
   if (requested === "readback" && offer.kind !== "question")
     throw new Error("Give the reader’s takeaway in a question card anchored to this passage.");
-  const source = locate(editor.state.doc, offer.quote);
+  const source = locate(doc, offer.quote);
   let destination: WritingRange | null = null;
   if (offer.kind === "move") {
-    const target = locate(editor.state.doc, offer.destination);
+    const target = locate(doc, offer.destination);
     if (!source.topLevel || source.node.type.name !== "paragraph" || source.node.textContent !== offer.quote ||
         !target.topLevel || target.node.type.name !== "paragraph" || target.node.textContent !== offer.destination)
       throw new Error("Move previews need two complete top-level paragraphs.");
@@ -374,53 +468,71 @@ export function prepareWritingOffer(editor: Editor, args: unknown, requested?: W
   }
   const provenance = offer.trace.map(step => step.source ? citedEntry(ledger ?? [], step.source, step.quote) : null);
   // A step from the conversation is also anchored in the note when its text is there, like a sentence an edit wrote.
-  const trace = offer.trace.map((step, index) => provenance[index] ? tryLocate(editor.state.doc, step.quote) : locate(editor.state.doc, step.quote));
-  const hadUnsure = offer.trace.some(step => !step.sure);
+  const edited = offer.trace.map(() => false);
+  const trace = offer.trace.map((step, index) => {
+    if (provenance[index]) return tryLocate(doc, step.quote);
+    if (!relocate) return locate(doc, step.quote);
+    // A step is the place it was drawn at, wherever else its words turn up. Only a step with no place is searched for.
+    const found = passageAt(doc, relocate(index)) ?? tryLocate(doc, step.quote);
+    edited[index] = !found || doc.textBetween(found.text.from, found.text.to) !== step.quote;
+    return found;
+  });
+  // Word overlap can find an earlier answer but cannot tell that it settles the step, so the step stays unsure.
   const resolved = (ledger?.length || memory?.length)
-    ? offer.trace.map((step, index) => {
-        if (step.sure || provenance[index]) return null;
-        const prior = findPriorStepAnswer(step, ledger, memory);
-        if (prior) offer.trace[index] = { ...step, sure: true };
-        return prior;
-      })
+    ? offer.trace.map((step, index) => step.sure || provenance[index] ? null : findPriorStepAnswer(step, ledger, memory))
     : undefined;
   const hasResolved = !!resolved?.some(Boolean);
+  const unsure = offer.trace.flatMap((step, index) => step.sure ? [] : [index]);
   const suppressedGap = !requested && offer.kind === "question" && (
-    hadUnsure
-      ? offer.trace.every(step => step.sure)
+    unsure.length
+      ? unsure.every(index => !!resolved?.[index])
       : !offer.trace.length && !!(ledger?.length || memory?.length) &&
         !!findPriorStepAnswer({ quote: offer.quote, reading: offer.question, sure: false }, ledger, memory)
   );
-  const offset = source.text.from - source.block.from - 1;
+  const inner = { from: source.block.from + 1, to: source.block.to - 1 };
   const previewContext = offer.alternative ? {
-    before: source.node.textContent.slice(Math.max(0, offset - 350), offset),
-    after: source.node.textContent.slice(offset + offer.quote.length, offset + offer.quote.length + 350),
-    following: editor.state.doc.nodeAt(source.block.to)?.textContent.slice(0, 350) ?? "",
+    before: doc.textBetween(Math.max(inner.from, source.text.from - 350), source.text.from),
+    after: doc.textBetween(source.text.to, Math.min(inner.to, source.text.to + 350)),
+    following: doc.nodeAt(source.block.to)?.textContent.slice(0, 350) ?? "",
   } : undefined;
   return { offer, requested, previewContext, noteId: scope.noteId, documentSession: scope.session, source: source.text,
     sourceBlock: source.block, destination, trace: trace.map(item => item?.text ?? null),
     traceBlocks: trace.flatMap(item => item ? [item.block] : []), provenance,
+    ...(edited.some(Boolean) ? { edited } : {}),
     ...(hasResolved ? { resolved } : {}),
     ...(suppressedGap ? { suppressedGap: true as const } : {}),
     ...(ledger ? { ledger } : {}),
     ...(memory?.length ? { memory: [...memory] } : {}),
-    ...(outcomeRange(editor.state.doc, outcome) ?? {}) };
+    ...(outcomeRange(doc, outcome) ?? {}) };
 }
 
-/** Unrelated typing can move anchors; changed or ambiguous passages invalidate them. */
-export function refreshWritingOffer(editor: Editor, prepared: PreparedWritingOffer): PreparedWritingOffer | null {
+/**
+ * Unrelated typing can move anchors; a changed or ambiguous offer passage
+ * invalidates the offer. Given the edit that just happened, each map step follows
+ * its own place through it, and is marked as edited when its words there changed.
+ * The check runs against the document that edit left, so edits can be followed
+ * one at a time even when a later one has already landed.
+ */
+export function refreshWritingOffer(editor: Editor, prepared: PreparedWritingOffer, edit?: AppliedEdit): PreparedWritingOffer | null {
   const scope = editor.storage.scratchDocument;
   if (editor.isDestroyed || scope?.noteId !== prepared.noteId || scope?.session !== prepared.documentSession) return null;
+  const doc = edit?.doc ?? editor.state.doc;
   // The highlight was checked when the offer was made; the writer may since have edited inside it.
   const outcome = prepared.outcome && { from: prepared.outcome.from, to: prepared.outcome.to };
+  const carried: StepRelocation = index => {
+    const range = prepared.trace[index];
+    if (!range) return null;
+    if (edit) return { from: edit.mapping.map(range.from, 1), to: edit.mapping.map(range.to, -1) };
+    // With no edit to follow, a place is trusted while it still holds the step's words, or once the step is marked
+    // edited: that range has followed every edit so far. Otherwise the positions may be old, and the words are searched for.
+    const holds = range.to <= doc.content.size && doc.textBetween(range.from, range.to) === prepared.offer.trace[index].quote;
+    return holds || prepared.edited?.[index] ? range : null;
+  };
   try {
-    const refreshed = prepareWritingOffer(editor, prepared.offer, prepared.requested, prepared.ledger, outcome, prepared.memory);
-    return {
-      ...refreshed,
-      ...(prepared.resolved ? { resolved: prepared.resolved } : {}),
+    const refreshed = prepareIn(doc, editor, prepared.offer, prepared.requested, prepared.ledger, outcome, prepared.memory, carried);
+    return { ...refreshed,
       ...(prepared.confirmedSteps ? { confirmedSteps: prepared.confirmedSteps } : {}),
-      ...(prepared.suppressedGap ? { suppressedGap: true as const } : {}),
-    };
+      ...(prepared.answered ? { answered: prepared.answered } : {}) };
   } catch { return null; }
 }
 
@@ -454,7 +566,8 @@ export function appliesDirectly(editor: Editor, prepared: PreparedWritingOffer):
   const { offer, source } = prepared;
   if (offer.kind !== "rewrite" || offer.quote.length > DIRECT_REWRITE_CHARS || offer.replacement.length > DIRECT_REWRITE_CHARS)
     return false;
-  if (offer.trace.some(step => !step.sure)) return false;
+  // Reasoning that rests on an assumption, or on a passage the writer has changed since, is shown first.
+  if (offer.trace.some(step => !step.sure) || prepared.edited?.some(Boolean)) return false;
   const { from, to } = editor.state.selection;
   return to < source.from || from > source.to;
 }
