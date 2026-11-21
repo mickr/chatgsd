@@ -3400,6 +3400,8 @@ pub fn run() {
             agent::skills::agent_remove_skill,
             agent::skills::agent_set_skill_enabled,
             agent::skills::agent_find_skills,
+            agent::skills::agent_read_skills,
+            agent::skills_sh::agent_browse_skills,
             agent::mcp::mcp_list_servers,
             agent::mcp::mcp_redirect_uri,
             agent::mcp::mcp_add_server,

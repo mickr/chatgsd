@@ -14,6 +14,11 @@ export function sourceHost(source: string) {
   }
 }
 
+/** "trip.skill" for a path on this Mac. */
+function fileName(path: string) {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
 /** The address a skill came from, opened in the browser on click. */
 export function SkillSource({ source }: { source: string }) {
   return (
@@ -43,8 +48,9 @@ export function SkillInstructions({ content }: { content: string }) {
 }
 
 /**
- * A skill found on the web, for the user to review and save. Nothing is
- * installed until they press Save, and what's saved is the content shown here.
+ * A skill found on the web or on this Mac, for the user to review and save.
+ * Nothing is installed until they press Save, and what's saved is the content
+ * shown here.
  */
 export const SkillOfferCard = memo(function SkillOfferCard({
   offer,
@@ -60,8 +66,8 @@ export const SkillOfferCard = memo(function SkillOfferCard({
   const [error, setError] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const installed = skills?.find((skill) => skill.name === offer.name);
-  // The same download, files included; matching instructions alone could be
-  // a standalone copy of a skill whose archive brings more.
+  // The same instructions and files; matching instructions alone could be a
+  // standalone copy of a skill that brings more.
   const saved = installed
     ? installed.digest
       ? installed.digest === offer.digest
@@ -101,8 +107,12 @@ export const SkillOfferCard = memo(function SkillOfferCard({
       <header className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-text-muted">
         <SkillIcon className="w-3.5 h-3.5 shrink-0" />
         <span>{saved ? "Skill saved" : installed ? "Skill update" : "Skill offered"}</span>
-        <span className="ml-auto min-w-0 normal-case tracking-normal">
-          <SkillSource source={offer.source} />
+        <span className="ml-auto min-w-0 truncate normal-case tracking-normal">
+          {offer.source ? (
+            <SkillSource source={offer.source} />
+          ) : (
+            offer.path && <span title={offer.path}>{fileName(offer.path)}</span>
+          )}
         </span>
       </header>
       <div className="space-y-1">

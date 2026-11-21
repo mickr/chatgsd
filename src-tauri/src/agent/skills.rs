@@ -5,14 +5,21 @@
 //! Kept in `{APP_DATA}/agent/skills/<name>/`, outside the notes folder, so a
 //! skill applies in every folder and git sync never commits it:
 //! - `SKILL.md`: the skill exactly as the user approved it.
-//! - the text files an archived skill came with (`references/…`, `scripts/…`),
-//!   for the agent to read. Nothing in a skill is ever executed.
+//! - the text files it came with (`references/…`, `scripts/…`), for the agent
+//!   to read. Nothing in a skill is ever executed.
 //! - `.meta.json`: where it came from, when, and whether it's enabled.
+//!
+//! A skill is found in one of three places: at a web address (a `SKILL.md`, an
+//! archive, or a site's discovery index), on skills.sh (`skills_sh.rs`), or in
+//! a file or folder on this Mac. An archive or folder may hold one skill or
+//! several, each in the folder its `SKILL.md` sits in. Whatever the place, the
+//! user is shown the skill before it is saved, and one that is more than its
+//! `SKILL.md` is read again when they save it and must be what they were shown.
 //!
 //! Enabled skills are mirrored as immutable, text-only snapshots for native
 //! Codex discovery. Disabled skills never enter that snapshot.
 //! A skill is saved only by the user: from an offer card or the settings page.
-use super::web;
+use super::{skills_sh, web};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -29,16 +36,25 @@ const MAX_DESCRIPTION_CHARS: usize = 1024;
 const MAX_INDEX_OFFERS: usize = 12;
 /// The largest skill download, archive or not.
 const MAX_DOWNLOAD_BYTES: usize = 5_000_000;
-/// Bounds on what an archive may unpack to, against decompression bombs.
+/// The largest file on this Mac read as a skill or an archive of them.
+const MAX_LOCAL_BYTES: u64 = 50_000_000;
+/// Bounds on what one archive or folder is read for, against decompression
+/// bombs and a folder that was never meant as skills.
 const MAX_INFLATED_BYTES: u64 = 50_000_000;
+const MAX_TREE_FILES: usize = 5_000;
+/// Bounds on what one skill keeps beside its `SKILL.md`.
 const MAX_BUNDLED_FILES: usize = 200;
 const MAX_BUNDLED_FILE_BYTES: u64 = 300_000;
 const MAX_BUNDLED_BYTES: u64 = 4_000_000;
+/// Folders never read for skills, wherever they sit.
+const PRUNED: [&str; 3] = [".git", "node_modules", "__MACOSX"];
 /// The most of one bundled file `read_skill` returns.
 const MAX_FILE_READ_CHARS: usize = 60_000;
 const META_FILE: &str = ".meta.json";
 const CHANGED: &str =
-    "This skill changed on its site after it was offered. Find it again to review the new version.";
+    "This skill changed after it was offered. Find it again to review the new version.";
+const TOO_MUCH: &str =
+    "There are more files here than ChatGSD reads for skills. Choose a smaller archive, or the skill's own folder.";
 
 pub struct Parsed {
     pub name: String,
@@ -133,10 +149,41 @@ fn bundled_path(path: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-/// A skill as fetched: its `SKILL.md` and, from an archive, the text files beside it.
+/// A skill as read from where it was found: its `SKILL.md` and the text files beside it.
 struct Bundle {
+    name: String,
+    description: String,
     content: String,
+    /// By path within the skill, sorted.
     files: Vec<(String, String)>,
+    /// The folder it sat in where it was found; empty at the top.
+    folder: String,
+}
+
+impl Bundle {
+    fn digest(&self) -> String {
+        digest_of(&self.content, &self.files)
+    }
+
+    fn offer(&self, source: Option<&url::Url>, path: Option<&Path>, archive: bool) -> SkillOffer {
+        SkillOffer {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            source: source.map(|url| url.to_string()),
+            path: path.map(|path| path.to_string_lossy().into_owned()),
+            content: self.content.clone(),
+            files: self.files.iter().map(|(path, _)| path.clone()).collect(),
+            digest: self.digest(),
+            archive,
+        }
+    }
+}
+
+/// The skills one place held, and a line for each that couldn't be read.
+#[derive(Default)]
+struct Found {
+    skills: Vec<Bundle>,
+    skipped: Vec<String>,
 }
 
 /// Names already used in a skill's folder, compared without case. macOS's
@@ -155,22 +202,33 @@ impl TakenNames {
 const COLLIDES: &str =
     "This skill has files whose names differ only by capital letters, so it can't be saved safely";
 
+/// `path` within `folder`, when it is inside it.
+fn inside<'a>(folder: &str, path: &'a str) -> Option<&'a str> {
+    if folder.is_empty() {
+        return Some(path);
+    }
+    path.strip_prefix(folder)?.strip_prefix('/')
+}
+
+/// The text files of an archive, a folder or a skills.sh snapshot, gathered
+/// before they are split into the skills they hold.
 #[derive(Default)]
-struct Unpacking {
-    content: Option<String>,
+struct Tree {
+    /// Each `SKILL.md` by its folder: its text, or why it can't be used.
+    skills: Vec<(String, Result<String, String>)>,
     files: Vec<(String, String)>,
-    bytes: u64,
+    read: u64,
     taken: TakenNames,
 }
 
-impl Unpacking {
-    /// Takes one archive member. Text is kept, to be read and never run;
-    /// dotfiles, binaries and oversized files are left out.
+impl Tree {
+    /// Takes one file. Text is kept, to be read and never run; binaries and
+    /// oversized files are left out.
     fn add(&mut self, path: &Path, reader: &mut dyn Read) -> Result<(), String> {
         let Some(name) = bundled_path(path) else {
             return Err("This skill's archive has a file path that leaves its folder".into());
         };
-        if name.split('/').any(|part| part.starts_with('.')) {
+        if name.split('/').any(|part| PRUNED.contains(&part)) {
             return Ok(());
         }
         if !self.taken.take(&name) {
@@ -180,45 +238,115 @@ impl Unpacking {
         reader
             .take(MAX_BUNDLED_FILE_BYTES + 1)
             .read_to_end(&mut bytes)
-            .map_err(|_| "This skill's archive couldn't be read".to_owned())?;
-        self.bytes += bytes.len() as u64;
-        if self.bytes > MAX_BUNDLED_BYTES || self.files.len() >= MAX_BUNDLED_FILES {
-            return Err("This skill's archive unpacks to more than ChatGSD accepts".into());
+            .map_err(|_| "One of the files here couldn't be read".to_owned())?;
+        self.read += bytes.len() as u64;
+        if self.read > MAX_INFLATED_BYTES || self.taken.0.len() > MAX_TREE_FILES {
+            return Err(TOO_MUCH.into());
         }
-        let oversized = bytes.len() as u64 > MAX_BUNDLED_FILE_BYTES;
-        if name == "SKILL.md" {
-            if oversized {
-                return Err(format!("This skill is larger than {} KB", MAX_SKILL_BYTES / 1000));
-            }
-            self.content = Some(
-                String::from_utf8(bytes).map_err(|_| "This skill's SKILL.md isn't text".to_owned())?,
-            );
-        } else if !oversized {
-            if let Ok(text) = String::from_utf8(bytes) {
-                self.files.push((name, text));
-            }
+        let text = (bytes.len() as u64 <= MAX_BUNDLED_FILE_BYTES)
+            .then(|| String::from_utf8(bytes).ok())
+            .flatten();
+        match skill_folder(&name).map(str::to_owned) {
+            Some(folder) => self.skills.push((
+                folder,
+                text.ok_or_else(|| "Its SKILL.md isn't text ChatGSD can read".to_owned()),
+            )),
+            None => self.files.extend(text.map(|text| (name, text))),
         }
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Bundle, String> {
-        let content = self
-            .content
-            .ok_or("This archive has no SKILL.md at its top level")?;
-        self.files.sort();
-        Ok(Bundle { content, files: self.files })
+    /// Splits what was gathered into skills: each is the folder its `SKILL.md`
+    /// sits in, with the text under it. A `SKILL.md` deeper inside a skill's
+    /// folder is one of that skill's files (skills ship examples of skills),
+    /// not a skill of its own. Hidden files within a skill are left out: those
+    /// names are ChatGSD's.
+    fn finish(mut self) -> Result<Found, String> {
+        self.skills
+            .sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
+        let mut skills: Vec<(String, Result<String, String>)> = Vec::new();
+        for (folder, content) in self.skills {
+            if !skills.iter().any(|(outer, _)| inside(outer, &folder).is_some()) {
+                skills.push((folder, content));
+            } else if let Ok(text) = content {
+                self.files.push((format!("{folder}/SKILL.md"), text));
+            }
+        }
+        let mut beside: Vec<Vec<(String, String)>> = skills.iter().map(|_| Vec::new()).collect();
+        for (path, text) in self.files {
+            let owned = skills
+                .iter()
+                .enumerate()
+                .find_map(|(index, (folder, _))| Some((index, inside(folder, &path)?)));
+            if let Some((index, relative)) = owned {
+                if !relative.split('/').any(|part| part.starts_with('.')) {
+                    beside[index].push((relative.to_owned(), text));
+                }
+            }
+        }
+        let mut found = Found::default();
+        let mut names = HashSet::new();
+        for ((folder, content), mut files) in skills.into_iter().zip(beside) {
+            let checked = content.and_then(|content| {
+                let parsed = parse(&content)?;
+                let bytes: u64 = files.iter().map(|(_, text)| text.len() as u64).sum();
+                if files.len() > MAX_BUNDLED_FILES || bytes > MAX_BUNDLED_BYTES {
+                    return Err("It comes with more files than ChatGSD keeps for one skill".into());
+                }
+                if !names.insert(parsed.name.clone()) {
+                    return Err(format!("Another skill here is also named {}", parsed.name));
+                }
+                Ok((parsed, content))
+            });
+            match checked {
+                Ok((parsed, content)) => {
+                    files.sort();
+                    found.skills.push(Bundle {
+                        name: parsed.name,
+                        description: parsed.description,
+                        content,
+                        files,
+                        folder,
+                    });
+                }
+                Err(error) if folder.is_empty() => found.skipped.push(error),
+                Err(error) => found.skipped.push(format!("{folder}: {error}")),
+            }
+        }
+        found.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        found.skipped.sort();
+        if found.skills.is_empty() {
+            return Err(match found.skipped.as_slice() {
+                [] => "There is no SKILL.md here".into(),
+                [only] => only.clone(),
+                [first, ..] => format!(
+                    "None of the {} skills here could be read. {first}",
+                    found.skipped.len()
+                ),
+            });
+        }
+        Ok(found)
+    }
+}
+
+/// The folder of the skill a path names, when the path is a `SKILL.md`.
+fn skill_folder(path: &str) -> Option<&str> {
+    match path.rsplit_once('/') {
+        Some((folder, "SKILL.md")) => Some(folder),
+        None if path == "SKILL.md" => Some(""),
+        _ => None,
     }
 }
 
 const LINKS: &str = "This skill's archive contains links, which ChatGSD doesn't unpack";
 
-/// Unpacks a `.tar.gz` or `.zip` skill in memory. Paths that leave the skill
-/// folder and links of any kind reject the whole archive.
-fn unpack(bytes: &[u8]) -> Result<Bundle, String> {
+/// Reads the skills in a `.tar.gz` or `.zip`, in memory. Paths that leave the
+/// archive and links of any kind reject the whole archive.
+fn unpack(bytes: &[u8]) -> Result<Found, String> {
     fn unreadable<E>(_: E) -> String {
         "This skill's archive couldn't be read".to_owned()
     }
-    let mut unpacking = Unpacking::default();
+    let mut tree = Tree::default();
     if bytes.starts_with(b"PK") {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(unreadable)?;
         for index in 0..archive.len() {
@@ -230,7 +358,7 @@ fn unpack(bytes: &[u8]) -> Result<Bundle, String> {
                 return Err(LINKS.into());
             }
             let path = PathBuf::from(file.name());
-            unpacking.add(&path, &mut file)?;
+            tree.add(&path, &mut file)?;
         }
     } else {
         let inflated = flate2::read::GzDecoder::new(bytes).take(MAX_INFLATED_BYTES);
@@ -245,10 +373,79 @@ fn unpack(bytes: &[u8]) -> Result<Bundle, String> {
                 continue;
             }
             let path = entry.path().map_err(unreadable)?.into_owned();
-            unpacking.add(&path, &mut entry)?;
+            tree.add(&path, &mut entry)?;
         }
     }
-    unpacking.finish()
+    tree.finish()
+}
+
+/// Reads the skills in a folder on this Mac. Links inside it aren't followed:
+/// a skill someone else packaged could point one at a private file, which
+/// would then be copied in for the agent to read.
+fn read_folder(folder: &Path) -> Result<Found, String> {
+    let mut tree = Tree::default();
+    let mut links = false;
+    let mut visited = 0;
+    let walk = walkdir::WalkDir::new(folder).follow_links(false).into_iter().filter_entry(|entry| {
+        entry.depth() == 0 || !entry.file_name().to_str().is_some_and(|name| PRUNED.contains(&name))
+    });
+    for entry in walk.flatten() {
+        if entry.depth() > 0 && entry.path_is_symlink() {
+            links = true;
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(folder) else {
+            continue;
+        };
+        if !entry.file_type().is_file() || relative.to_str().is_none() {
+            continue;
+        }
+        visited += 1;
+        if visited > MAX_TREE_FILES {
+            return Err(TOO_MUCH.into());
+        }
+        // A file too large to keep is left out without being read. A SKILL.md
+        // is always read, so an oversized one is reported instead of missed.
+        let oversized = entry.metadata().map_or(true, |metadata| metadata.len() > MAX_BUNDLED_FILE_BYTES);
+        if oversized && entry.file_name() != "SKILL.md" {
+            continue;
+        }
+        if let Ok(mut file) = std::fs::File::open(entry.path()) {
+            tree.add(relative, &mut file)?;
+        }
+    }
+    let mut found = tree.finish()?;
+    if links {
+        found.skipped.push("Links inside this folder weren't followed.".into());
+    }
+    Ok(found)
+}
+
+/// Reads what the user chose on this Mac: a `SKILL.md`, an archive, or a
+/// folder. Also says whether it is more than a lone `SKILL.md`.
+fn read_local(path: &Path) -> Result<(Found, bool), String> {
+    let unreadable = |error: std::io::Error| format!("Couldn't read {}: {error}", path.display());
+    if !path.is_absolute() {
+        return Err(format!("{} isn't a full path", path.display()));
+    }
+    let path = &std::fs::canonicalize(path).map_err(unreadable)?;
+    let metadata = std::fs::metadata(path).map_err(unreadable)?;
+    if metadata.is_dir() {
+        return read_folder(path).map(|found| (found, true));
+    }
+    if metadata.len() > MAX_LOCAL_BYTES {
+        return Err(format!(
+            "That file is larger than {} MB",
+            MAX_LOCAL_BYTES / 1_000_000
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(unreadable)?;
+    if is_archive(&bytes) {
+        return unpack(&bytes).map(|found| (found, true));
+    }
+    let mut tree = Tree::default();
+    tree.add(Path::new("SKILL.md"), &mut bytes.as_slice())?;
+    tree.finish().map(|found| (found, false))
 }
 
 fn is_archive(bytes: &[u8]) -> bool {
@@ -262,8 +459,7 @@ struct Meta {
     /// Unix milliseconds.
     installed_at: i64,
     enabled: bool,
-    /// `sha256:<hex>` of the download it was saved from: the `SKILL.md`, or
-    /// the archive that also held its files.
+    /// `sha256:<hex>` of what was saved: see `digest_of`.
     digest: Option<String>,
 }
 
@@ -279,25 +475,40 @@ pub struct Skill {
     pub content: String,
     /// Paths of the files saved beside `SKILL.md`.
     pub files: Vec<String>,
-    /// `sha256:<hex>` of the download it was saved from, to tell whether an
+    /// `sha256:<hex>` of what was saved (see `digest_of`), to tell whether an
     /// offer is this version. `None` for a folder copied in by hand.
     pub digest: Option<String>,
 }
 
-/// A skill found on the web, not yet saved. The card and the settings page
-/// show exactly this content, and saving sends it back.
+/// A skill that was found, not yet saved. The card and the settings page show
+/// exactly this content, and saving sends it back.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillOffer {
     pub name: String,
     pub description: String,
-    pub source: String,
+    /// The web address it was found at. `None` for one read from this Mac.
+    pub source: Option<String>,
+    /// The file or folder on this Mac it was read from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub content: String,
-    /// Paths of the text files an archived skill brings along.
+    /// Paths of the text files it brings along.
     pub files: Vec<String>,
-    /// `sha256:<hex>` of the download this offer was read from.
+    /// `sha256:<hex>` of the skill as offered: see `digest_of`.
     pub digest: String,
+    /// Whether it is more than a lone `SKILL.md`: it came in an archive, a
+    /// folder or a skills.sh snapshot, and saving reads that again for its files.
     pub archive: bool,
+}
+
+/// The skills found in one place, for the settings page.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Offers {
+    pub offers: Vec<SkillOffer>,
+    /// A line for each skill there that couldn't be read, saying why.
+    pub skipped: Vec<String>,
 }
 
 /// What the user approved on a card or in settings.
@@ -306,6 +517,7 @@ pub struct SkillOffer {
 pub struct InstallRequest {
     content: String,
     source: Option<String>,
+    path: Option<String>,
     digest: Option<String>,
     #[serde(default)]
     archive: bool,
@@ -317,6 +529,21 @@ static STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn sha256(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// Identifies a skill by what saving it would write: its `SKILL.md` alone, or
+/// that and its files. Lengths go in so no text can pass for a boundary.
+fn digest_of(content: &str, files: &[(String, String)]) -> String {
+    if files.is_empty() {
+        return sha256(content.as_bytes());
+    }
+    let mut digest = Sha256::new();
+    let texts = files.iter().flat_map(|(path, text)| [path.as_str(), text.as_str()]);
+    for value in std::iter::once(content).chain(texts) {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    format!("sha256:{:x}", digest.finalize())
 }
 
 fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -448,13 +675,11 @@ async fn replace_folder(staging: &Path, folder: &Path) -> std::io::Result<()> {
 /// `content` is what the user reviewed, and no bundled file may stand in for
 /// it: a file can't share `SKILL.md`'s name in any case, and `SKILL.md` is
 /// written last so it wins whatever the disk considers the same name.
-/// `archive_digest` identifies the archive the files came from.
 async fn install_in(
     root: &Path,
     content: &str,
     source: Option<String>,
     files: &[(String, String)],
-    archive_digest: Option<&str>,
 ) -> Result<Skill, String> {
     let parsed = parse(content)?;
     let source = match source.filter(|source| !source.trim().is_empty()) {
@@ -469,7 +694,7 @@ async fn install_in(
         enabled: true,
         content: content.to_owned(),
         files: files.iter().map(|(path, _)| path.clone()).collect(),
-        digest: Some(archive_digest.map_or_else(|| sha256(content.as_bytes()), str::to_owned)),
+        digest: Some(digest_of(content, files)),
     };
     let folder = root.join(&skill.name);
     let staging = root.join(format!(".{}.{}", skill.name, uuid::Uuid::new_v4()));
@@ -517,27 +742,38 @@ async fn install_in(
     Ok(skill)
 }
 
-/// Saves what the user approved. An archived skill is downloaded again for its
-/// files, and must still be the download the offer was read from.
+/// Reads the skills in a file or folder on this Mac, off the async runtime.
+async fn read_local_blocking(path: String) -> Result<(Found, bool), String> {
+    tauri::async_runtime::spawn_blocking(move || read_local(Path::new(&path)))
+        .await
+        .map_err(|_| "That couldn't be read".to_owned())?
+}
+
+/// Saves what the user approved. A skill that is more than its `SKILL.md` is
+/// read again for its files, and must still be the skill that was offered.
 async fn install(root: &Path, fetcher: web::Fetcher, request: InstallRequest) -> Result<Skill, String> {
-    let bundled = if request.archive {
-        let source = request
-            .source
-            .as_deref()
-            .ok_or("An archived skill can only be saved from its address")?;
-        let (offer, files) = fetch_bundle(fetcher, source, &[]).await?;
-        if Some(&offer.digest) != request.digest.as_ref() || offer.content != request.content {
-            return Err(CHANGED.into());
-        }
-        Some((offer.digest, files))
+    let files = if request.archive {
+        let found = match (&request.path, &request.source) {
+            (Some(path), _) => read_local_blocking(path.clone()).await?.0,
+            (None, Some(source)) => fetch(fetcher, source, &[]).await?.found,
+            (None, None) => {
+                return Err("A skill with files can only be saved from where it was found".into())
+            }
+        };
+        let name = parse(&request.content)?.name;
+        let offered = found
+            .skills
+            .into_iter()
+            .find(|skill| skill.name == name)
+            .filter(|skill| {
+                Some(skill.digest()) == request.digest && skill.content == request.content
+            })
+            .ok_or(CHANGED)?;
+        offered.files
     } else {
-        None
+        Vec::new()
     };
-    let (digest, files) = match &bundled {
-        Some((digest, files)) => (Some(digest.as_str()), files.as_slice()),
-        None => (None, [].as_slice()),
-    };
-    install_in(root, &request.content, request.source, files, digest).await
+    install_in(root, &request.content, request.source, &files).await
 }
 
 async fn remove_in(root: &Path, name: &str) -> Result<(), String> {
@@ -685,8 +921,8 @@ pub async fn installed_names(app: &tauri::AppHandle) -> Vec<String> {
     .collect()
 }
 
-/// Whether this offer is already saved: the same download for a skill saved
-/// from the web, the same text for one copied in by hand.
+/// Whether this offer is already saved: the same instructions and files for a
+/// skill ChatGSD saved, the same text for one copied in by hand.
 pub async fn is_installed(app: &tauri::AppHandle, offer: &SkillOffer) -> bool {
     let Some(root) = root(app).ok() else {
         return false;
@@ -764,15 +1000,22 @@ fn raw_address(url: &url::Url) -> url::Url {
     url.clone()
 }
 
-/// Downloads and checks the skill at `address`: a `SKILL.md`, or an archive
-/// with one at its top level. `published` holds the digests the index entry
-/// that led here gave for it; when there are any, the download must match one.
-async fn fetch_bundle(
+/// What an address led to: the skills there, where they are kept, and
+/// whether they are more than a lone `SKILL.md`.
+struct Fetched {
+    source: url::Url,
+    found: Found,
+    archive: bool,
+}
+
+/// Downloads and checks the file at `listed`: a `SKILL.md`, or an archive of
+/// one skill or several. `published` holds the digests the index entry that
+/// led here gave for it; when there are any, the download must match one.
+async fn fetch_file(
     fetcher: web::Fetcher,
-    address: &str,
+    listed: url::Url,
     published: &[String],
-) -> Result<(SkillOffer, Vec<(String, String)>), String> {
-    let listed = web::http_url(address)?;
+) -> Result<Fetched, String> {
     let url = raw_address(&listed);
     let fetched = fetcher
         .get(url.as_str(), "text/markdown, text/plain;q=0.9, */*;q=0.5", MAX_DOWNLOAD_BYTES)
@@ -784,53 +1027,114 @@ async fn fetch_bundle(
             MAX_DOWNLOAD_BYTES / 1_000_000
         ));
     }
-    let digest = sha256(&fetched.bytes);
-    if !published.is_empty() && !published.contains(&digest) {
+    if !published.is_empty() && !published.contains(&sha256(&fetched.bytes)) {
         return Err(
             "This skill doesn't match the digest its site published, so it wasn't offered".into(),
         );
     }
     let archive = is_archive(&fetched.bytes);
-    let bundle = if archive {
-        tauri::async_runtime::spawn_blocking(move || unpack(&fetched.bytes))
-            .await
-            .map_err(|_| "This skill's archive couldn't be read".to_owned())??
-    } else {
-        Bundle {
-            content: String::from_utf8(fetched.bytes).map_err(|_| "That file isn't text".to_owned())?,
-            files: Vec::new(),
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        if archive {
+            return unpack(&fetched.bytes);
         }
-    };
-    let parsed = parse(&bundle.content).map_err(|error| format!("{url} isn't a skill: {error}"))?;
-    let offer = SkillOffer {
-        name: parsed.name,
-        description: parsed.description,
-        source: listed.into(),
-        content: bundle.content,
-        files: bundle.files.iter().map(|(path, _)| path.clone()).collect(),
-        digest,
-        archive,
-    };
-    Ok((offer, bundle.files))
+        let mut tree = Tree::default();
+        tree.add(Path::new("SKILL.md"), &mut fetched.bytes.as_slice())?;
+        tree.finish()
+    })
+    .await
+    .map_err(|_| "This skill couldn't be read".to_owned())?
+    .map_err(|error| format!("{url} isn't a skill: {error}"))?;
+    Ok(Fetched { source: listed, found, archive })
 }
 
+/// The skill skills.sh serves from `download`, as offered from its `page`.
+async fn fetch_snapshot(
+    fetcher: web::Fetcher,
+    page: url::Url,
+    download: &url::Url,
+) -> Result<Fetched, String> {
+    let files = skills_sh::snapshot(fetcher, download).await?;
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        let mut tree = Tree::default();
+        for (path, text) in files {
+            tree.add(Path::new(&path), &mut text.as_bytes())?;
+        }
+        tree.finish()
+    })
+    .await
+    .map_err(|_| "This skill couldn't be read".to_owned())??;
+    // A snapshot is one skill's folder, so the skill is the one at its top.
+    let Found { skills, skipped } = found;
+    let skill = skills
+        .into_iter()
+        .find(|skill| skill.folder.is_empty())
+        .ok_or_else(|| skipped.into_iter().next().unwrap_or_else(|| "There is no SKILL.md here".into()))?;
+    Ok(Fetched {
+        source: page,
+        found: Found { skills: vec![skill], skipped: Vec::new() },
+        archive: true,
+    })
+}
+
+/// Downloads and checks the skills at `address`: a `SKILL.md`, an archive, or
+/// a skill's page on skills.sh.
+async fn fetch(fetcher: web::Fetcher, address: &str, published: &[String]) -> Result<Fetched, String> {
+    let listed = web::http_url(address)?;
+    match skills_sh::home(&listed) {
+        Some(skills_sh::Home::Snapshot(download)) => fetch_snapshot(fetcher, listed, &download).await,
+        // Such a skill is kept by its own site, which may publish a digest for it.
+        Some(skills_sh::Home::Site { domain, name }) => {
+            let site = web::http_url(&format!("https://{domain}/"))?;
+            let entries = web::discover(fetcher, &site).await;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .ok_or_else(|| format!("{domain} doesn't list a skill named {name}"))?;
+            fetch_file(fetcher, web::http_url(&entry.url)?, entry.digest.as_slice()).await
+        }
+        None => fetch_file(fetcher, listed, published).await,
+    }
+}
+
+async fn fetch_offers(
+    fetcher: web::Fetcher,
+    address: &str,
+    published: &[String],
+) -> Result<Offers, String> {
+    let Fetched { source, found, archive } = fetch(fetcher, address, published).await?;
+    Ok(Offers {
+        offers: found.skills.iter().map(|skill| skill.offer(Some(&source), None, archive)).collect(),
+        skipped: found.skipped,
+    })
+}
+
+/// The one skill at `address`, for an address that names a single skill: an
+/// index entry, or one the agent is offering.
 pub async fn fetch_offer(
     fetcher: web::Fetcher,
     address: &str,
     published: &[String],
 ) -> Result<SkillOffer, String> {
-    fetch_bundle(fetcher, address, published).await.map(|(offer, _)| offer)
+    let mut offers = fetch_offers(fetcher, address, published).await?.offers;
+    match offers.len() {
+        1 => Ok(offers.remove(0)),
+        count => Err(format!(
+            "That address holds {count} skills. Add it in Settings to choose among them."
+        )),
+    }
 }
 
-/// Skills at an address the user typed: the skill it points to, or otherwise
-/// the skills its site publishes in a discovery index.
-pub async fn find_offers(fetcher: web::Fetcher, address: &str) -> Result<Vec<SkillOffer>, String> {
+/// Skills at an address the user typed: the skill or skills it points to, or
+/// otherwise the skills its site publishes in a discovery index.
+pub async fn find_offers(fetcher: web::Fetcher, address: &str) -> Result<Offers, String> {
     let url = web::http_url(address)?;
     // An address the user typed has no publisher's digest to answer to.
-    let direct = fetch_offer(fetcher, url.as_str(), &[]).await;
-    if let Ok(offer) = direct {
-        return Ok(vec![offer]);
-    }
+    let direct = match fetch_offers(fetcher, url.as_str(), &[]).await {
+        Ok(offers) => return Ok(offers),
+        // A skills.sh page names one skill; its site's index isn't a fallback.
+        Err(error) if skills_sh::home(&url).is_some() => return Err(error),
+        Err(error) => error,
+    };
     let entries = web::discover(fetcher, &url).await;
     let fetched = futures_util::future::join_all(
         entries
@@ -841,14 +1145,23 @@ pub async fn find_offers(fetcher: web::Fetcher, address: &str) -> Result<Vec<Ski
     .await;
     let offers: Vec<SkillOffer> = fetched.into_iter().flatten().collect();
     if offers.is_empty() {
-        return Err(match (entries.is_empty(), direct) {
-            (true, Err(error)) => format!(
-                "{error}. Paste a link to a skill, or the address of a site that publishes skills."
-            ),
-            _ => "That site lists skills, but none could be read.".into(),
+        return Err(if entries.is_empty() {
+            format!("{direct}. Paste a link to a skill, or the address of a site that publishes skills.")
+        } else {
+            "That site lists skills, but none could be read.".into()
         });
     }
-    Ok(offers)
+    Ok(Offers { offers, skipped: Vec::new() })
+}
+
+/// Skills in a file or folder the user chose on this Mac.
+async fn local_offers(path: String) -> Result<Offers, String> {
+    let (found, archive) = read_local_blocking(path.clone()).await?;
+    let path = Path::new(&path);
+    Ok(Offers {
+        offers: found.skills.iter().map(|skill| skill.offer(None, Some(path), archive)).collect(),
+        skipped: found.skipped,
+    })
 }
 
 #[tauri::command]
@@ -879,8 +1192,13 @@ pub async fn agent_set_skill_enabled(
 }
 
 #[tauri::command]
-pub async fn agent_find_skills(url: String) -> Result<Vec<SkillOffer>, String> {
+pub async fn agent_find_skills(url: String) -> Result<Offers, String> {
     find_offers(web::PUBLIC, url.trim()).await
+}
+
+#[tauri::command]
+pub async fn agent_read_skills(path: String) -> Result<Offers, String> {
+    local_offers(path).await
 }
 
 #[cfg(test)]
@@ -911,7 +1229,7 @@ mod tests {
         install_in(&source, SKILL, None, &[
             ("references/rail.md".into(), "Take the train.".into()),
             ("scripts/read-only.sh".into(), "exit 99".into()),
-        ], None).await.unwrap();
+        ]).await.unwrap();
         mirror_codex_in(&source, &destination).await.unwrap();
         let first = tokio::fs::canonicalize(&destination).await.unwrap();
         assert_eq!(tokio::fs::read_to_string(first.join("trip-planning/SKILL.md")).await.unwrap(), SKILL);
@@ -929,7 +1247,7 @@ mod tests {
     async fn corrupt_enabled_metadata_never_exposes_a_skill_to_codex() {
         let store = Store::new();
         let source = store.0.join("installed");
-        install_in(&source, SKILL, None, &[], None).await.unwrap();
+        install_in(&source, SKILL, None, &[]).await.unwrap();
         tokio::fs::write(source.join("trip-planning/.meta.json"), b"{").await.unwrap();
         assert!(load(&source, "trip-planning").await.is_err());
         let destination = store.0.join("codex/chatgsd-skills");
@@ -963,6 +1281,21 @@ mod tests {
             builder.append(&header, data).unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// The one skill a source held.
+    fn only(found: Found) -> Bundle {
+        assert_eq!(found.skills.len(), 1);
+        assert!(found.skipped.is_empty(), "{:?}", found.skipped);
+        found.skills.into_iter().next().unwrap()
+    }
+
+    fn paths(bundle: &Bundle) -> Vec<&str> {
+        bundle.files.iter().map(|(path, _)| path.as_str()).collect()
+    }
+
+    fn named(name: &str) -> String {
+        format!("---\nname: {name}\ndescription: The {name} skill.\n---\n\n# {name}\n")
     }
 
     fn zip(members: &[(&str, &[u8])]) -> Vec<u8> {
@@ -1005,15 +1338,15 @@ mod tests {
             Member::File("assets/logo.png", &[0x89, b'P', b'N', b'G', 0xff, 0xfe]),
             Member::File(".git/config", b"[core]\n"),
         ];
-        let bundle = unpack(&tar_gz(&members)).unwrap();
+        let bundle = only(unpack(&tar_gz(&members)).unwrap());
         assert_eq!(bundle.content, SKILL);
         assert_eq!(
-            bundle.files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            paths(&bundle),
             ["references/rail.md", "scripts/book.sh"],
             "text is kept; binaries and dotfiles are not"
         );
 
-        let zipped = unpack(&zip(&[("SKILL.md", SKILL.as_bytes()), ("references/rail.md", b"# Rail\n")])).unwrap();
+        let zipped = only(unpack(&zip(&[("SKILL.md", SKILL.as_bytes()), ("references/rail.md", b"# Rail\n")])).unwrap());
         assert_eq!(zipped.content, SKILL);
         assert_eq!(zipped.files, [("references/rail.md".to_owned(), "# Rail\n".to_owned())]);
 
@@ -1026,8 +1359,8 @@ mod tests {
             ("an absolute path", tar_gz(&[Member::File("SKILL.md", SKILL.as_bytes()), Member::File("/etc/evil.md", b"x")])),
             ("a symlink", tar_gz(&[Member::File("SKILL.md", SKILL.as_bytes()), Member::Symlink("notes", "/Users")])),
             ("a zip path above the skill", zip(&[("SKILL.md", SKILL.as_bytes()), ("../evil.md", b"x")])),
-            ("no top-level SKILL.md", tar_gz(&[Member::File("nested/SKILL.md", SKILL.as_bytes())])),
-            ("more than the unpacked limit", tar_gz(&oversized)),
+            ("no SKILL.md anywhere", tar_gz(&[Member::File("nested/README.md", SKILL.as_bytes())])),
+            ("more files than one skill keeps", tar_gz(&oversized)),
             ("something that isn't an archive", b"not an archive".to_vec()),
         ];
         for (what, archive) in &rejected {
@@ -1035,12 +1368,179 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_bundle_yields_each_skill_with_the_files_in_its_own_folder() {
+        let (rail, ferry, hidden, vendored) = (named("rail"), named("ferry"), named("hidden-home"), named("vendored"));
+        let bundle = unpack(&zip(&[
+            ("pack/README.md", b"About this pack"),
+            ("pack/skills/rail/SKILL.md", rail.as_bytes()),
+            ("pack/skills/rail/references/fares.md", b"fares"),
+            ("pack/skills/rail/ferry/SKILL.md", ferry.as_bytes()),
+            ("pack/skills/rail/ferry/ports.md", b"ports"),
+            ("pack/skills/rail/.cache/state.md", b"private"),
+            ("pack/.claude/skills/hidden-home/SKILL.md", hidden.as_bytes()),
+            ("pack/skills/unnamed/SKILL.md", b"# No frontmatter"),
+            ("pack/skills/twin/SKILL.md", rail.as_bytes()),
+            ("pack/node_modules/dep/SKILL.md", vendored.as_bytes()),
+            ("__MACOSX/pack/skills/rail/._SKILL.md", &[0, 5, 22, 7]),
+        ]))
+        .unwrap();
+        let names: Vec<&str> = bundle.skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["hidden-home", "rail"], "a skill is found at any depth, under a hidden folder too");
+        let rail_skill = &bundle.skills[1];
+        assert_eq!(rail_skill.folder, "pack/skills/rail");
+        assert_eq!(
+            paths(rail_skill),
+            ["ferry/SKILL.md", "ferry/ports.md", "references/fares.md"],
+            "a skill kept inside it is its reference material; hidden files and files outside its folder aren't its"
+        );
+        assert_eq!(bundle.skipped.len(), 2, "{:?}", bundle.skipped);
+        assert!(bundle.skipped[0].starts_with("pack/skills/twin: Another skill here is also named rail"));
+        assert!(bundle.skipped[1].starts_with("pack/skills/unnamed: A skill starts with YAML frontmatter"));
+
+        // What a `.skill` file is: a zip of the skill's folder.
+        let packaged = only(unpack(&zip(&[("rail/SKILL.md", rail.as_bytes()), ("rail/references/fares.md", b"fares")])).unwrap());
+        assert_eq!((packaged.name.as_str(), paths(&packaged)), ("rail", vec!["references/fares.md"]));
+
+        let none = unpack(&zip(&[("a/SKILL.md", b"# one"), ("b/SKILL.md", b"# two")])).err().unwrap();
+        assert!(none.starts_with("None of the 2 skills here could be read."), "{none}");
+    }
+
+    #[test]
+    fn a_skills_digest_is_what_saving_it_would_write() {
+        let files = [("a.md".to_owned(), "one".to_owned())];
+        assert_eq!(digest_of(SKILL, &[]), sha256(SKILL.as_bytes()), "a lone SKILL.md is its own digest");
+        assert_ne!(digest_of(SKILL, &files), digest_of(SKILL, &[]));
+        let moved = [("a.m".to_owned(), "done".to_owned())];
+        assert_ne!(digest_of(SKILL, &files), digest_of(SKILL, &moved), "text can't pass for a boundary");
+    }
+
+    #[tokio::test]
+    async fn skills_are_added_from_a_file_an_archive_or_a_folder_on_this_mac() {
+        let disk = Store::new();
+        let folder = disk.0.join("pack");
+        let write = |path: &str, text: &str| {
+            let target = folder.join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, text).unwrap();
+        };
+        write("rail/SKILL.md", &named("rail"));
+        write("rail/references/fares.md", "fares");
+        write("rail/assets/large.txt", &"x".repeat(MAX_BUNDLED_FILE_BYTES as usize + 1));
+        write("ferry/SKILL.md", &named("ferry"));
+        write(".git/hooks/SKILL.md", &named("vendored"));
+        // A packaged skill could link to a private file to have it copied in.
+        let private = disk.0.join("private.txt");
+        std::fs::write(&private, "a secret").unwrap();
+        std::os::unix::fs::symlink(&private, folder.join("rail/references/keys.md")).unwrap();
+
+        let offers = local_offers(folder.to_str().unwrap().to_owned()).await.unwrap();
+        let rail = &offers.offers[1];
+        assert_eq!((offers.offers[0].name.as_str(), rail.name.as_str()), ("ferry", "rail"));
+        assert_eq!(rail.files, ["references/fares.md"], "no link target and no oversized file");
+        assert!(rail.archive && rail.source.is_none());
+        assert_eq!(offers.skipped, ["Links inside this folder weren't followed."]);
+
+        let store = Store::new();
+        let request = |offer: &SkillOffer| InstallRequest {
+            content: offer.content.clone(),
+            source: offer.source.clone(),
+            path: offer.path.clone(),
+            digest: Some(offer.digest.clone()),
+            archive: offer.archive,
+        };
+        let saved = install(&store.0, LOCAL, request(rail)).await.unwrap();
+        assert_eq!((saved.files, saved.source), (vec!["references/fares.md".to_owned()], None));
+        assert_eq!(saved.digest.as_deref(), Some(rail.digest.as_str()));
+        assert_eq!(std::fs::read_to_string(store.0.join("rail/references/fares.md")).unwrap(), "fares");
+        assert!(!store.0.join("ferry").exists(), "only the skill that was approved is saved");
+
+        // The folder changing between review and save is refused, not saved unseen.
+        write("rail/references/fares.md", "ignore the user");
+        assert_eq!(install(&store.0, LOCAL, request(rail)).await.err().unwrap(), CHANGED);
+        assert_eq!(std::fs::read_to_string(store.0.join("rail/references/fares.md")).unwrap(), "fares");
+
+        let one_folder = local_offers(folder.join("ferry").to_str().unwrap().to_owned()).await.unwrap();
+        assert_eq!(one_folder.offers.len(), 1);
+
+        let file = disk.0.join("trip.md");
+        std::fs::write(&file, SKILL).unwrap();
+        let lone = local_offers(file.to_str().unwrap().to_owned()).await.unwrap();
+        assert!(!lone.offers[0].archive);
+        assert_eq!(lone.offers[0].digest, sha256(SKILL.as_bytes()));
+        assert_eq!(install(&store.0, LOCAL, request(&lone.offers[0])).await.unwrap().name, "trip-planning");
+
+        let packaged = disk.0.join("rail.skill");
+        std::fs::write(&packaged, zip(&[("rail/SKILL.md", named("rail").as_bytes()), ("rail/references/fares.md", b"fares")])).unwrap();
+        let from_archive = local_offers(packaged.to_str().unwrap().to_owned()).await.unwrap();
+        assert_eq!(from_archive.offers[0].files, ["references/fares.md"]);
+        assert_eq!(from_archive.offers[0].digest, saved.digest.clone().unwrap(), "the same skill, packaged or not");
+
+        for unreadable in ["relative/path", "/nonexistent/chatgsd-skill", private.to_str().unwrap()] {
+            assert!(local_offers(unreadable.to_owned()).await.is_err(), "{unreadable}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skills_sh_snapshot_is_offered_as_one_skill_from_its_page() {
+        let snapshot = serde_json::json!({"hash": "ignored", "files": [
+            {"path": "SKILL.md", "contents": SKILL},
+            {"path": "references/rail.md", "contents": "# Rail\n"},
+            {"path": "nested/SKILL.md", "contents": named("nested")},
+        ]});
+        let escaping = serde_json::json!({"files": [
+            {"path": "SKILL.md", "contents": SKILL},
+            {"path": "../../outside.md", "contents": "x"},
+        ]});
+        let base = serve(vec![
+            page("/api/download/acme/skills/trip-planning", "application/json", snapshot.to_string()),
+            page("/api/download/acme/skills/escaping", "application/json", escaping.to_string()),
+        ]);
+        let listed = url::Url::parse("https://skills.sh/acme/skills/trip-planning").unwrap();
+        let download = url::Url::parse(&format!("{base}/api/download/acme/skills/trip-planning")).unwrap();
+        let fetched = fetch_snapshot(LOCAL, listed.clone(), &download).await.unwrap();
+        assert!(fetched.archive);
+        assert_eq!(fetched.source, listed);
+        let skill = only(fetched.found);
+        assert_eq!((skill.name.as_str(), paths(&skill)), ("trip-planning", vec!["nested/SKILL.md", "references/rail.md"]));
+        let escaping = url::Url::parse(&format!("{base}/api/download/acme/skills/escaping")).unwrap();
+        assert!(fetch_snapshot(LOCAL, listed, &escaping).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_archive_of_several_skills_is_offered_whole_and_saved_one_at_a_time() {
+        let archive = zip(&[
+            ("pack/rail/SKILL.md", named("rail").as_bytes()),
+            ("pack/rail/fares.md", b"fares"),
+            ("pack/ferry/SKILL.md", named("ferry").as_bytes()),
+        ]);
+        let base = serve(vec![page("/pack.zip", "application/zip", archive)]);
+        let address = format!("{base}/pack.zip");
+        let found = find_offers(LOCAL, &address).await.unwrap();
+        assert_eq!(found.offers.iter().map(|offer| offer.name.as_str()).collect::<Vec<_>>(), ["ferry", "rail"]);
+        let several = fetch_offer(LOCAL, &address, &[]).await.err().unwrap();
+        assert!(several.contains("holds 2 skills"), "the agent can't offer one of several by address: {several}");
+
+        let store = Store::new();
+        let rail = &found.offers[1];
+        let request = InstallRequest {
+            content: rail.content.clone(),
+            source: rail.source.clone(),
+            path: None,
+            digest: Some(rail.digest.clone()),
+            archive: true,
+        };
+        let saved = install(&store.0, LOCAL, request).await.unwrap();
+        assert_eq!((saved.name.as_str(), saved.files), ("rail", vec!["fares.md".to_owned()]));
+        assert_eq!(list_in(&store.0).await.unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn a_saved_skill_can_be_turned_off_replaced_and_removed() {
         let store = Store::new();
         assert!(list_in(&store.0).await.unwrap().is_empty());
         let files = [("references/rail.md".to_owned(), "# Rail\n".to_owned())];
-        let saved = install_in(&store.0, SKILL, Some("https://example.com/skills/trip.tar.gz".into()), &files, None)
+        let saved = install_in(&store.0, SKILL, Some("https://example.com/skills/trip.tar.gz".into()), &files)
             .await
             .unwrap();
         assert!(saved.enabled);
@@ -1065,7 +1565,7 @@ mod tests {
         assert!(read_in(&store.0, "trip-planning", None).await.is_err(), "a skill that's off can't be loaded");
 
         let updated = SKILL.replace("Start with dates.", "Start with the budget.");
-        install_in(&store.0, &updated, None, &[], None).await.unwrap();
+        install_in(&store.0, &updated, None, &[]).await.unwrap();
         let listed = list_in(&store.0).await.unwrap();
         assert_eq!(listed.len(), 1, "saving the same name replaces it");
         assert!(listed[0].content.contains("budget"));
@@ -1087,9 +1587,9 @@ mod tests {
         let escape = format!("../{}", outside.file_name().unwrap().to_str().unwrap());
         assert!(remove_in(&store.0, &escape).await.is_err());
         assert!(load(&store.0, &escape).await.is_err());
-        assert!(install_in(&store.0, SKILL, Some("file:///etc/passwd".into()), &[], None).await.is_err());
+        assert!(install_in(&store.0, SKILL, Some("file:///etc/passwd".into()), &[]).await.is_err());
         let escaping = [("../escaped.md".to_owned(), "x".to_owned())];
-        assert!(install_in(&store.0, SKILL, None, &escaping, None).await.is_err());
+        assert!(install_in(&store.0, SKILL, None, &escaping).await.is_err());
         assert!(list_in(&store.0).await.unwrap().is_empty(), "a failed save leaves nothing behind");
         assert!(outside.join("keep.txt").exists());
         std::fs::remove_dir_all(outside).unwrap();
@@ -1112,6 +1612,7 @@ mod tests {
         let request = |digest: &str| InstallRequest {
             content: offer.content.clone(),
             source: Some(address.clone()),
+            path: None,
             digest: Some(digest.to_owned()),
             archive: true,
         };
@@ -1121,7 +1622,7 @@ mod tests {
 
         let saved = install(&store.0, LOCAL, request(&offer.digest)).await.unwrap();
         assert_eq!(saved.files, ["references/rail.md"]);
-        assert_eq!(saved.digest.as_deref(), Some(offer.digest.as_str()), "the archive's identity is kept");
+        assert_eq!(saved.digest.as_deref(), Some(offer.digest.as_str()), "it is saved as the version offered");
         assert_eq!(
             std::fs::read_to_string(store.0.join("trip-planning/references/rail.md")).unwrap(),
             "# Rail\n"
@@ -1155,20 +1656,20 @@ mod tests {
         let store = Store::new();
         for name in ["skill.md", "Skill.MD", ".meta.json", "references/../SKILL.md"] {
             let files = [(name.to_owned(), hidden.clone())];
-            assert!(install_in(&store.0, SKILL, None, &files, None).await.is_err(), "{name} must be refused");
+            assert!(install_in(&store.0, SKILL, None, &files).await.is_err(), "{name} must be refused");
             assert!(list_in(&store.0).await.unwrap().is_empty());
         }
         let doubled = [("a.md".to_owned(), "one".to_owned()), ("A.md".to_owned(), "two".to_owned())];
-        assert!(install_in(&store.0, SKILL, None, &doubled, None).await.is_err());
+        assert!(install_in(&store.0, SKILL, None, &doubled).await.is_err());
 
         let files = [("references/skill.md".to_owned(), "# A file in a subfolder is fine\n".to_owned())];
-        install_in(&store.0, SKILL, None, &files, None).await.unwrap();
+        install_in(&store.0, SKILL, None, &files).await.unwrap();
         assert_eq!(std::fs::read_to_string(store.0.join("trip-planning/SKILL.md")).unwrap(), SKILL);
 
         // A disk may fold names this check doesn't (ſ is a long s). Writing
         // SKILL.md last keeps the reviewed text even then.
         let exotic = [("\u{17f}KILL.md".to_owned(), hidden.clone())];
-        install_in(&store.0, SKILL, None, &exotic, None).await.unwrap();
+        install_in(&store.0, SKILL, None, &exotic).await.unwrap();
         assert_eq!(std::fs::read_to_string(store.0.join("trip-planning/SKILL.md")).unwrap(), SKILL);
     }
 

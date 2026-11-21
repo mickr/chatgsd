@@ -15,6 +15,7 @@ pub mod memory;
 pub mod mcp;
 mod reading;
 pub mod skills;
+pub mod skills_sh;
 pub mod tools;
 mod web;
 mod workspace;

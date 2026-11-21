@@ -108,20 +108,44 @@ export interface Skill {
   content: string;
   /** Paths of the files saved beside SKILL.md. */
   files: string[];
-  /** `sha256:<hex>` of the download it was saved from; null when added by hand. */
+  /** `sha256:<hex>` of the instructions and files saved; null when added by hand. */
   digest: string | null;
 }
-/** A skill found on the web, not yet saved. */
+/** A skill that was found, not yet saved. */
 export interface SkillOffer {
   name: string;
   description: string;
-  source: string;
+  /** The web address it was found at; null for one read from this Mac. */
+  source: string | null;
+  /** The file or folder on this Mac it was read from. */
+  path?: string | null;
   content: string;
-  /** Paths of the text files an archived skill brings along. */
+  /** Paths of the text files it brings along. */
   files: string[];
-  /** `sha256:<hex>` of the download the offer was read from. */
+  /** `sha256:<hex>` of the instructions and files offered. */
   digest: string;
+  /** More than a lone SKILL.md, so saving reads it again for its files. */
   archive: boolean;
+}
+/** The skills found in one place, and a line for each that couldn't be read. */
+export interface FoundSkills {
+  offers: SkillOffer[];
+  skipped: string[];
+}
+export type RegistryView = "all-time" | "trending" | "hot";
+/** A skill listed on skills.sh. */
+export interface RegistrySkill {
+  name: string;
+  /** `owner/repo` on GitHub, or the domain of the site that publishes it. */
+  source: string;
+  installs: number;
+  official: boolean;
+  /** Its page on skills.sh, which `findSkills` reads it from. */
+  url: string;
+}
+export interface RegistryListing {
+  skills: RegistrySkill[];
+  hasMore: boolean;
 }
 export interface ConversationSummary {
   id: string;
@@ -236,14 +260,15 @@ export const getProfile = () => invoke<WriterProfile>("agent_profile");
 export const setProfile = (profile: WriterProfile) =>
   invoke<WriterProfile>("agent_set_profile", { profile });
 export const listSkills = () => invoke<Skill[]>("agent_list_skills");
-/** Saves an offer as the user saw it; an archive must still match its digest. */
+/** Saves an offer as the user saw it; one with files must still match its digest. */
 export const installSkill = (
-  offer: Pick<SkillOffer, "content" | "source" | "digest" | "archive">,
+  offer: Pick<SkillOffer, "content" | "source" | "path" | "digest" | "archive">,
 ) =>
   invoke<Skill>("agent_install_skill", {
     offer: {
       content: offer.content,
       source: offer.source,
+      path: offer.path ?? null,
       digest: offer.digest,
       archive: offer.archive,
     },
@@ -252,9 +277,18 @@ export const removeSkill = (name: string) =>
   invoke<void>("agent_remove_skill", { name });
 export const setSkillEnabled = (name: string, enabled: boolean) =>
   invoke<Skill>("agent_set_skill_enabled", { name, enabled });
-/** Skills at an address: the SKILL.md it points to, or the ones its site publishes. */
+/**
+ * Skills at an address: the SKILL.md or archive it points to, a skill's page
+ * on skills.sh, or the ones its site publishes.
+ */
 export const findSkills = (url: string) =>
-  invoke<SkillOffer[]>("agent_find_skills", { url });
+  invoke<FoundSkills>("agent_find_skills", { url });
+/** Skills in a file or folder on this Mac: a SKILL.md, an archive, or a folder of them. */
+export const readSkills = (path: string) =>
+  invoke<FoundSkills>("agent_read_skills", { path });
+/** A page of a skills.sh leaderboard, or the skills matching a query of two characters or more. */
+export const browseSkills = (query: string, view: RegistryView, page: number) =>
+  invoke<RegistryListing>("agent_browse_skills", { query, view, page });
 /** The note's saved conversations, most recently updated first. */
 export const listConversations = (noteId: string) =>
   invoke<ConversationSummary[]>("agent_list_conversations", { noteId });

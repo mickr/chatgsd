@@ -1,4 +1,4 @@
-import { memo, useState, type FormEvent } from "react";
+import { memo, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -9,13 +9,12 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  Button,
-  Input,
 } from "../ui";
 import { SkillIcon, SpinnerIcon } from "../icons";
 import { useSkills } from "../../context/SkillsContext";
-import { errorMessage, findSkills, type Skill, type SkillOffer } from "../../services/agent";
-import { SkillInstructions, SkillOfferCard, SkillSource } from "../agent/SkillOfferCard";
+import { errorMessage, type Skill } from "../../services/agent";
+import { SkillInstructions, SkillSource } from "../agent/SkillOfferCard";
+import { AddSkill } from "./AddSkill";
 import { formatDate } from "../../lib/utils";
 
 const SkillRow = memo(function SkillRow({
@@ -63,7 +62,7 @@ const SkillRow = memo(function SkillRow({
               <SkillSource source={skill.source} />
             </>
           ) : (
-            "Added by hand"
+            "Added from this Mac"
           )}
           {skill.installedAt > 0 && (
             <span className="shrink-0">· Saved {formatDate(skill.installedAt / 1000)}</span>
@@ -85,69 +84,6 @@ const SkillRow = memo(function SkillRow({
     </li>
   );
 });
-
-/** Look up skills by address: a SKILL.md, or a site that publishes an index. */
-function AddSkill() {
-  const [address, setAddress] = useState("");
-  const [finding, setFinding] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [offers, setOffers] = useState<SkillOffer[]>([]);
-  const find = async (event: FormEvent) => {
-    event.preventDefault();
-    const url = address.trim();
-    if (!url || finding) return;
-    setFinding(true);
-    setError(null);
-    setOffers([]);
-    try {
-      setOffers(await findSkills(/^https?:\/\//i.test(url) ? url : `https://${url}`));
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setFinding(false);
-    }
-  };
-  return (
-    <div className="space-y-3">
-      <form className="flex gap-2" onSubmit={(event) => void find(event)}>
-        <Input
-          type="text"
-          inputMode="url"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          aria-label="Address of a skill or a site that publishes skills"
-          placeholder="docs.example.com or a link to a SKILL.md"
-          value={address}
-          onChange={(event) => setAddress(event.target.value)}
-          className="h-8.25"
-        />
-        <Button type="submit" variant="outline" size="md" disabled={finding || !address.trim()}>
-          {finding ? (
-            <>
-              <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
-              Looking…
-            </>
-          ) : (
-            "Find skills"
-          )}
-        </Button>
-      </form>
-      {error && (
-        <p role="alert" className="text-sm text-red-500">
-          {error}
-        </p>
-      )}
-      {offers.length > 0 && (
-        <div className="space-y-2.5" aria-label="Skills found">
-          {offers.map((offer) => (
-            <SkillOfferCard key={offer.source} offer={offer} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 export function SkillsSettingsSection() {
   const { skills, error, refresh, remove } = useSkills();
@@ -189,7 +125,8 @@ export function SkillsSettingsSection() {
             <h3 className="text-sm font-medium">No skills installed</h3>
             <p className="max-w-md text-sm leading-relaxed text-text-muted">
               When the agent's research turns up a site that publishes a skill for what you're working on,
-              it offers the skill in the panel and you choose whether to save it. You can also add one below.
+              it offers the skill in the panel and you choose whether to save it. You can also add one below,
+              from skills.sh, this Mac or a web address.
             </p>
           </div>
         )}
@@ -212,8 +149,7 @@ export function SkillsSettingsSection() {
       <section className="pb-2">
         <h2 className="text-xl font-medium mb-0.5">Add a skill</h2>
         <p className="text-sm text-text-muted mb-4">
-          Paste a link to a skill, or the address of a site that publishes skills. You'll see each
-          skill's instructions before anything is saved.
+          You'll see each skill's instructions before anything is saved, and nothing in a skill is run.
         </p>
         <AddSkill />
       </section>
@@ -224,7 +160,7 @@ export function SkillsSettingsSection() {
             <AlertDialogTitle>Remove this skill?</AlertDialogTitle>
             <AlertDialogDescription>
               The agent will stop using {removing?.name}.
-              {removing?.source ? " You can add it again from its address." : " It was added by hand, so keep a copy if you want it back."}
+              {removing?.source ? " You can add it again from its address." : " It was added from this Mac, so keep a copy if you want it back."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

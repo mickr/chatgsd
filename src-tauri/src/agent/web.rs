@@ -738,7 +738,7 @@ mod tests {
         let entries = discover(LOCAL, &docs).await;
         assert_eq!(entries.len(), 2);
 
-        let offers = skills::find_offers(LOCAL, docs.as_str()).await.unwrap();
+        let offers = skills::find_offers(LOCAL, docs.as_str()).await.unwrap().offers;
         assert_eq!(offers.len(), 1, "the tampered skill is not offered");
         assert_eq!(offers[0].name, "trip-planning");
         assert_eq!(offers[0].content, SKILL);
@@ -755,7 +755,7 @@ mod tests {
         let rival = serve(vec![page("/.well-known/agent-skills/index.json", "application/json", wrong.to_string())]);
         let rival_entries = discover(LOCAL, &Url::parse(&rival).unwrap()).await;
         assert_eq!(rival_entries.len(), 1);
-        assert_eq!(skills::find_offers(LOCAL, docs.as_str()).await.unwrap().len(), 1);
+        assert_eq!(skills::find_offers(LOCAL, docs.as_str()).await.unwrap().offers.len(), 1);
         let listed = listed_digests(&skill_url);
         assert_eq!(listed.len(), 2);
         assert!(skills::fetch_offer(LOCAL, &skill_url, &listed).await.is_ok());
@@ -773,8 +773,8 @@ mod tests {
             page("/docs/.well-known/skills/trip-planning/SKILL.md", "text/markdown", SKILL),
         ]);
         let quickstart = Url::parse(&format!("{hosted}/docs/quickstart")).unwrap();
-        let offers = skills::find_offers(LOCAL, quickstart.as_str()).await.unwrap();
-        assert_eq!(offers[0].source, format!("{hosted}/docs/.well-known/skills/trip-planning/SKILL.md"));
+        let offers = skills::find_offers(LOCAL, quickstart.as_str()).await.unwrap().offers;
+        assert_eq!(offers[0].source, Some(format!("{hosted}/docs/.well-known/skills/trip-planning/SKILL.md")));
         let page_url = Url::parse("https://example.com/index.html").unwrap();
         assert_eq!(index_bases(&page_url).len(), 1, "a file at the root is not a directory");
     }
