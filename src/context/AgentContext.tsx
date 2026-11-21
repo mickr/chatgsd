@@ -244,6 +244,8 @@ interface SendOptions {
   ledger?: ProvenanceEntry[];
   /** The highlight an outcome trace works back from. */
   outcome?: WritingOutcome;
+  /** The skill the message invokes with `/name`; the backend loads it into the request. */
+  skill?: string;
 }
 /** Assistance in one loaded document. `halted` outlasts the panel staying open. */
 interface CoeditingSession { documentSession: number; openRequest: boolean; halted?: true }
@@ -1331,6 +1333,7 @@ export function AgentProvider({
           webAccess: readOnly ? !!options.research && webAccess : webAccess,
           researchModel: mode === "companion" ? routedModel || null : researchModel || null,
           researchBrief,
+          ...(!readOnly && options.skill ? { skill: options.skill } : {}),
           context,
         });
         if (runs.current.get(temporaryId) !== run) {

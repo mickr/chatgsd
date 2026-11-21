@@ -13,10 +13,13 @@ import { prepareWritingOffer } from "../../lib/agent/writingOffers";
 import { AgentLauncher } from "./AgentLauncher";
 import { invoke } from "@tauri-apps/api/core";
 
-const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown> }));
+const state = vi.hoisted(() => ({ agent: {} as Record<string, unknown>, skills: [] as unknown[] }));
 vi.mock("../../context/AgentContext", async (original) => ({
   ...await original<typeof AgentContext>(),
   useAgent: () => state.agent,
+}));
+vi.mock("../../context/SkillsContext", () => ({
+  useSkills: () => ({ skills: state.skills }),
 }));
 vi.mock("../../context/McpContext", () => ({
   useMcp: () => ({ servers: [], error: null, refresh: vi.fn() }),
@@ -93,6 +96,7 @@ beforeEach(() => {
     pendingQuestion: null, coediting: true, openRequest: false, companionChecking: false,
     writingFocus: null, writingTarget: null, writingSuggestion: null, writingStarters: [],
   };
+  state.skills = [];
   act(() => root.render(<Workspace />));
 });
 
@@ -647,5 +651,73 @@ describe("while the agent works on a request", () => {
     await enter(input);
     expect(state.agent.steer).not.toHaveBeenCalled();
     expect(state.agent.send).toHaveBeenCalledOnce();
+  });
+});
+
+describe("invoking a skill with /", () => {
+  const skill = (name: string, description: string, enabled = true) =>
+    ({ name, description, enabled, source: null, installedAt: 0, content: "", files: [], digest: null });
+  beforeEach(() => {
+    state.skills = [
+      skill("press-release", "Write launch announcements"),
+      skill("release-notes", "Summarize changes for a version"),
+      skill("archived", "Old instructions", false),
+    ];
+  });
+  const options = () => [...document.querySelectorAll('[role="option"]')].map(item => item.textContent);
+  const key = (input: HTMLTextAreaElement, key: string) =>
+    act(() => { input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })); });
+
+  it("lists the enabled skills as the writer types the command, and completes the highlighted one", () => {
+    const input = openPanel();
+    type(input, "/");
+    expect(options()).toEqual(["/press-releaseWrite launch announcements", "/release-notesSummarize changes for a version"]);
+    type(input, "/rel");
+    expect(options().map(text => text?.split(/[A-Z]/)[0])).toEqual(["/release-notes", "/press-release"]);
+    key(input, "ArrowDown");
+    expect(document.querySelector('[aria-selected="true"]')?.textContent).toContain("/press-release");
+    key(input, "Tab");
+    nextFrame();
+    expect(input.value).toBe("/press-release ");
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+    expect(state.agent.send).not.toHaveBeenCalled();
+  });
+
+  it("closes on Escape without leaving the composer or dropping the draft", () => {
+    const input = openPanel();
+    input.focus();
+    type(input, "/pre");
+    key(input, "Escape");
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+    expect(input.value).toBe("/pre");
+    expect(document.activeElement).toBe(input);
+  });
+
+  // The backend loads the named skill into the request, so the panel must name
+  // it; the classifier would only guess at a kind of work the skill defines.
+  it("sends the invoked skill with the message, unrouted, and keeps what the writer typed", async () => {
+    const input = openPanel();
+    type(input, "/press-release the spring launch");
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+    expect(container.textContent).toContain("Enter to run /press-release");
+    await send();
+    const [prompt, , , sent] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+    expect(prompt).toContain("User instruction:\n\n/press-release the spring launch");
+    expect(sent).toEqual({ route: undefined, openRequest: true, skill: "press-release" });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("sends a fully typed name on Enter instead of completing it again", async () => {
+    const input = openPanel();
+    type(input, "/release-notes");
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })); });
+    expect(vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0][3]).toMatchObject({ skill: "release-notes" });
+  });
+
+  it("treats a turned-off skill or an unknown command as ordinary text", async () => {
+    const input = openPanel();
+    type(input, "/archived run this");
+    await send();
+    expect(vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0][3]).not.toHaveProperty("skill");
   });
 });

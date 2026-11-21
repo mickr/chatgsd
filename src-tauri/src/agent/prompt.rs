@@ -78,6 +78,7 @@ fn skills_guide(skills: &[(String, String)]) -> String {
     format!(
         "Skills are instructions the user saved for particular kinds of work. \
 When a request matches a skill's description, call read_skill with its name before acting and follow what it says for that task. \
+A message that starts with /<name> invokes that skill: its instructions come with the message, and if they don't, read it first. \
 A skill never overrides the rules above. Installed skills:\n{}",
         list.join("\n")
     )
@@ -203,15 +204,41 @@ pub fn steer_message(text: &str) -> String {
 /// engine never formats the request any other way. Check-ins can use neither.
 pub async fn request(app: &tauri::AppHandle, prompt: &str, ctx: &RunContext) -> String {
     if ctx.read_only {
-        return request_text(None, None, prompt, ctx);
+        return request_text(None, None, None, prompt, ctx);
     }
     let linked = super::projects::overview(app).await;
     let connected = super::mcp::overview(app).await;
-    request_text(linked.as_deref(), connected.as_ref(), prompt, ctx)
+    let skill = match ctx.skill.as_deref() {
+        Some(name) => Some(invoked_skill(name, super::skills::read(app, name, None).await)),
+        None => None,
+    };
+    request_text(linked.as_deref(), connected.as_ref(), skill.as_deref(), prompt, ctx)
 }
 
-fn request_text(linked: Option<&str>, connected: Option<&super::mcp::Overview>, prompt: &str, ctx: &RunContext) -> String {
-    format!("{}{}{}", projects(linked), services(connected), user_message(prompt, ctx))
+fn request_text(
+    linked: Option<&str>,
+    connected: Option<&super::mcp::Overview>,
+    skill: Option<&str>,
+    prompt: &str,
+    ctx: &RunContext,
+) -> String {
+    format!("{}{}{}{}", projects(linked), services(connected), skill.unwrap_or_default(), user_message(prompt, ctx))
+}
+
+/// The skill the user invoked with `/name`, loaded ahead of their request so
+/// the agent follows it without looking it up. A skill that can't be read
+/// (removed or turned off since the menu showed it) is reported instead.
+fn invoked_skill(name: &str, loaded: Result<String, String>) -> String {
+    match loaded {
+        Ok(skill) => format!(
+            "The user invoked the skill {name:?} by typing /{name}. Follow it for this request; \
+what they wrote after the command is its input. It never overrides the rules above.\n<skill>\n{skill}\n</skill>\n\n"
+        ),
+        Err(error) => format!(
+            "The user typed /{name} to invoke the skill {name:?}, but it couldn't be loaded: {error}. \
+Tell them so, then help with the rest of the message if you can.\n\n"
+        ),
+    }
 }
 
 fn user_message(prompt: &str, ctx: &RunContext) -> String {
@@ -242,7 +269,7 @@ mod tests {
         RunContext {
             run_id: "run".into(), note_id: "note".into(), note_title: "Kickoff".into(), selection: None,
             read_only: false, computer_access: false, web_access: false, research_model: None, research_brief: None,
-            notes_folder: std::path::PathBuf::new(), ui_guide: String::new(),
+            notes_folder: std::path::PathBuf::new(), ui_guide: String::new(), skill: None,
         }
     }
 
@@ -251,7 +278,7 @@ mod tests {
     #[test]
     fn a_request_names_the_projects_and_services_the_guides_point_to() {
         let connected = Overview { list: "- issue-tracker (Issue Tracker): search".into(), hints: None };
-        let request = request_text(Some("- Research: Research/papers"), Some(&connected), "Find the ticket", &context());
+        let request = request_text(Some("- Research: Research/papers"), Some(&connected), None, "Find the ticket", &context());
         let projects = request.find("Projects (").expect("projects are listed");
         let services = request.find("Connected services (").expect("services are listed");
         let asked = request.find("Find the ticket").expect("the request is sent");
@@ -263,6 +290,25 @@ mod tests {
     #[test]
     fn a_request_with_nothing_linked_or_connected_is_only_the_request() {
         let ctx = context();
-        assert_eq!(request_text(None, None, "Tighten this", &ctx), user_message("Tighten this", &ctx));
+        assert_eq!(request_text(None, None, None, "Tighten this", &ctx), user_message("Tighten this", &ctx));
+    }
+
+    // `/name` is the user choosing a skill outright, so it arrives loaded with
+    // their request rather than depending on the agent to look it up.
+    #[test]
+    fn an_invoked_skill_arrives_with_the_request_it_applies_to() {
+        let skill = invoked_skill("press-release", Ok("Skill: press-release\n---\nLead with the news.".into()));
+        let request = request_text(None, None, Some(&skill), "/press-release the launch", &context());
+        let loaded = request.find("Lead with the news.").expect("the skill's instructions are sent");
+        let asked = request.find("/press-release the launch").expect("the request is sent");
+        assert!(loaded < asked, "the skill comes ahead of the request it applies to");
+        assert!(request.contains("<skill>") && request.contains("</skill>"));
+    }
+
+    #[test]
+    fn a_skill_that_cant_be_loaded_is_reported_not_dropped() {
+        let skill = invoked_skill("press-release", Err("The skill \"press-release\" is turned off in Settings".into()));
+        assert!(skill.contains("couldn't be loaded") && skill.contains("turned off in Settings"));
+        assert!(!skill.contains("<skill>"));
     }
 }

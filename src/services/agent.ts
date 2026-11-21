@@ -64,6 +64,8 @@ export interface StartRunRequest {
   researchModel: string | null;
   /** The user's brief for the research role; null uses the built-in one. */
   researchBrief: string | null;
+  /** The skill the user invoked with `/name`, loaded into the request. */
+  skill?: string;
   context: RunContext;
 }
 export type AgentErrorKind = "auth" | "usage_limit" | "not_eligible" | "other";

@@ -4,6 +4,7 @@ import { AntigravitySignIn } from "./AntigravitySignIn";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useMemo,
@@ -19,6 +20,9 @@ import {
   type QuestionAnswer,
 } from "../../context/AgentContext";
 import { useAgentDocument } from "../../context/AgentDocumentContext";
+import { useSkills } from "../../context/SkillsContext";
+import { completeSkill, invokedSkill, matchSkills, skillQuery } from "../../lib/agent/skillCommand";
+import { SkillMenu, skillOptionId } from "./SkillMenu";
 import {
   activeFocusRange,
   attachedRange,
@@ -171,6 +175,14 @@ export function AgentPanel({
   const [reviewIndex, setReviewIndex] = useState(-1);
   const [sending, setSending] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerBox = useRef<HTMLDivElement>(null);
+  // The `/` skill menu: where the caret is, which row is highlighted, and
+  // whether Escape closed it until the writer types again.
+  const [caret, setCaret] = useState(0);
+  const [skillIndex, setSkillIndex] = useState(0);
+  const [skillMenuClosed, setSkillMenuClosed] = useState(false);
+  const skillListId = useId();
+  const { skills } = useSkills();
   const scroll = useRef<HTMLDivElement>(null);
   const status = agent.status;
   const conversation = agent.conversation;
@@ -309,6 +321,29 @@ export function AgentPanel({
   // While the agent works on a request, a message redirects it instead of waiting its turn.
   const steering = running && !agent.companionChecking && !waiting;
   const sendLabel = pendingQuestion ? "Send answer" : steering ? "Steer agent" : "Send message";
+  // A skill starts a request, so answers and steering stay plain text.
+  const offersSkills = visible && !!currentNote && !pendingQuestion && !steering && skills !== null;
+  const typedSkill = offersSkills && !skillMenuClosed ? skillQuery(draft, caret) : null;
+  const skillMatches = useMemo(
+    () => (typedSkill === null || !skills ? [] : matchSkills(skills, typedSkill)),
+    [skills, typedSkill],
+  );
+  const skillMenuOpen = typedSkill !== null;
+  const highlightedSkill = Math.min(skillIndex, Math.max(0, skillMatches.length - 1));
+  const invoked = offersSkills ? invokedSkill(draft, skills) : null;
+  const setDraft = (text: string) => {
+    if (currentNote) setDrafts((previous) => ({ ...previous, [currentNote.id]: text }));
+  };
+  const pickSkill = (name: string) => {
+    const next = completeSkill(draft, name);
+    setDraft(next.text);
+    setCaret(next.caret);
+    // The value lands on the next render; put the caret after the command then.
+    requestAnimationFrame(() => {
+      composer.current?.focus({ preventScroll: true });
+      composer.current?.setSelectionRange(next.caret, next.caret);
+    });
+  };
   const answer = useCallback(
     (value: QuestionAnswer) => {
       void answerQuestion(value);
@@ -331,16 +366,21 @@ export function AgentPanel({
       return;
     }
     const text = draft;
+    const skill = invoked;
     setDrafts((previous) => ({ ...previous, [id]: "" }));
     // A background writing check gives way to a message; any other run is steered by it.
     if (steering) {
       if (!(await agent.steer(text))) setDrafts((previous) => ({ ...previous, [id]: previous[id] || text }));
       return;
     }
-    await deliver(text, () => setDrafts((previous) => ({ ...previous, [id]: previous[id] || text })));
+    await deliver(text, () => setDrafts((previous) => ({ ...previous, [id]: previous[id] || text })), skill);
   };
-  /** Route and send one message; `restore` puts it back if it never left. */
-  const deliver = async (text: string, restore: () => void) => {
+  /**
+   * Route and send one message; `restore` puts it back if it never left. A
+   * message invoking a skill skips routing: the skill, not the classifier,
+   * says what kind of work it is, and it runs on the model the writer chose.
+   */
+  const deliver = async (text: string, restore: () => void, skill: string | null = null) => {
     const editor = agent.editor;
     setSending(true);
     try {
@@ -350,7 +390,7 @@ export function AgentPanel({
       }
       const session = editor.storage.scratchDocument.session;
       agent.prepareCompanionMessage();
-      const decision = codexReady && !usingAntigravity
+      const decision = codexReady && !usingAntigravity && !skill
         ? await routeMessage(editor, text, conversation.items)
         : null;
       // The note changed while routing: this message was never meant for the new one.
@@ -359,7 +399,7 @@ export function AgentPanel({
         return;
       }
       const sent = await agent.send(inlineAgentPrompt(editor, text, confidentIntent(decision)), undefined, "coedit",
-        { route: decision?.route, openRequest: leavesRequestOpen(decision) });
+        { route: decision?.route, openRequest: leavesRequestOpen(decision), ...(skill ? { skill } : {}) });
       if (!sent) restore();
     } finally {
       setSending(false);
@@ -786,11 +826,30 @@ export function AgentPanel({
               ))}
             </div>
           )}
-          <div className="agent-panel-input-wrap">
+          <div ref={composerBox} className="agent-panel-input-wrap">
+            {typedSkill !== null && (
+              <SkillMenu
+                anchor={composerBox.current}
+                id={skillListId}
+                skills={skillMatches}
+                query={typedSkill}
+                active={highlightedSkill}
+                empty={skills?.some((skill) => skill.enabled)
+                  ? `No skill matches /${typedSkill}`
+                  : "No skills are on. Add or turn one on in Settings → Skills."}
+                onHighlight={setSkillIndex}
+                onPick={pickSkill}
+              />
+            )}
             <textarea
               ref={composer}
               rows={3}
               aria-label="Message agent"
+              aria-haspopup="listbox"
+              aria-autocomplete="list"
+              aria-controls={skillMenuOpen ? skillListId : undefined}
+              aria-activedescendant={skillMenuOpen && skillMatches.length
+                ? skillOptionId(skillListId, highlightedSkill) : undefined}
               placeholder={
                 pendingQuestion
                   ? "Type your answer…"
@@ -801,13 +860,35 @@ export function AgentPanel({
               value={draft}
               readOnly={!currentNote}
               onChange={(event) => {
-                if (currentNote)
-                  setDrafts((previous) => ({
-                    ...previous,
-                    [currentNote.id]: event.target.value,
-                  }));
+                setDraft(event.target.value);
+                setCaret(event.target.selectionStart);
+                setSkillIndex(0);
+                setSkillMenuClosed(false);
               }}
+              onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+              onBlur={() => setSkillMenuClosed(true)}
               onKeyDown={(event) => {
+                if (skillMenuOpen && !event.nativeEvent.isComposing) {
+                  const count = skillMatches.length;
+                  if ((event.key === "ArrowDown" || event.key === "ArrowUp") && count) {
+                    event.preventDefault();
+                    setSkillIndex((highlightedSkill + (event.key === "ArrowDown" ? 1 : -1) + count) % count);
+                    return;
+                  }
+                  const name = count ? skillMatches[highlightedSkill].name : null;
+                  // Enter on a name typed in full sends it; otherwise Tab and Enter complete it.
+                  if (name && !event.shiftKey && (event.key === "Tab" || (event.key === "Enter" && name !== typedSkill))) {
+                    event.preventDefault();
+                    pickSkill(name);
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setSkillMenuClosed(true);
+                    return;
+                  }
+                }
                 if (event.key === "Escape") {
                   event.preventDefault();
                   event.stopPropagation();
@@ -825,7 +906,11 @@ export function AgentPanel({
             />
             <div className="flex items-center justify-between gap-2 px-2.5 pb-2">
               <span className="min-w-0 text-[10px] text-text-muted">
-                {pendingQuestion
+                {skillMenuOpen && skillMatches.length
+                  ? "↑↓ to choose · Tab to complete · Esc to close"
+                  : invoked
+                  ? `Enter to run /${invoked} · ⇧ Enter for newline`
+                  : pendingQuestion
                   ? "Enter to answer · ⇧ Enter for newline"
                   : steering
                     ? draft.trim()

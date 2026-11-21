@@ -53,6 +53,9 @@ vi.mock("../services/agent", async (importOriginal) => ({
     return Promise.resolve(() => {});
   }),
 }));
+vi.mock("./SkillsContext", () => ({
+  useSkills: () => ({ skills: [] }),
+}));
 vi.mock("./McpContext", () => ({
   useMcp: () => ({ servers: [], error: null, refresh: vi.fn() }),
 }));

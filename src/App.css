@@ -1525,6 +1525,19 @@ table.not-prose th {
 .agent-panel-input-wrap textarea { display: block; width: 100%; min-height: 72px; max-height: 180px; resize: vertical; padding: 12px; font-size: 12px; line-height: 1.6; background: transparent; outline: none; }
 .agent-panel-input-wrap textarea::placeholder { color: var(--color-text-muted); }
 .agent-panel-input-wrap textarea:is(:disabled, :read-only) { opacity: .55; cursor: not-allowed; }
+.agent-skill-menu { z-index: 60; display: flex; flex-direction: column; overflow: hidden; background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 10px; box-shadow: 0 8px 24px rgb(0 0 0 / .12); opacity: 0; }
+.agent-skill-menu[data-positioned] { opacity: 1; animation: agent-skill-menu-in 120ms ease-out; }
+.agent-skill-menu[data-side="bottom"] { --agent-skill-menu-from: -4px; }
+@keyframes agent-skill-menu-in { from { opacity: 0; transform: translateY(var(--agent-skill-menu-from, 4px)); } }
+.agent-skill-menu-label { flex-shrink: 0; padding: 8px 12px 2px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--color-text-muted); }
+.agent-skill-menu-list { min-height: 0; overflow-y: auto; padding: 4px; }
+.agent-skill-menu-item { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.agent-skill-menu-item[aria-selected="true"] { background: var(--color-bg-muted); }
+.agent-skill-menu-name { font-family: var(--font-mono); font-size: 12px; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-skill-menu-name mark { background: none; color: inherit; font-weight: 650; }
+.agent-skill-menu-description { font-size: 11px; line-height: 1.45; color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-skill-menu-empty { padding: 6px 8px 8px; font-size: 12px; color: var(--color-text-muted); }
+@media (prefers-reduced-motion: reduce) { .agent-skill-menu[data-positioned] { animation: none; } }
 .agent-panel-link { font-size: inherit; color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; transition: opacity 150ms; }
 .agent-panel-link:hover { opacity: .65; }
 .agent-panel-link-quiet { font-size: 11px; color: var(--color-text-muted); }

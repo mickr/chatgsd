@@ -45,6 +45,8 @@ pub struct RunContext {
     pub notes_folder: PathBuf,
     /// Scratch UI block guide from the frontend, generated from its component catalog.
     pub ui_guide: String,
+    /// The skill the user invoked with `/name`, loaded into their request.
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +126,8 @@ pub struct StartRunRequest {
     web_access: bool,
     research_model: Option<String>,
     research_brief: Option<String>,
+    #[serde(default)]
+    skill: Option<String>,
     context: RequestContext,
 }
 #[derive(Serialize)]
@@ -241,6 +245,10 @@ pub async fn agent_start_run(
             .map(|brief| brief.trim().chars().take(prompt::MAX_BRIEF_CHARS).collect::<String>())
             .filter(|brief| !brief.is_empty()),
         ui_guide: request.ui_guide,
+        skill: request
+            .skill
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty() && !request.read_only),
         notes_folder,
     };
     let task_ctx = ctx.clone();
