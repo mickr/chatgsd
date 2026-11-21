@@ -9,9 +9,9 @@ const MAX_SITES: usize = 6;
 const MAX_STEPS: usize = 80;
 const COMPANION_MAX_STEPS: usize = 6;
 
-pub(super) struct ResearchResult {
-    pub output: ToolOutput,
-    pub sources: Vec<String>,
+struct ResearchResult {
+    output: ToolOutput,
+    sources: Vec<String>,
 }
 impl ResearchResult {
     fn error(message: impl Into<String>) -> Self {
@@ -31,9 +31,36 @@ fn record_source(sources: &mut Vec<String>, address: &str) {
     }
 }
 
+/// One run's use of the research role, the same whichever engine holds the
+/// conversation: a check-in gets one request, and an evidence card may cite
+/// only pages research opened in this run.
+#[derive(Default)]
+pub(in crate::agent) struct Research {
+    asked: bool,
+    opened: Vec<String>,
+}
+
+impl Research {
+    /// Runs one `research` call. `model` is a Codex model, or `None` for the account's default.
+    pub async fn ask(&mut self, app: &tauri::AppHandle, ctx: &RunContext, model: Option<&str>, call_id: &str, args: &Value) -> Result<ToolOutput, AgentError> {
+        if ctx.read_only && self.asked {
+            return Ok(ToolOutput::error("Background writing help permits one focused research request."));
+        }
+        self.asked = true;
+        let result = run(app, ctx, model, call_id, args).await?;
+        self.opened.extend(result.sources);
+        Ok(result.output)
+    }
+
+    /// Whether an `offer_writing_help` call may be shown as it stands.
+    pub fn admits(&self, offer: &Value) -> Result<(), String> {
+        validate_evidence_sources(offer, &self.opened)
+    }
+}
+
 /// An evidence card can only link to pages opened successfully in this run.
 /// A model-authored summary is still a claim to assess, not proof of support.
-pub(super) fn validate_evidence_sources(args: &Value, opened: &[String]) -> Result<(), String> {
+fn validate_evidence_sources(args: &Value, opened: &[String]) -> Result<(), String> {
     if args["kind"] != "evidence" { return Ok(()); }
     let sources = args["sources"].as_array().filter(|items| (1..=3).contains(&items.len()))
         .ok_or("Evidence needs one to three sources opened by research in this run.")?;
@@ -79,7 +106,7 @@ async fn published_skills(app: &tauri::AppHandle, sites: &[Url]) -> String {
     format!("\n\nSkills published by consulted sites. If relevant, call offer_skill with the URL; the user decides whether to install:\n{}", lines.join("\n"))
 }
 
-pub(super) async fn run(app: &tauri::AppHandle, ctx: &RunContext, model: Option<&str>, call_id: &str, args: &Value) -> Result<ResearchResult, AgentError> {
+async fn run(app: &tauri::AppHandle, ctx: &RunContext, model: Option<&str>, call_id: &str, args: &Value) -> Result<ResearchResult, AgentError> {
     if !ctx.web_access { return Ok(ResearchResult::error("Internet access is off for this message")); }
     let Some(question) = args["question"].as_str().map(str::trim).filter(|question| !question.is_empty()) else {
         return Ok(ResearchResult::error("question must be a nonempty string"));

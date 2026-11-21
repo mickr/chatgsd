@@ -2,6 +2,7 @@
 //! tracked TipTap editor and workspace tools.
 
 use crate::agent::{
+    codex::Research,
     events::{self, AgentEvent},
     tools, RunContext,
 };
@@ -10,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HEADER_LINES: usize = 64;
@@ -23,6 +24,8 @@ pub(super) struct ActiveMcpRun {
     pub account: String,
     pub permitted: HashSet<String>,
     pub tools: Vec<Value>,
+    /// Shared by the copies of this run, so its research limits hold across calls.
+    pub research: Arc<Mutex<Research>>,
 }
 
 pub(super) struct McpServer {
@@ -89,8 +92,11 @@ impl Drop for McpServer {
     }
 }
 
-pub(super) fn mcp_tool_list(read_only: bool) -> (Vec<Value>, HashSet<String>) {
-    let specs = tools::catalog(false, read_only);
+/// The tools for one run. A session keeps the list it started with, so a
+/// conversation always lists the web tools and each call checks whether the
+/// message has internet access; a check-in lists them only when it has.
+pub(super) fn mcp_tool_list(read_only: bool, web_access: bool) -> (Vec<Value>, HashSet<String>) {
+    let specs = tools::catalog(!read_only || web_access, read_only);
     let mut permitted = HashSet::with_capacity(specs.len());
     let mut list = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -228,7 +234,7 @@ async fn dispatch_rpc(
                 let guard = active.read().await;
                 match guard.as_ref() {
                     Some(run) => run.tools.clone(),
-                    None => mcp_tool_list(default_read_only).0,
+                    None => mcp_tool_list(default_read_only, false).0,
                 }
             };
             json!({ "tools": tools })
@@ -272,6 +278,24 @@ async fn dispatch_rpc(
                     Ok(text) => (true, text),
                     Err(error) => (false, error),
                 }
+            } else if name == "research" {
+                // The research role runs on Codex whichever model holds the conversation.
+                // A failure, signing in with ChatGPT included, goes back as the tool's result.
+                let model = run.ctx.research_model.as_deref().filter(|model| !super::is_model(Some(model)));
+                match run.research.lock().await.ask(&run.app, &run.ctx, model, &call_id, &args).await {
+                    Ok(out) => (out.ok, out.text),
+                    Err(error) => (false, error.message),
+                }
+            } else if name == "offer_writing_help" {
+                // Waits out a research call still running: the pages it opens decide what may be cited.
+                let admitted = run.research.lock().await.admits(&args);
+                match admitted {
+                    Ok(()) => {
+                        let out = tools::execute(&run.app, &run.ctx.run_id, name, args).await;
+                        (out.ok, out.text)
+                    }
+                    Err(refusal) => (false, refusal),
+                }
             } else {
                 let out = tools::execute(&run.app, &run.ctx.run_id, name, args).await;
                 (out.ok, out.text)
@@ -310,6 +334,20 @@ mod tests {
             "new_text": "Crisper prose.",
         }));
         assert_eq!(cleaned, json!({ "new_text": "Crisper prose." }));
+    }
+
+    // The instructions tell the agent to call research and the connected-service
+    // tools; a session that doesn't list them leaves it unable to follow them.
+    #[test]
+    fn a_conversation_lists_the_web_and_service_tools_its_instructions_name() {
+        let listed = |read_only, web_access| mcp_tool_list(read_only, web_access).1;
+        let conversation = listed(false, false);
+        for name in ["research", "offer_skill", "mcp_tools", "mcp_call", "list_projects", "search_projects"] {
+            assert!(conversation.contains(name), "{name} is listed whether or not this message has internet access");
+        }
+        assert!(listed(true, true).contains("research"));
+        assert!(!listed(true, false).contains("research"), "a check-in without internet access can't research");
+        assert!(!listed(true, true).contains("mcp_call"), "a check-in never reaches connected services");
     }
 
     #[tokio::test]

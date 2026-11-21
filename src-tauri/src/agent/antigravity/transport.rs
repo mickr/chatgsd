@@ -20,9 +20,8 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const BASE_BRIDGE_RULES: &str = "\
 Runtime bridge rules:
 - You are connected to ChatGSD through the `scratch` MCP server.
-- Use ONLY the `mcp_scratch_*` tools (`read_document`, `edit_document`, `replace_selection`, \
-`offer_writing_help`, `set_expression`, `ask_user`, `remember_work`, `search_notes`, \
-`list_notes`, `read_notes`, `find_in_note`, `edit_note`, `note_links`, `read_skill`).
+- Use ONLY the `mcp_scratch_*` tools. Every tool your instructions name is one of them under \
+that prefix: `mcp_tools` is `mcp_scratch_mcp_tools`.
 - Never call built-in shell, terminal, browser, or filesystem tools; the workspace folder is \
 intentionally empty and every note lives inside ChatGSD's tracked editor tools.
 - Every turn already includes the live open note snapshot inside `<live_note>` (identical to \
