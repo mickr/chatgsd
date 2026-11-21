@@ -218,7 +218,7 @@ struct Tree {
     skills: Vec<(String, Result<String, String>)>,
     files: Vec<(String, String)>,
     read: u64,
-    taken: TakenNames,
+    count: usize,
 }
 
 impl Tree {
@@ -231,16 +231,14 @@ impl Tree {
         if name.split('/').any(|part| PRUNED.contains(&part)) {
             return Ok(());
         }
-        if !self.taken.take(&name) {
-            return Err(COLLIDES.into());
-        }
         let mut bytes = Vec::new();
         reader
             .take(MAX_BUNDLED_FILE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| "One of the files here couldn't be read".to_owned())?;
         self.read += bytes.len() as u64;
-        if self.read > MAX_INFLATED_BYTES || self.taken.0.len() > MAX_TREE_FILES {
+        self.count += 1;
+        if self.read > MAX_INFLATED_BYTES || self.count > MAX_TREE_FILES {
             return Err(TOO_MUCH.into());
         }
         let text = (bytes.len() as u64 <= MAX_BUNDLED_FILE_BYTES)
@@ -284,6 +282,12 @@ impl Tree {
                 }
             }
         }
+        // Only a skill's own files land in its folder, so only they can overwrite each other.
+        let collides = |files: &[(String, String)]| {
+            let mut taken = TakenNames::default();
+            taken.take("SKILL.md");
+            !files.iter().all(|(path, _)| taken.take(path))
+        };
         let mut found = Found::default();
         let mut names = HashSet::new();
         for ((folder, content), mut files) in skills.into_iter().zip(beside) {
@@ -292,6 +296,9 @@ impl Tree {
                 let bytes: u64 = files.iter().map(|(_, text)| text.len() as u64).sum();
                 if files.len() > MAX_BUNDLED_FILES || bytes > MAX_BUNDLED_BYTES {
                     return Err("It comes with more files than ChatGSD keeps for one skill".into());
+                }
+                if collides(&files) {
+                    return Err(COLLIDES.into());
                 }
                 if !names.insert(parsed.name.clone()) {
                     return Err(format!("Another skill here is also named {}", parsed.name));
@@ -461,7 +468,14 @@ struct Meta {
     enabled: bool,
     /// `sha256:<hex>` of what was saved: see `digest_of`.
     digest: Option<String>,
+    /// Which rule `digest` follows. Absent on skills saved when an archive's
+    /// digest was that of its bytes; `load` recomputes those once.
+    #[serde(default)]
+    digest_version: u8,
 }
+
+/// `Meta::digest` is `digest_of` what was saved.
+const DIGEST_VERSION: u8 = 2;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -590,13 +604,16 @@ async fn load(root: &Path, name: &str) -> Result<Skill, String> {
             installed_at: 0,
             enabled: true,
             digest: None,
+            digest_version: DIGEST_VERSION,
         },
         Err(error) => return Err(format!("Couldn't read the skill's settings: {error}")),
     };
-    let files = tauri::async_runtime::spawn_blocking(move || bundled_files(&folder))
+    let walked = folder.clone();
+    let files = tauri::async_runtime::spawn_blocking(move || bundled_files(&walked))
         .await
         .unwrap_or_default();
-    Ok(Skill {
+    let outdated = meta.digest.is_some() && meta.digest_version != DIGEST_VERSION;
+    let mut skill = Skill {
         name: name.to_owned(),
         description: parsed.description,
         source: meta.source,
@@ -605,7 +622,26 @@ async fn load(root: &Path, name: &str) -> Result<Skill, String> {
         content,
         files,
         digest: meta.digest,
-    })
+    };
+    if outdated {
+        // Left as it is when a file can't be read: the next load tries again.
+        if let Some(digest) = saved_digest(&folder, &skill).await {
+            skill.digest = Some(digest);
+            if let Err(error) = save_meta(&folder, &skill).await {
+                eprintln!("Couldn't update the saved digest of {name}: {error}");
+            }
+        }
+    }
+    Ok(skill)
+}
+
+/// `digest_of` a saved skill, read back from its folder.
+async fn saved_digest(folder: &Path, skill: &Skill) -> Option<String> {
+    let mut files = Vec::with_capacity(skill.files.len());
+    for path in &skill.files {
+        files.push((path.clone(), tokio::fs::read_to_string(folder.join(path)).await.ok()?));
+    }
+    Some(digest_of(&skill.content, &files))
 }
 
 async fn save_meta(folder: &Path, skill: &Skill) -> Result<(), String> {
@@ -614,6 +650,7 @@ async fn save_meta(folder: &Path, skill: &Skill) -> Result<(), String> {
         installed_at: skill.installed_at,
         enabled: skill.enabled,
         digest: skill.digest.clone(),
+        digest_version: DIGEST_VERSION,
     };
     let bytes = serde_json::to_vec_pretty(&meta).map_err(|error| error.to_string())?;
     tokio::fs::write(folder.join(META_FILE), bytes)
@@ -1028,9 +1065,7 @@ async fn fetch_file(
         ));
     }
     if !published.is_empty() && !published.contains(&sha256(&fetched.bytes)) {
-        return Err(
-            "This skill doesn't match the digest its site published, so it wasn't offered".into(),
-        );
+        return Err(MISMATCH.into());
     }
     let archive = is_archive(&fetched.bytes);
     let found = tauri::async_runtime::spawn_blocking(move || {
@@ -1045,6 +1080,24 @@ async fn fetch_file(
     .map_err(|_| "This skill couldn't be read".to_owned())?
     .map_err(|error| format!("{url} isn't a skill: {error}"))?;
     Ok(Fetched { source: listed, found, archive })
+}
+
+const MISMATCH: &str = "This skill doesn't match the digest its site published, so it wasn't offered";
+const UNCHECKABLE: &str =
+    "This skill was listed with a digest that can't be checked against skills.sh, so it wasn't offered";
+
+/// The digests a download must match when the page that listed it and the site
+/// that keeps it may each have published some: those both accept. None when
+/// they published digests and agree on none.
+fn both_published(listed: &[String], kept: &[String]) -> Option<Vec<String>> {
+    match (listed.is_empty(), kept.is_empty()) {
+        (true, _) => Some(kept.to_vec()),
+        (_, true) => Some(listed.to_vec()),
+        _ => {
+            let shared: Vec<String> = listed.iter().filter(|digest| kept.contains(digest)).cloned().collect();
+            (!shared.is_empty()).then_some(shared)
+        }
+    }
 }
 
 /// The skill skills.sh serves from `download`, as offered from its `page`.
@@ -1081,6 +1134,8 @@ async fn fetch_snapshot(
 async fn fetch(fetcher: web::Fetcher, address: &str, published: &[String]) -> Result<Fetched, String> {
     let listed = web::http_url(address)?;
     match skills_sh::home(&listed) {
+        // A snapshot arrives as separate files, so there are no bytes a published digest could cover.
+        Some(skills_sh::Home::Snapshot(_)) if !published.is_empty() => Err(UNCHECKABLE.into()),
         Some(skills_sh::Home::Snapshot(download)) => fetch_snapshot(fetcher, listed, &download).await,
         // Such a skill is kept by its own site, which may publish a digest for it.
         Some(skills_sh::Home::Site { domain, name }) => {
@@ -1090,7 +1145,8 @@ async fn fetch(fetcher: web::Fetcher, address: &str, published: &[String]) -> Re
                 .iter()
                 .find(|entry| entry.name == name)
                 .ok_or_else(|| format!("{domain} doesn't list a skill named {name}"))?;
-            fetch_file(fetcher, web::http_url(&entry.url)?, entry.digest.as_slice()).await
+            let digests = both_published(published, entry.digest.as_slice()).ok_or(MISMATCH)?;
+            fetch_file(fetcher, web::http_url(&entry.url)?, &digests).await
         }
         None => fetch_file(fetcher, listed, published).await,
     }
@@ -1632,6 +1688,74 @@ mod tests {
             offer.content,
             "what is stored is what the offer showed"
         );
+    }
+
+    #[test]
+    fn names_differing_by_case_refuse_only_the_skill_that_holds_them() {
+        let (rail, ferry) = (named("rail"), named("ferry"));
+        // A repository's own files are no part of any skill in it.
+        let unrelated = zip(&[
+            ("skills/rail/SKILL.md", rail.as_bytes()),
+            ("skills/ferry/SKILL.md", ferry.as_bytes()),
+            ("docs/README.md", b"one"),
+            ("docs/readme.md", b"two"),
+        ]);
+        let found = unpack(&unrelated).unwrap();
+        assert_eq!(found.skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(), ["ferry", "rail"]);
+        assert!(found.skipped.is_empty());
+
+        let one_bad = zip(&[
+            ("skills/rail/SKILL.md", rail.as_bytes()),
+            ("skills/rail/notes/Fares.md", b"one"),
+            ("skills/rail/notes/fares.md", b"two"),
+            ("skills/ferry/SKILL.md", ferry.as_bytes()),
+        ]);
+        let found = unpack(&one_bad).unwrap();
+        assert_eq!(found.skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>(), ["ferry"]);
+        assert_eq!(found.skipped, [format!("skills/rail: {COLLIDES}")]);
+    }
+
+    #[tokio::test]
+    async fn a_skill_saved_under_the_archive_digest_still_reads_as_installed() {
+        let store = Store::new();
+        let files = [("references/rail.md".to_owned(), "# Rail\n".to_owned())];
+        let saved = install_in(&store.0, SKILL, None, &files).await.unwrap();
+        let current = saved.digest.clone().unwrap();
+        // What the previous build wrote: the digest of the archive's bytes, and no version.
+        let meta = store.0.join("trip-planning").join(META_FILE);
+        std::fs::write(
+            &meta,
+            r#"{"source":null,"installedAt":1,"enabled":false,"digest":"sha256:of-the-archive"}"#,
+        )
+        .unwrap();
+
+        let listed = list_in(&store.0).await.unwrap();
+        assert_eq!(listed[0].digest.as_deref(), Some(current.as_str()), "the same files are the same skill");
+        assert!(!listed[0].enabled, "nothing else about it changes");
+        let rewritten: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+        assert_eq!(rewritten["digest"], current.as_str(), "it is recomputed once, then stored");
+        assert_eq!(rewritten["digestVersion"], DIGEST_VERSION);
+
+        // A skill saved under the current rule keeps the digest it was saved with.
+        std::fs::write(store.0.join("trip-planning/references/rail.md"), "edited by hand").unwrap();
+        assert_eq!(list_in(&store.0).await.unwrap()[0].digest.as_deref(), Some(current.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_published_digest_is_checked_or_the_skill_is_not_offered() {
+        let digest = |value: &str| vec![value.to_owned()];
+        assert_eq!(both_published(&[], &digest("a")), Some(digest("a")));
+        assert_eq!(both_published(&digest("a"), &[]), Some(digest("a")));
+        assert_eq!(
+            both_published(&["a".to_owned(), "b".to_owned()], &["b".to_owned(), "c".to_owned()]),
+            Some(digest("b")),
+            "a download has to satisfy both publishers"
+        );
+        assert_eq!(both_published(&digest("a"), &digest("b")), None);
+
+        // skills.sh serves separate files, so the listed digest has nothing to be compared with.
+        let refused = fetch_offer(LOCAL, "https://skills.sh/acme/skills/rail", &digest("sha256:listed")).await;
+        assert_eq!(refused.err().unwrap(), UNCHECKABLE);
     }
 
     #[tokio::test]

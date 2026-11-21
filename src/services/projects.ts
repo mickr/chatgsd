@@ -1,6 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+export type RemoteSyncStatus =
+  | "idle"
+  | "syncing"
+  | "synced"
+  | "needs_auth"
+  | "conflict"
+  | "error";
+
+/** Sync state for a project folder backed by a WebDAV server. */
+export interface RemoteFolder {
+  id: string;
+  url: string;
+  status: RemoteSyncStatus;
+  detail: string | null;
+  lastSynced: number | null;
+}
+
 /** A folder linked into a project from anywhere on this Mac. */
 export interface ProjectFolder {
   /** Names the folder in file IDs; unique within its project. */
@@ -8,6 +25,8 @@ export interface ProjectFolder {
   path: string;
   /** Moved, deleted, or on a disconnected drive. */
   missing: boolean;
+  /** Present when this folder mirrors a remote WebDAV source. */
+  remote?: RemoteFolder;
 }
 /** A named collection of linked folders. */
 export interface Project {
@@ -38,6 +57,12 @@ export const renameProject = (id: string, name: string) =>
 export const removeProject = (id: string) => invoke<void>("projects_remove", { id });
 export const addFolder = (id: string, path: string) =>
   invoke<void>("projects_add_folder", { id, path });
+export const addWebDavFolder = (id: string, url: string, label?: string) =>
+  invoke<void>("projects_add_webdav_folder", { id, url, label: label ?? null });
+export const syncWebDavFolder = (id: string, label: string) =>
+  invoke<void>("projects_sync_webdav_folder", { id, label });
+export const authorizeWebDavFolder = (id: string, label: string) =>
+  invoke<void>("projects_authorize_webdav_folder", { id, label });
 export const removeFolder = (id: string, label: string) =>
   invoke<void>("projects_remove_folder", { id, label });
 export const folderFiles = (id: string, label: string) =>

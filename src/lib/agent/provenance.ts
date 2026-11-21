@@ -286,13 +286,29 @@ function stemToken(token: string): string {
   return token;
 }
 
+/** Scripts written without spaces between words, where a run of letters is a clause and not a word. */
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+const wordSegmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "word" }) : null;
+const MIN_TERM_CHARS = 3;
+/** Words in those scripts are short: two characters already carry a meaning. */
+const MIN_UNSPACED_TERM_CHARS = 2;
+
+/** Runs of letters and digits, with an unspaced run split into its words. */
+function wordsIn(text: string): string[] {
+  return (text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).flatMap(run => {
+    if (!wordSegmenter || !UNSPACED.test(run)) return [run];
+    return Array.from(wordSegmenter.segment(run)).filter(part => part.isWordLike).map(part => part.segment);
+  });
+}
+
 function contentTerms(text: string): Set<string> {
   const terms = new Set<string>();
   // Letters and digits of any script: a note in Russian or French has words to share too.
-  for (const raw of text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []) {
-    if (CLARIFY_STOPWORDS.has(raw)) continue;
+  for (const raw of wordsIn(text)) {
+    const shortest = UNSPACED.test(raw) ? MIN_UNSPACED_TERM_CHARS : MIN_TERM_CHARS;
+    if (raw.length < shortest || CLARIFY_STOPWORDS.has(raw)) continue;
     const stem = stemToken(raw);
-    if (!CLARIFY_STOPWORDS.has(stem) && stem.length >= 3) terms.add(stem);
+    if (!CLARIFY_STOPWORDS.has(stem) && stem.length >= shortest) terms.add(stem);
   }
   return terms;
 }
@@ -343,7 +359,10 @@ export function findPriorStepAnswer(
     const item = memory[idx];
     if (item.kind !== "choice" || !item.key.startsWith("meaning-") || !item.quote) continue;
     // The same passage can hold several assumptions: the saved meaning has to be about this one.
-    if (sameAnchoredPassage(item.quote, step.quote) && overlapCount(readingTerms, contentTerms(item.summary)) >= 1) {
+    // With no words to compare on either side, the passage is all there is to go on.
+    const summaryTerms = contentTerms(item.summary);
+    const aboutThis = !readingTerms.size || !summaryTerms.size || overlapCount(readingTerms, summaryTerms) >= 1;
+    if (sameAnchoredPassage(item.quote, step.quote) && aboutThis) {
       return {
         id: item.key,
         kind: "you",

@@ -18,6 +18,7 @@ pub mod skills;
 pub mod skills_sh;
 pub mod tools;
 mod web;
+pub mod webdav;
 mod workspace;
 use events::{emit, AgentEvent};
 use serde::{Deserialize, Serialize};

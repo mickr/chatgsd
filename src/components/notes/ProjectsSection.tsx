@@ -248,6 +248,17 @@ function TreeContents({ node, depth, scope, toggled, onToggle, onOpenFile }: Tre
 
 /** Where the folder lives and what it holds, under its name. */
 function folderDetail(folder: ProjectFolder, files: FolderFiles | undefined): string {
+  if (folder.remote) {
+    const { status, detail, lastSynced } = folder.remote;
+    if (status === "syncing") return detail ?? "Syncing…";
+    if (status === "needs_auth") return detail ?? "Sign-in needed";
+    if (status === "conflict") return detail ?? "Sync conflict";
+    if (status === "error") return detail ?? "Sync error";
+    const syncedPart = lastSynced ? `Synced ${formatDate(lastSynced)}` : "WebDAV";
+    if (!files) return `${syncedPart} · Reading…`;
+    if (!Array.isArray(files)) return `${syncedPart} · ${files.error}`;
+    return syncedPart;
+  }
   const place = shortPath(folder.path);
   if (folder.missing) return `Not found · ${place}`;
   if (!files) return `Reading… · ${place}`;
@@ -300,11 +311,33 @@ const LinkedFolder = memo(function LinkedFolder({
     );
   }, [folder.path]);
 
+  const handleSync = useCallback(() => {
+    projectsService
+      .syncWebDavFolder(project.id, folder.label)
+      .then(() => onRefresh(project, folder))
+      .catch((error) => toast.error(errorMessage(error)));
+  }, [folder, onRefresh, project]);
+
+  const handleAuthorize = useCallback(() => {
+    projectsService
+      .authorizeWebDavFolder(project.id, folder.label)
+      .then(() => {
+        onRefresh(project, folder);
+        toast.success(`Synced ${folder.label}`);
+      })
+      .catch((error) => toast.error(errorMessage(error)));
+  }, [folder, onRefresh, project]);
+
   const handleRemove = useCallback(() => {
     projectsService
       .removeFolder(project.id, folder.label)
       .catch((error) => toast.error(errorMessage(error)));
   }, [folder.label, project.id]);
+
+  const hasRemoteWarning =
+    folder.remote?.status === "needs_auth" ||
+    folder.remote?.status === "conflict" ||
+    folder.remote?.status === "error";
 
   return (
     <div className="flex flex-col gap-0.5">
@@ -314,7 +347,7 @@ const LinkedFolder = memo(function LinkedFolder({
             className={`${rowClass} items-start`}
             style={{ paddingLeft: "20px", paddingRight: "8px" }}
             onClick={handleToggle}
-            title={folder.path}
+            title={folder.remote ? folder.remote.url : folder.path}
             role="button"
             tabIndex={-1}
           >
@@ -332,7 +365,7 @@ const LinkedFolder = memo(function LinkedFolder({
                 )}
               </div>
               <div
-                className={`text-2xs truncate ${folder.missing ? "text-red-500" : "text-text-muted"}`}
+                className={`text-2xs truncate ${folder.missing || hasRemoteWarning ? "text-red-500" : "text-text-muted"}`}
               >
                 {folderDetail(folder, files)}
               </div>
@@ -341,6 +374,21 @@ const LinkedFolder = memo(function LinkedFolder({
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
           <ContextMenu.Content className={menuContentClass}>
+            {folder.remote && (
+              <>
+                <ContextMenu.Item className={menuItemClass} onSelect={handleSync}>
+                  <RefreshCwIcon className="w-4 h-4 stroke-[1.6]" />
+                  Sync now
+                </ContextMenu.Item>
+                {(folder.remote.status === "needs_auth" || folder.remote.status === "error") && (
+                  <ContextMenu.Item className={menuItemClass} onSelect={handleAuthorize}>
+                    <FolderPlusIcon className="w-4 h-4 stroke-[1.6]" />
+                    Sign in…
+                  </ContextMenu.Item>
+                )}
+                <ContextMenu.Separator className={menuSeparatorClass} />
+              </>
+            )}
             <ContextMenu.Item
               className={menuItemClass}
               onSelect={handleShow}
@@ -384,6 +432,7 @@ interface ProjectItemProps {
   toggled: Set<string>;
   onToggle: (key: string) => void;
   onAddFolders: (project: Project) => void;
+  onConnectWebDav: (project: Project) => void;
   onRename: (project: Project) => void;
   onRefresh: (project: Project, folder: ProjectFolder) => void;
 }
@@ -394,6 +443,7 @@ const ProjectItem = memo(function ProjectItem({
   toggled,
   onToggle,
   onAddFolders,
+  onConnectWebDav,
   onRename,
   onRefresh,
 }: ProjectItemProps) {
@@ -442,6 +492,13 @@ const ProjectItem = memo(function ProjectItem({
             >
               <FolderPlusIcon className="w-4 h-4 stroke-[1.6]" />
               Add Folders…
+            </ContextMenu.Item>
+            <ContextMenu.Item
+              className={menuItemClass}
+              onSelect={() => onConnectWebDav(project)}
+            >
+              <RefreshCwIcon className="w-4 h-4 stroke-[1.6]" />
+              Connect WebDAV Folder…
             </ContextMenu.Item>
             <ContextMenu.Item className={menuItemClass} onSelect={() => onRename(project)}>
               <PencilIcon className="w-4 h-4 stroke-[1.6]" />
@@ -497,7 +554,9 @@ export function ProjectsSection() {
   );
   const [height, setHeight] = useState(loadHeight);
   const [naming, setNaming] = useState<{ project: Project | null } | null>(null);
+  const [connectingWebDav, setConnectingWebDav] = useState<Project | null>(null);
   const requested = useRef(new Set<string>());
+  const lastSyncedRef = useRef<Record<string, number | null>>({});
 
   useEffect(() => {
     let disposed = false;
@@ -530,12 +589,24 @@ export function ProjectsSection() {
       .then((result) => setFiles((current) => ({ ...current, [key]: result })));
   }, []);
 
-  // Read each linked folder once, so its details show before it is opened.
+  // Read each linked folder once, and re-read WebDAV folders when a sync finishes.
   useEffect(() => {
     for (const project of projects ?? []) {
       for (const folder of project.folders) {
         const key = folderKey(project, folder);
-        if (folder.missing || requested.current.has(key)) continue;
+        if (folder.missing) continue;
+        const syncedAt = folder.remote?.lastSynced ?? null;
+        const syncUpdated =
+          folder.remote !== undefined &&
+          syncedAt !== null &&
+          lastSyncedRef.current[key] !== syncedAt;
+        if (syncUpdated) {
+          lastSyncedRef.current[key] = syncedAt;
+          requested.current.add(key);
+          readFolder(project, folder);
+          continue;
+        }
+        if (requested.current.has(key)) continue;
         requested.current.add(key);
         readFolder(project, folder);
       }
@@ -586,6 +657,25 @@ export function ProjectsSection() {
       toast.error(errorMessage(error));
     }
   }, []);
+
+  const handleConnectWebDav = useCallback((project: Project) => {
+    setConnectingWebDav(project);
+  }, []);
+
+  const handleWebDavSubmitted = useCallback(
+    async (url: string) => {
+      if (!connectingWebDav) return;
+      const project = connectingWebDav;
+      setConnectingWebDav(null);
+      try {
+        await projectsService.addWebDavFolder(project.id, url);
+        toast.success("WebDAV folder synced");
+      } catch (error) {
+        toast.error(errorMessage(error));
+      }
+    },
+    [connectingWebDav],
+  );
 
   const handleRename = useCallback((project: Project) => setNaming({ project }), []);
 
@@ -646,6 +736,7 @@ export function ProjectsSection() {
               toggled={toggled}
               onToggle={handleToggle}
               onAddFolders={handleAddFolders}
+              onConnectWebDav={handleConnectWebDav}
               onRename={handleRename}
               onRefresh={readFolder}
             />
@@ -665,6 +756,16 @@ export function ProjectsSection() {
         confirmLabel={naming?.project ? "Rename" : "Create"}
         defaultValue={naming?.project?.name ?? ""}
         placeholder="Project name"
+      />
+      <FolderNameDialog
+        open={connectingWebDav !== null}
+        onOpenChange={(open) => !open && setConnectingWebDav(null)}
+        onConfirm={handleWebDavSubmitted}
+        title="Connect WebDAV folder"
+        description="Enter a WebDAV folder URL (such as Engine Room's /dav/docs). If it uses OAuth, your browser will open to sign in."
+        confirmLabel="Connect"
+        defaultValue=""
+        placeholder="https://engineroom.athena.test/dav/docs"
       />
     </div>
   );

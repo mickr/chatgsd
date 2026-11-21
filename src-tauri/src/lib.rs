@@ -1950,11 +1950,21 @@ async fn read_file_direct(path: String) -> Result<FileContent, String> {
 }
 
 #[tauri::command]
-async fn save_file_direct(path: String, content: String, expected_hash: Option<String>) -> Result<SaveResult<FileContent>, String> {
+async fn save_file_direct(
+    app: AppHandle,
+    path: String,
+    content: String,
+    expected_hash: Option<String>,
+) -> Result<SaveResult<FileContent>, String> {
     let canonical = validate_preview_path(&path, true)?;
     if let Some(conflict) = checked_write(&canonical, &canonical, &content, expected_hash.as_deref()).await? {
         return Ok(SaveResult::Conflict { disk_content: conflict.content, disk_modified: conflict.modified });
     }
+
+    let push_path = canonical.clone();
+    tauri::async_runtime::spawn(async move {
+        agent::webdav::push_saved_file(app, push_path).await;
+    });
 
     let metadata = fs::metadata(&canonical)
         .await
@@ -3229,6 +3239,7 @@ pub fn run() {
 
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
+            agent::webdav::start_background_sync(app.handle().clone());
 
             // Normalize legacy/invalid saved paths (e.g. file:// URI from older builds)
             if let Some(saved_path) = app_config.notes_folder.clone() {
@@ -3423,6 +3434,9 @@ pub fn run() {
             agent::projects::projects_rename,
             agent::projects::projects_remove,
             agent::projects::projects_add_folder,
+            agent::projects::projects_add_webdav_folder,
+            agent::projects::projects_sync_webdav_folder,
+            agent::projects::projects_authorize_webdav_folder,
             agent::projects::projects_remove_folder,
             agent::projects::projects_folder_files,
             agent::projects::projects_open_file,

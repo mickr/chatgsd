@@ -5,7 +5,7 @@
 //! `list_projects`, `search_projects`, `read_notes` and `find_in_note`.
 //! Nothing here writes to a linked folder.
 
-use super::{tools::ToolOutput, workspace};
+use super::{tools::ToolOutput, webdav, workspace};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -33,6 +33,8 @@ static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub struct Folder {
     pub label: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<webdav::RemoteConfig>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +51,8 @@ pub struct FolderView {
     path: String,
     /// The folder was moved, deleted, or is on a disconnected drive.
     missing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<webdav::RemoteFolderView>,
 }
 
 #[derive(Clone, Serialize)]
@@ -71,6 +75,7 @@ fn views(projects: &[Project]) -> Vec<ProjectView> {
                     label: folder.label.clone(),
                     path: folder.path.clone(),
                     missing: !Path::new(&folder.path).is_dir(),
+                    remote: folder.remote.as_ref().map(webdav::view_for),
                 })
                 .collect(),
         })
@@ -202,11 +207,23 @@ pub async fn projects_rename(app: tauri::AppHandle, id: String, name: String) ->
 /// Forgets the project. Its folders and their files are left as they are.
 #[tauri::command]
 pub async fn projects_remove(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let mut removed_remotes = Vec::new();
     update(&app, |projects| {
+        if let Some(project) = projects.iter().find(|project| project.id == id) {
+            for folder in &project.folders {
+                if let Some(remote) = &folder.remote {
+                    removed_remotes.push(remote.id.clone());
+                }
+            }
+        }
         projects.retain(|project| project.id != id);
         Ok(())
     })
-    .await
+    .await?;
+    for remote_id in removed_remotes {
+        webdav::cleanup_remote(&app, &remote_id).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -224,20 +241,186 @@ pub async fn projects_add_folder(app: tauri::AppHandle, id: String, path: String
             return Err("This folder is already in the project".into());
         }
         let label = unique_label(&project.folders, &canonical);
-        project.folders.push(Folder { label, path });
+        project.folders.push(Folder {
+            label,
+            path,
+            remote: None,
+        });
         Ok(())
     })
     .await
 }
 
+fn unique_label_from_name(folders: &[Folder], raw_base: &str) -> String {
+    let base = raw_base
+        .trim()
+        .replace(['/', '\\'], "-")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>();
+    let base = if base.is_empty() {
+        "WebDAV".to_owned()
+    } else {
+        base
+    };
+    let taken = |label: &str| {
+        folders
+            .iter()
+            .any(|folder| folder.label.to_lowercase() == label.to_lowercase())
+    };
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|number| format!("{base}-{number}"))
+        .find(|label| !taken(label))
+        .expect("an unused number exists")
+}
+
+/// Connects a WebDAV folder (e.g. Engine Room's `/dav/docs`), mirrors it into
+/// a managed local folder inside the project, signs in via OAuth if required,
+/// and runs the initial pull.
+#[tauri::command]
+pub async fn projects_add_webdav_folder(
+    app: tauri::AppHandle,
+    id: String,
+    url: String,
+    label: Option<String>,
+) -> Result<(), String> {
+    let (normalized_url, local) = webdav::normalize_url(&url).await?;
+    let remote_id = uuid::Uuid::new_v4().to_string();
+    let mirror_dir = webdav::create_mirror_dir(&app, &remote_id).await?;
+    let mirror_path = mirror_dir.to_string_lossy().into_owned();
+
+    let remote = webdav::RemoteConfig {
+        id: remote_id,
+        url: normalized_url.to_string(),
+        local,
+    };
+    let desired_label = label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| webdav::default_label_for(&normalized_url));
+
+    update(&app, |projects| {
+        let project = project_mut(projects, &id)?;
+        if project
+            .folders
+            .iter()
+            .any(|f| f.remote.as_ref().is_some_and(|r| r.url == remote.url))
+        {
+            return Err("This WebDAV folder is already in the project".into());
+        }
+        let unique = unique_label_from_name(&project.folders, &desired_label);
+        project.folders.push(Folder {
+            label: unique,
+            path: mirror_path,
+            remote: Some(remote.clone()),
+        });
+        Ok(())
+    })
+    .await?;
+
+    webdav::authorize_and_sync(&app, &remote, &mirror_dir).await
+}
+
+#[tauri::command]
+pub async fn projects_sync_webdav_folder(
+    app: tauri::AppHandle,
+    id: String,
+    label: String,
+) -> Result<(), String> {
+    let folder = load_project_folder(&app, &id, &label).await?;
+    let remote = folder
+        .remote
+        .ok_or_else(|| "This folder is not synced via WebDAV".to_owned())?;
+    webdav::sync_remote(&app, &remote, Path::new(&folder.path)).await
+}
+
+#[tauri::command]
+pub async fn projects_authorize_webdav_folder(
+    app: tauri::AppHandle,
+    id: String,
+    label: String,
+) -> Result<(), String> {
+    let folder = load_project_folder(&app, &id, &label).await?;
+    let remote = folder
+        .remote
+        .ok_or_else(|| "This folder is not synced via WebDAV".to_owned())?;
+    webdav::authorize_and_sync(&app, &remote, Path::new(&folder.path)).await
+}
+
+async fn load_project_folder(app: &tauri::AppHandle, id: &str, label: &str) -> Result<Folder, String> {
+    let projects = read(app).await?;
+    projects
+        .iter()
+        .find(|project| project.id == id)
+        .and_then(|project| project.folders.iter().find(|folder| folder.label == label))
+        .cloned()
+        .ok_or_else(|| "This folder is no longer in the project".to_owned())
+}
+
+pub(crate) async fn emit_changed(app: &tauri::AppHandle) {
+    if let Ok(projects) = read(app).await {
+        let _ = app.emit("projects:changed", views(&projects));
+    }
+}
+
+pub(crate) async fn find_webdav_for_path(
+    app: &tauri::AppHandle,
+    canonical: &Path,
+) -> Option<(webdav::RemoteConfig, PathBuf)> {
+    let projects = read(app).await.ok()?;
+    for project in projects {
+        for folder in project.folders {
+            let Some(remote) = folder.remote else {
+                continue;
+            };
+            let folder_path = PathBuf::from(&folder.path);
+            if canonical.starts_with(&folder_path) {
+                return Some((remote, folder_path));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) async fn all_webdav_folders(
+    app: &tauri::AppHandle,
+) -> Vec<(webdav::RemoteConfig, PathBuf)> {
+    let Ok(projects) = read(app).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for project in projects {
+        for folder in project.folders {
+            if let Some(remote) = folder.remote {
+                out.push((remote, PathBuf::from(folder.path)));
+            }
+        }
+    }
+    out
+}
+
 /// Unlinks the folder. The folder and its files are left as they are.
 #[tauri::command]
 pub async fn projects_remove_folder(app: tauri::AppHandle, id: String, label: String) -> Result<(), String> {
+    let mut removed_remote_id = None;
     update(&app, |projects| {
-        project_mut(projects, &id)?.folders.retain(|folder| folder.label != label);
+        let project = project_mut(projects, &id)?;
+        if let Some(folder) = project.folders.iter().find(|f| f.label == label) {
+            removed_remote_id = folder.remote.as_ref().map(|r| r.id.clone());
+        }
+        project.folders.retain(|folder| folder.label != label);
         Ok(())
     })
-    .await
+    .await?;
+    if let Some(remote_id) = removed_remote_id {
+        webdav::cleanup_remote(&app, &remote_id).await;
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -669,6 +852,7 @@ mod tests {
         Folder {
             label: label.into(),
             path: path.to_string_lossy().into_owned(),
+            remote: None,
         }
     }
 

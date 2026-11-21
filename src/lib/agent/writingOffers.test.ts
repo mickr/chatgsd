@@ -503,6 +503,14 @@ it("keeps a map step the writer edits on the map, marked as changed, and only go
   current = apply(tr => tr.insertText("First premise here.", first.from, first.to))!;
   expect(current.edited).toEqual([false, true]);
 
+  // Deleting a step's last word and typing it back restores it, though the retyped word lands past its carried place.
+  current = apply(tr => tr.delete(first.from + "First premise".length, first.from + "First premise here".length))!;
+  expect(current.edited).toEqual([true, true]);
+  const shortened = current.trace[0]!;
+  current = apply(tr => tr.insertText(" here.", shortened.to - 1, shortened.to))!;
+  expect(current.edited).toEqual([false, true]);
+  expect(editor.state.doc.textBetween(current.trace[0]!.from, current.trace[0]!.to)).toBe("First premise here.");
+
   // A fresh offer is still held to exact quotes, and the offer's own passage still makes it stale.
   expect(() => prepareWritingOffer(editor, { ...rewrite(), trace: [step("Second premise here.")] })).toThrow();
   expect(apply(tr => tr.insertText("x", editor.state.doc.content.size - 3))).toBeNull();

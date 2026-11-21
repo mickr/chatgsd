@@ -220,3 +220,53 @@ describe("resizing", () => {
     expect(container.querySelector<HTMLElement>(".border-t")!.style.height).toBe("");
   });
 });
+
+describe("WebDAV synced folders", () => {
+  it("shows remote sync status and re-reads files when a sync finishes", async () => {
+    const synced: Project = {
+      id: "er",
+      name: "Engine Room",
+      folders: [
+        {
+          label: "Engine Room Docs",
+          path: "/Users/me/Library/Application Support/ai.chatgsd.desktop/agent/webdav/mirrors/1",
+          missing: false,
+          remote: {
+            id: "1",
+            url: "https://engineroom.athena.test/dav/docs",
+            status: "needs_auth",
+            detail: "Sign-in required",
+            lastSynced: null,
+          },
+        },
+      ],
+    };
+
+    await render([synced]);
+    expect(container.textContent).toContain("Sign-in required");
+
+    await act(async () => {
+      state.changed?.([
+        {
+          ...synced,
+          folders: [
+            {
+              ...synced.folders[0],
+              remote: {
+                ...synced.folders[0].remote!,
+                status: "synced",
+                detail: null,
+                lastSynced: 1700000100,
+              },
+            },
+          ],
+        },
+      ]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Synced");
+    expect(projects.folderFiles).toHaveBeenCalledTimes(2);
+  });
+});

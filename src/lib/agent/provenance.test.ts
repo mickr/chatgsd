@@ -184,6 +184,20 @@ it("finds when an earlier writer turn or saved meaning already answered an unsur
   )?.id).toBe("meaning-cost");
 });
 
+it("finds a saved meaning in a note written without spaces between words", () => {
+  const quote = "新しい請求ページはまもなく公開されます。";
+  const saved = [{ key: "meaning-launch", kind: "choice" as const, summary: "公開は今四半期の予定です", quote }];
+
+  // Worded differently, sharing only the word for the launch.
+  expect(findPriorStepAnswer(
+    { quote, reading: "「まもなく」は今期中の公開を指すと解釈しました。", sure: false }, [], saved,
+  )?.id).toBe("meaning-launch");
+  // A meaning saved on the same sentence about a different word in it is still not this one.
+  expect(findPriorStepAnswer(
+    { quote, reading: "「請求ページ」は管理者向けだと解釈しました。", sure: false }, [], saved,
+  )).toBeNull();
+});
+
 it("does not take an earlier answer about something else for an answer to this assumption", () => {
   const quote = "Users will get the new billing page soon.";
   const assumption = { quote, reading: "I took soon to mean the launch this quarter.", sure: false };

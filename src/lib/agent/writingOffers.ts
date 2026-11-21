@@ -473,7 +473,12 @@ function prepareIn(doc: ProseMirrorNode, editor: Editor, args: unknown, requeste
     if (provenance[index]) return tryLocate(doc, step.quote);
     if (!relocate) return locate(doc, step.quote);
     // A step is the place it was drawn at, wherever else its words turn up. Only a step with no place is searched for.
-    const found = passageAt(doc, relocate(index)) ?? tryLocate(doc, step.quote);
+    const kept = passageAt(doc, relocate(index));
+    // Words undone or retyped at a step's edge land just outside its carried place, so a
+    // step that reads as changed is looked for by its quote, and taken where the two meet.
+    const restored = kept && doc.textBetween(kept.text.from, kept.text.to) !== step.quote ? tryLocate(doc, step.quote) : null;
+    const found = restored && restored.text.from <= kept!.text.to && restored.text.to >= kept!.text.from
+      ? restored : kept ?? tryLocate(doc, step.quote);
     edited[index] = !found || doc.textBetween(found.text.from, found.text.to) !== step.quote;
     return found;
   });

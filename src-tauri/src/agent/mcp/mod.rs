@@ -13,7 +13,7 @@
 mod client;
 mod config;
 mod discover;
-mod oauth;
+pub(crate) mod oauth;
 mod stdio;
 mod store;
 #[cfg(test)]
