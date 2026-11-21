@@ -22,10 +22,7 @@ import { useAgentPanelShortcut } from "./components/agent/useAgentPanelShortcut"
 import { AgentLauncher } from "./components/agent/AgentLauncher";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
-import {
-  check as checkForUpdate,
-  type Update,
-} from "@tauri-apps/plugin-updater";
+import { showUpdateToast } from "./lib/updateToast";
 import { useUpdateMenu } from "./lib/useUpdateMenu";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isMac, isWindows } from "./lib/platform";
@@ -509,72 +506,7 @@ function AppWorkspace({ editorRef, onEditorReady }: {
   );
 }
 
-// Shared update check — used by startup and manual "Check for Updates"
-async function showUpdateToast(): Promise<"update" | "no-update" | "error"> {
-  try {
-    const update = await checkForUpdate();
-    if (update) {
-      toast(<UpdateToast update={update} toastId="update-toast" />, {
-        id: "update-toast",
-        duration: Infinity,
-        closeButton: true,
-      });
-      return "update";
-    }
-    return "no-update";
-  } catch (err) {
-    console.error("Update check failed:", err);
-    return "error";
-  }
-}
-
 export { showUpdateToast };
-
-function UpdateToast({
-  update,
-  toastId,
-}: {
-  update: Update;
-  toastId: string | number;
-}) {
-  const [installing, setInstalling] = useState(false);
-
-  const handleUpdate = async () => {
-    setInstalling(true);
-    try {
-      await update.downloadAndInstall();
-      toast.dismiss(toastId);
-      toast.success("Update installed! Restart ChatGSD to apply.", {
-        duration: Infinity,
-        closeButton: true,
-      });
-    } catch (err) {
-      console.error("Update failed:", err);
-      toast.error("Update failed. Please try again later.");
-      setInstalling(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="font-medium text-sm">
-        Update Available: v{update.version}
-      </div>
-      {update.body && (
-        <div className="text-xs text-text-muted line-clamp-3">
-          {update.body}
-        </div>
-      )}
-      <button
-        onClick={handleUpdate}
-        disabled={installing}
-        className="self-start mt-1 text-xs font-medium px-3 py-1.5 rounded-md bg-text text-bg hover:opacity-90 disabled:opacity-50 transition-opacity"
-      >
-        {installing ? "Installing..." : "Update Now"}
-      </button>
-    </div>
-  );
-}
 
 function App() {
   const { isPreview, previewFile, previewProject } = useMemo(getWindowMode, []);

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { showUpdateToast } from "../../App";
+import { showUpdateToast } from "../../lib/updateToast";
 import { Button } from "../ui";
 import { RefreshCwIcon, SpinnerIcon, GithubIcon } from "../icons";
 

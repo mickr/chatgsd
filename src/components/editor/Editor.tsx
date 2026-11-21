@@ -2207,6 +2207,20 @@ export function Editor({
     return () => window.removeEventListener("toggle-source-mode", handler);
   }, [toggleSourceMode]);
 
+  // Flush pending and in-flight saves before an update-triggered app restart
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const register = (
+        event as CustomEvent<{ register?: (promise: Promise<unknown>) => void }>
+      ).detail?.register;
+      if (register) {
+        register(flushPendingSave().then(() => saveQueueRef.current));
+      }
+    };
+    window.addEventListener("flush-before-restart", handler);
+    return () => window.removeEventListener("flush-before-restart", handler);
+  }, [flushPendingSave]);
+
   // Keep source edits in the live document so agent tools and merges see them too.
   const handleSourceChange = useCallback(
     (value: string) => {

@@ -3469,6 +3469,7 @@ pub fn run() {
             uninstall_cli,
             get_cli_status,
             set_title_bar_theme,
+            restart_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -3569,6 +3570,11 @@ fn set_title_bar_theme(
         let _ = (app, is_dark, r, g, b);
     }
     Ok(())
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.request_restart();
 }
 
 #[cfg(test)]
