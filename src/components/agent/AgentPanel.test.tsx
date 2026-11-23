@@ -3,7 +3,8 @@ import { act, useCallback, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Markdown } from "@tiptap/markdown";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AgentChanges, ScratchDocument } from "../editor/AgentChanges";
 import { TooltipProvider } from "../ui";
 import { AgentPanel, orderedStarters } from "./AgentPanel";
@@ -594,6 +595,54 @@ it("replaces the standing starters with the agent's own next moves for this note
   expect(prompt).toContain("User instruction:\n\nConnect Venus to the opening");
 });
 
+it("docks a highlight on the composer and points every action at that passage, not the cursor's surroundings", () => {
+  // The preview is rendered from markdown, so this note needs the markdown serializer.
+  const note = new Editor({ element: document.createElement("div"), extensions: [StarterKit, Markdown, ScratchDocument, AgentChanges],
+    content: "<p>A note that must not become a quote.</p>" });
+  onTestFinished(() => note.destroy());
+  state.agent.editor = note;
+  act(() => root.render(<Workspace />));
+  openPanel();
+  act(() => { note.commands.setTextSelection({ from: 3, to: 7 }); });
+  const composerBox = container.querySelector(".agent-panel-input-wrap")!;
+  const card = composerBox.querySelector('[aria-label="Selected passage"]')!;
+  expect(card.textContent).toContain("note");
+  // The highlight's own actions replace the general starters, with the trace leading.
+  expect(container.querySelector(".agent-panel-starters")).toBeNull();
+  const actions = [...card.querySelectorAll('[role="group"] button')];
+  expect(actions.map(item => item.textContent)).toEqual(["Trace this argument", "Ask me questions", "Check a claim", "Read it back"]);
+  expect(actions[0].hasAttribute("data-primary")).toBe(true);
+  expect(container.querySelector("textarea")!.placeholder).toBe("Ask about this passage…");
+  act(() => button("Read it back").click());
+  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("readback", { focus: { from: 3, to: 7 } });
+  // Clearing lets go of the passage and brings the general starters back.
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Clear selection"]')!.click());
+  expect(composerBox.querySelector('[aria-label="Selected passage"]')).toBeNull();
+  expect(container.querySelector(".agent-panel-starters")).not.toBeNull();
+});
+
+it("sends Ask me questions to the main agent as an interview that edits the highlight once answered", async () => {
+  const note = new Editor({ element: document.createElement("div"), extensions: [StarterKit, Markdown, ScratchDocument, AgentChanges],
+    content: "<p>A note that must not become a quote.</p>" });
+  onTestFinished(() => note.destroy());
+  note.storage.scratchDocument.noteId = "note";
+  state.agent.editor = note;
+  act(() => root.render(<Workspace />));
+  openPanel();
+  act(() => { note.commands.setTextSelection({ from: 3, to: 7 }); });
+  await act(async () => { button("Ask me questions").click(); });
+  // The panel already knows what this is, so the classifier isn't asked and no read-only offer starts.
+  expect(invoke).not.toHaveBeenCalled();
+  expect(state.agent.requestWritingHelp).not.toHaveBeenCalled();
+  const [prompt, , mode, options] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(mode).toBe("coedit");
+  expect(options).toMatchObject({ openRequest: true });
+  expect(prompt).toContain("Response mode: interview.");
+  expect(prompt).toContain("call ask_user once");
+  expect(prompt).toContain("replace_selection");
+  expect(prompt).toContain("User instruction:\n\nAsk me a few questions about this passage");
+});
+
 describe("while the agent works on a request", () => {
   const working = () => {
     Object.assign(state.agent, {
@@ -620,6 +669,36 @@ describe("while the agent works on a request", () => {
     await act(async () => { control("Stop agent")!.click(); });
     expect(state.agent.stop).toHaveBeenCalledOnce();
     expect(state.agent.steer).not.toHaveBeenCalled();
+  });
+
+  it("shows the agent working whenever no text is arriving, and steps aside while a reply streams", () => {
+    working();
+    const indicator = () => container.querySelector(".agent-working");
+    expect(indicator()?.textContent).toBe("Thinking");
+    // Words arriving take its place.
+    const reply = (text: string) => {
+      state.agent.conversation = { runId: "run", items: [{ id: "u", type: "user", text: "Tighten the intro" }, { id: "r", type: "text", text }] };
+      act(() => root.render(<Workspace />));
+    };
+    reply("The intro");
+    expect(indicator()).toBeNull();
+    reply("The intro now opens");
+    act(() => vi.advanceTimersByTime(1000));
+    expect(indicator()).toBeNull();
+    // A reply that stops growing mid-run means the agent is thinking again, and it says for how long.
+    act(() => vi.advanceTimersByTime(600));
+    expect(indicator()?.textContent).toBe("Thinking");
+    act(() => vi.advanceTimersByTime(4000));
+    expect(indicator()?.textContent).toMatch(/^Thinking · \ds$/);
+  });
+
+  it("shows the agent at work on a request that adds no message, not a caret on the last reply", () => {
+    Object.assign(state.agent, { conversation: { runId: null, items: [{ id: "r", type: "text", text: "An earlier answer." }] } });
+    openPanel();
+    expect(container.querySelector(".agent-working")).toBeNull();
+    Object.assign(state.agent, { companionChecking: true, conversation: { runId: "trace", items: [{ id: "r", type: "text", text: "An earlier answer." }] } });
+    act(() => root.render(<Workspace />));
+    expect(container.querySelector(".agent-working")?.getAttribute("data-state")).toBe("reading");
   });
 
   it("steers with the message instead of starting another request", async () => {

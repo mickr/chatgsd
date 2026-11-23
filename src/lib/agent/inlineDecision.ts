@@ -6,7 +6,18 @@ import { attachedRange } from "../../components/editor/AgentChanges";
 
 const CONTEXT_CHARS = 2000;
 
-export const intentGuidance: Record<InlineIntent, string> = {
+/** A classifier intent, or a mode the panel asks for outright. */
+export type ResponseMode = InlineIntent | "interview";
+
+export const intentGuidance: Record<ResponseMode, string> = {
+  interview: "Interview the user about the attached selection, then improve it with their answers. " +
+    "First read what you need of the note. Then call ask_user once: a one-line question saying what you want to learn, " +
+    "and a form of 3 to 5 questions whose answers would change how this passage is written, such as who it is for, " +
+    "the point it must land, a fact or number that is missing or unclear, and what to cut or keep. " +
+    "Use Choice with the likely answers when you can predict them, TextField otherwise, and never ask what the note already answers. " +
+    "Do not edit before the answers arrive. Then rewrite the attached selection with replace_selection in the user's voice, " +
+    "using their answers, keeping every fact they did not change and inventing none; leave a part as it is when its question went unanswered. " +
+    "Finish with one sentence on what changed and which answer drove it.",
   discuss: "Answer in the conversation without editing notes. If the request seems to require an edit, clarify first.",
   suggest: "Offer suggestions or proposed wording in the conversation. Do not apply changes to notes.",
   edit: "Make the requested change in the note now, and only that change. Then say in a sentence what you changed. Do not show it first or ask for confirmation.",
@@ -40,7 +51,7 @@ export function classifyInline(
   });
 }
 
-export function inlineAgentPrompt(editor: Editor, instruction: string, intent?: InlineIntent): string {
+export function inlineAgentPrompt(editor: Editor, instruction: string, intent?: ResponseMode): string {
   const { doc, selection } = editor.state;
   const range = attachedRange(editor) ?? selection;
   const before = doc.textBetween(Math.max(0, range.from - CONTEXT_CHARS), range.from, "\n\n");

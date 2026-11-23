@@ -1477,6 +1477,14 @@ describe("structured writing offers", () => {
     await act(async () => { await current.requestWritingHelp("evidence"); });
     expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ model: "gpt-x", researchModel: "gpt-x", webAccess: true, readOnly: true }));
   });
+  it("anchors other help on a highlight in that passage", async () => {
+    await readyWithModels();
+    const from = 1 + editor.getText().indexOf("Trip plan");
+    await act(async () => { await current.requestWritingHelp("rewrite", { focus: { from, to: from + "Trip plan".length } }); });
+    const prompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(prompt).toContain("Work on the passage I highlighted");
+    expect(prompt).toContain('"highlighted":"Trip plan"');
+  });
   it("traces the argument in a highlighted passage and opens the map of the answer", async () => {
     await readyWithModels();
     Element.prototype.scrollIntoView = vi.fn();

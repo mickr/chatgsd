@@ -2200,7 +2200,9 @@ export function AgentProvider({
         ? `Check a source for step ${step! + 1} of how you read this note ("${checkedStep.quote.slice(0, 500)}"), where you assumed: ${checkedStep.reading} Research and open primary source pages, then bring the evidence back to the note with sources and a brief explanation of whether they support, contradict, or qualify that assumption.`
       : kind === "outcome"
         ? "Work back from the passage I highlighted to how it got there. Trace the threads that converge on it: passages in the note it builds on, and anything in our conversation that shaped it (what I asked, discussion, research, a connected service, another note, or an edit you made). Cite conversation entries by their ledger id as source, quoting their exact text. Connect independent premises or sources to their merge step or null (the outcome) with leads_to instead of forcing one linear chain, mark competing points with role \"tensions\", and mark a step unsure where you filled a gap yourself (unless an earlier turn in the ledger already answered it). In the explanation, say what we learned along the way: what sources established and any step that looks weak now. Anchor the offer in the highlight and ask one useful question about it."
-      : answering ? `Use my answer to develop the passage in my voice with a proposed rewrite. My answer: ${answer!.slice(0, 4000)}` : requests[kind as keyof typeof requests];
+      : answering ? `Use my answer to develop the passage in my voice with a proposed rewrite. My answer: ${answer!.slice(0, 4000)}`
+      // An action on a highlight is about that passage, not whatever sits around the cursor.
+      : `${requests[kind as keyof typeof requests]}${focus && highlight ? " Work on the passage I highlighted, and anchor the offer in it." : ""}`;
     setAssessingWriting(true);
     try {
       const route: agent.ModelRoute =

@@ -1444,6 +1444,24 @@ export function InfoIcon({ className = "w-4.5 h-4.5" }: IconProps) {
   );
 }
 
+export function HelpCircleIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" />
+      <path d="M12 17v.01" />
+      <path d="M12 13.5a1.5 1.5 0 0 1 1 -1.5a2.6 2.6 0 1 0 -3 -4" />
+    </svg>
+  );
+}
+
 export function WorkflowIcon({ className = "w-4.5 h-4.5" }: IconProps) {
   return (
     <svg

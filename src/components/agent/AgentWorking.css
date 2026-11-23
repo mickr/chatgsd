@@ -1,0 +1,33 @@
+.agent-working { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 12px; color: var(--color-text-muted); animation: agent-working-in 200ms cubic-bezier(.2, .8, .2, 1); }
+.agent-working-figure { display: inline-flex; align-items: flex-end; gap: 3px; flex-shrink: 0; }
+.agent-working .inline-agent-face { width: 28px; height: 28px; }
+.agent-working-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-working-elapsed { font-variant-numeric: tabular-nums; opacity: .75; }
+
+/* Two blocks land, a third stacks on top, then they clear and it builds again. */
+.agent-working-blocks { position: relative; width: 16px; height: 14px; margin-bottom: 4px; }
+.agent-working-blocks i { position: absolute; width: 7.5px; height: 6.5px; border-radius: 1.5px; background: var(--color-text); opacity: 0; transform-origin: bottom; animation: agent-working-block 2.4s cubic-bezier(.3, .7, .3, 1) infinite; }
+.agent-working-blocks i:nth-child(1) { left: 0; bottom: 0; }
+.agent-working-blocks i:nth-child(2) { left: 8.5px; bottom: 0; animation-delay: .3s; }
+.agent-working-blocks i:nth-child(3) { left: 4.25px; bottom: 7.5px; animation-delay: .6s; }
+/* Editing builds faster: the agent is putting words down, not weighing them. */
+.agent-working[data-state="editing"] .agent-working-blocks i { animation-duration: 1.5s; }
+.agent-working[data-state="editing"] .agent-working-blocks i:nth-child(2) { animation-delay: .18s; }
+.agent-working[data-state="editing"] .agent-working-blocks i:nth-child(3) { animation-delay: .36s; }
+
+@keyframes agent-working-block {
+  0% { opacity: 0; transform: translateY(-7px); }
+  14% { opacity: .85; transform: translateY(0); }
+  18% { transform: translateY(0) scaleY(.8); }
+  22%, 76% { opacity: .85; transform: none; }
+  90%, 100% { opacity: 0; transform: none; }
+}
+/* While the agent is shown working, a reply's caret would promise words that aren't coming. */
+.agent-panel-messages:has(> .agent-working) .agent-panel-caret { display: none; }
+
+@keyframes agent-working-in { from { opacity: 0; transform: translateY(3px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-working { animation: none; }
+  .agent-working-blocks i { animation: none; opacity: .85; }
+}

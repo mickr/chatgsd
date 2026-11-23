@@ -39,7 +39,11 @@ import {
   AntigravityIcon,
   ChatGPTIcon,
   CheckIcon,
+  EyeIcon,
+  HelpCircleIcon,
   HistoryIcon,
+  SearchIcon,
+  WorkflowIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   PlusIcon,
@@ -54,16 +58,17 @@ import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "./ChatGPTAccount";
 import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
 import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
-import { SelectionCard } from "./SelectionCard";
+import { SelectionCard, type SelectionAction } from "./SelectionCard";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
 import { surfaceFromRecord, TraceLookupContext, TraceReopenContext } from "./ui/writingOfferContext";
 import { mapStepBlock, writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
 import { isAntigravityModel, type WritingScores } from "../../services/agent";
-import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage } from "../../lib/agent/inlineDecision";
+import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage, type ResponseMode } from "../../lib/agent/inlineDecision";
 import { agentPresence, displayInstruction } from "./InlineAgentActivity";
 import { InlineAgentFace } from "./InlineAgentFace";
 import { ModelPicker } from "./ModelPicker";
 import { WritingCompanionPointer } from "./WritingCompanionPointer";
+import { AgentWorking } from "./AgentWorking";
 import { ArgumentMapOverlay } from "./ArgumentMapOverlay";
 import { argumentMapFor } from "../editor/ArgumentMap";
 
@@ -76,6 +81,17 @@ const STARTERS: Array<{ label: string; kind: WritingRequest; fits: (scores: Writ
   { label: "Compare versions", kind: "compare", fits: (scores) => scores.development },
   { label: "Explore the order", kind: "move", fits: (scores) => scores.development },
 ];
+/** What the agent can do with a highlighted passage, tracing it first. */
+const SELECTION_ACTIONS: Array<Omit<SelectionAction, "onSelect"> & { kind: WritingRequest | "interview" }> = [
+  { label: "Trace this argument", icon: WorkflowIcon, kind: "outcome" },
+  { label: "Ask me questions", icon: HelpCircleIcon, kind: "interview" },
+  { label: "Check a claim", icon: SearchIcon, kind: "evidence" },
+  { label: "Read it back", icon: EyeIcon, kind: "readback" },
+];
+/** How long a reply may pause before the panel shows the agent working instead of a caret. */
+const FLOW_PAUSE_MS = 1500;
+/** What the writer is shown as having asked; the interview's instructions travel with it. */
+const INTERVIEW_REQUEST = "Ask me a few questions about this passage, then improve it with my answers.";
 /** A starter is marked as fitting once its score says help is more likely useful than not. */
 const FITTING_STARTER = 0.5;
 
@@ -320,6 +336,28 @@ export function AgentPanel({
   const waiting = !!pendingQuestion;
   // While the agent works on a request, a message redirects it instead of waiting its turn.
   const steering = running && !agent.companionChecking && !waiting;
+  // Text is flowing while the latest reply grew moments ago. A reply that has
+  // stopped growing, or an older one under a new run, gets the working
+  // indicator instead of a caret promising words that aren't coming.
+  const lastItem = conversation.items[conversation.items.length - 1];
+  const lastText = lastItem?.type === "text" ? lastItem.text : null;
+  const seenText = useRef(lastText);
+  const [flowing, setFlowing] = useState(false);
+  useEffect(() => {
+    const grew = running && !!lastText && lastText !== seenText.current;
+    seenText.current = lastText;
+    setFlowing(grew);
+    if (!grew) return;
+    const timer = setTimeout(() => setFlowing(false), FLOW_PAUSE_MS);
+    return () => clearTimeout(timer);
+  }, [running, lastText]);
+  const working = (running || sending) && !waiting;
+  // A reply that paused mid-stream: the agent is between sentences or tools.
+  const stalled = running && lastText !== null;
+  const [workStart, setWorkStart] = useState(() => Date.now());
+  useEffect(() => {
+    if (working) setWorkStart(Date.now());
+  }, [working]);
   const sendLabel = pendingQuestion ? "Send answer" : steering ? "Steer agent" : "Send message";
   // A skill starts a request, so answers and steering stay plain text.
   const offersSkills = visible && !!currentNote && !pendingQuestion && !steering && skills !== null;
@@ -373,14 +411,16 @@ export function AgentPanel({
       if (!(await agent.steer(text))) setDrafts((previous) => ({ ...previous, [id]: previous[id] || text }));
       return;
     }
-    await deliver(text, () => setDrafts((previous) => ({ ...previous, [id]: previous[id] || text })), skill);
+    await deliver(text, () => setDrafts((previous) => ({ ...previous, [id]: previous[id] || text })), { skill });
   };
   /**
    * Route and send one message; `restore` puts it back if it never left. A
    * message invoking a skill skips routing: the skill, not the classifier,
    * says what kind of work it is, and it runs on the model the writer chose.
+   * So does one sent in a mode the panel already knows, such as an interview.
    */
-  const deliver = async (text: string, restore: () => void, skill: string | null = null) => {
+  const deliver = async (text: string, restore: () => void,
+    { skill = null, mode }: { skill?: string | null; mode?: ResponseMode } = {}) => {
     const editor = agent.editor;
     setSending(true);
     try {
@@ -390,7 +430,7 @@ export function AgentPanel({
       }
       const session = editor.storage.scratchDocument.session;
       agent.prepareCompanionMessage();
-      const decision = codexReady && !usingAntigravity && !skill
+      const decision = codexReady && !usingAntigravity && !skill && !mode
         ? await routeMessage(editor, text, conversation.items)
         : null;
       // The note changed while routing: this message was never meant for the new one.
@@ -398,7 +438,7 @@ export function AgentPanel({
         restore();
         return;
       }
-      const sent = await agent.send(inlineAgentPrompt(editor, text, confidentIntent(decision)), undefined, "coedit",
+      const sent = await agent.send(inlineAgentPrompt(editor, text, mode ?? confidentIntent(decision)), undefined, "coedit",
         { route: decision?.route, openRequest: leavesRequestOpen(decision), ...(skill ? { skill } : {}) });
       if (!sent) restore();
     } finally {
@@ -410,6 +450,16 @@ export function AgentPanel({
     ? (message: string) => { void deliver(message, () => {}); }
     : null;
   const starters = useMemo(() => orderedStarters(agent.writingScores), [agent.writingScores]);
+  const selectionRange = selectionSummary?.range;
+  // Each action works on the highlight itself, not the passage around the cursor.
+  // An interview is a request to edit it, so it goes to the main agent; the rest are read-only offers.
+  const selectionActions: SelectionAction[] = selectionRange && !reason
+    ? SELECTION_ACTIONS.map(({ kind, ...action }) => ({
+        ...action, onSelect: kind === "interview"
+          ? () => { void deliver(INTERVIEW_REQUEST, () => {}, { mode: "interview" }); }
+          : () => { void agent.requestWritingHelp(kind, { focus: selectionRange }); },
+      }))
+    : [];
   const presence = agentPresence(agent, sending);
   const suggestion = agent.writingSuggestion;
   const navigate = (direction: number) => {
@@ -560,18 +610,6 @@ export function AgentPanel({
           <span className="truncate text-xs font-medium" title={contextTitle}>
             {contextTitle || "No note selected"}
           </span>
-          {selectionSummary && (
-            <SelectionCard
-              summary={selectionSummary}
-              running={running}
-              onReveal={revealSelection}
-              onClear={clearSelection}
-              onTrace={selectionSummary.range && !reason ? () => {
-                void agent.requestWritingHelp("outcome", { focus: selectionSummary.range });
-              } : undefined}
-              tracing={sending || agent.companionChecking}
-            />
-          )}
           <div className="mt-2 flex items-center justify-between gap-2 text-xs">
             <span role="status" aria-live="polite" className="text-text-muted">
               {presence.label}
@@ -656,15 +694,14 @@ export function AgentPanel({
               </div>
             </section>
           )}
-          {running &&
-            !waiting &&
-            conversation.items[conversation.items.length - 1]?.type !==
-              "text" && (
-              <div className="flex gap-2 items-center text-xs text-text-muted">
-                <SpinnerIcon className="w-3.5 h-3.5 animate-spin" />
-                Working…
-              </div>
-            )}
+          {working && !flowing && (
+            <AgentWorking
+              state={agent.companionChecking ? "reading" : stalled ? "thinking" : presence.state}
+              expression={presence.expression}
+              label={stalled && !agent.companionChecking ? "Thinking" : presence.label}
+              since={workStart}
+            />
+          )}
           {conversation.cancelled && (
             <p className="text-xs text-text-muted">
               Paused. Edits already made are saved; use Undo in the note to undo an editor change.
@@ -814,7 +851,8 @@ export function AgentPanel({
               Try again
             </button>
           )}
-          {!waiting && !draft && !offer && !reason && (
+          {/* A highlight brings its own actions, so the general starters step aside. */}
+          {!waiting && !draft && !offer && !reason && !selectionSummary && (
             <div className="agent-panel-starters" aria-label="Ways to work together">
               {/* Once the agent has read the note, its own next moves replace the standing suggestions. */}
               {agent.writingStarters.length > 0 ? agent.writingStarters.map((starter) => (
@@ -826,7 +864,7 @@ export function AgentPanel({
               ))}
             </div>
           )}
-          <div ref={composerBox} className="agent-panel-input-wrap">
+          <div ref={composerBox} className="agent-panel-input-wrap" data-holding={selectionSummary ? "" : undefined}>
             {typedSkill !== null && (
               <SkillMenu
                 anchor={composerBox.current}
@@ -841,9 +879,19 @@ export function AgentPanel({
                 onPick={pickSkill}
               />
             )}
+            {selectionSummary && (
+              <SelectionCard
+                summary={selectionSummary}
+                running={running}
+                onReveal={revealSelection}
+                onClear={clearSelection}
+                actions={selectionActions}
+                busy={sending || agent.companionChecking}
+              />
+            )}
             <textarea
               ref={composer}
-              rows={3}
+              rows={selectionSummary ? 2 : 3}
               aria-label="Message agent"
               aria-haspopup="listbox"
               aria-autocomplete="list"
@@ -855,7 +903,9 @@ export function AgentPanel({
                   ? "Type your answer…"
                   : steering
                     ? "Steer the agent…"
-                    : "Ask or describe an edit…"
+                    : selectionSummary
+                      ? "Ask about this passage…"
+                      : "Ask or describe an edit…"
               }
               value={draft}
               readOnly={!currentNote}
@@ -918,7 +968,9 @@ export function AgentPanel({
                       : "Type to steer, or keep editing."
                     : running
                       ? "You can keep editing."
-                      : "Enter to send · ⇧ Enter for newline"}
+                      : selectionSummary
+                        ? "Enter to send · Esc to clear selection"
+                        : "Enter to send · ⇧ Enter for newline"}
               </span>
               <div className="flex shrink-0 items-center gap-1">
                 {running && !agent.companionChecking && (
