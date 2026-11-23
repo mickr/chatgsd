@@ -1,10 +1,13 @@
-import { memo, type ComponentType } from "react";
+import { memo, useLayoutEffect, useRef, useState, type ComponentType } from "react";
 import type { SelectionSummary } from "../../lib/agent/selection";
 import { XIcon } from "../icons";
 import { MarkdownPreview } from "./AgentMarkdown";
 
 export type SelectionAction = {
+  /** Shown on the button while there's room; narrower panels show the icon alone. */
   label: string;
+  /** The full name, for the tooltip and assistive technology. */
+  title: string;
   icon: ComponentType<{ className?: string }>;
   onSelect: () => void;
 };
@@ -21,6 +24,7 @@ export const SelectionCard = memo(function SelectionCard({
   onClear,
   actions = [],
   busy = false,
+  compact = false,
 }: {
   summary: SelectionSummary;
   running: boolean;
@@ -29,19 +33,37 @@ export const SelectionCard = memo(function SelectionCard({
   /** Empty while the agent can't be asked about the passage. */
   actions?: SelectionAction[];
   busy?: boolean;
+  /** The writer is typing about it, so the passage steps back to one line. */
+  compact?: boolean;
 }) {
   const words = `${summary.words.toLocaleString()} ${summary.words === 1 ? "word" : "words"}`;
+  // The preview fades out only when the passage runs past the lines it's given.
+  const preview = useRef<HTMLButtonElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  useLayoutEffect(() => {
+    const button = preview.current;
+    const content = button?.firstElementChild as HTMLElement | null | undefined;
+    if (!button || !content) return;
+    const measure = () => setOverflows(content.offsetHeight > button.clientHeight + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    observer.observe(button);
+    return () => observer.disconnect();
+  }, [compact]);
   return (
     <section
       className="agent-selection-card"
       data-running={running || undefined}
+      data-compact={compact || undefined}
       aria-label={running ? "Passage the agent is working on" : "Selected passage"}
     >
       <div className="agent-selection-head">
         <button
           type="button"
+          ref={preview}
           className="agent-selection-preview"
-          data-clipped={summary.clipped || undefined}
+          data-clipped={summary.clipped || overflows || undefined}
           onClick={onReveal}
           disabled={!summary.range}
           title={summary.range ? "Show in note" : undefined}
@@ -61,21 +83,25 @@ export const SelectionCard = memo(function SelectionCard({
         )}
       </div>
       <div className="agent-selection-meta truncate">
-        {running ? "Working on" : "Selection"} · {words}
-        {summary.section && <> · in {summary.section}</>}
+        {running && "Working on · "}{words}
+        {summary.section && <> · {summary.section}</>}
       </div>
       {!running && actions.length > 0 && (
         <div className="agent-selection-actions" role="group" aria-label="Work with this passage">
-          {actions.map(({ label, icon: Icon, onSelect }, index) => (
+          {actions.map(({ label, title, icon: Icon, onSelect }, index) => (
+            // Lower-ranked actions give up their labels first as the panel narrows.
             <button
               type="button"
-              key={label}
+              key={title}
+              aria-label={title}
+              title={title}
               data-primary={index === 0 || undefined}
+              data-rank={index}
               disabled={busy}
               onClick={onSelect}
             >
               <Icon className="w-3 h-3 shrink-0" />
-              {label}
+              <span className="agent-selection-action-label">{label}</span>
             </button>
           ))}
         </div>

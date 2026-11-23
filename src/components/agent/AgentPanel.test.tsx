@@ -610,10 +610,15 @@ it("docks a highlight on the composer and points every action at that passage, n
   // The highlight's own actions replace the general starters, with the trace leading.
   expect(container.querySelector(".agent-panel-starters")).toBeNull();
   const actions = [...card.querySelectorAll('[role="group"] button')];
-  expect(actions.map(item => item.textContent)).toEqual(["Trace this argument", "Ask me questions", "Check a claim", "Read it back"]);
+  expect(actions.map(item => item.getAttribute("aria-label"))).toEqual(["Trace this argument", "Ask me questions, then improve it", "Check a claim", "Read it back as your reader"]);
   expect(actions[0].hasAttribute("data-primary")).toBe(true);
   expect(container.querySelector("textarea")!.placeholder).toBe("Ask about this passage…");
-  act(() => button("Read it back").click());
+  // Once the writer starts asking, the passage steps back to a line.
+  expect(card.hasAttribute("data-compact")).toBe(false);
+  type(container.querySelector("textarea")!, "Is this too long?");
+  expect(card.hasAttribute("data-compact")).toBe(true);
+  type(container.querySelector("textarea")!, "");
+  act(() => button("Read back").click());
   expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("readback", { focus: { from: 3, to: 7 } });
   // Clearing lets go of the passage and brings the general starters back.
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="Clear selection"]')!.click());
@@ -681,6 +686,11 @@ describe("while the agent works on a request", () => {
       act(() => root.render(<Workspace />));
     };
     reply("The intro");
+    // It stays a moment once shown and fades out, so a run trading tools and text doesn't blink.
+    expect(indicator()?.hasAttribute("data-leaving")).toBe(false);
+    act(() => vi.advanceTimersByTime(600));
+    expect(indicator()?.hasAttribute("data-leaving")).toBe(true);
+    act(() => vi.advanceTimersByTime(200));
     expect(indicator()).toBeNull();
     reply("The intro now opens");
     act(() => vi.advanceTimersByTime(1000));
@@ -692,11 +702,38 @@ describe("while the agent works on a request", () => {
     expect(indicator()?.textContent).toMatch(/^Thinking · \ds$/);
   });
 
+  it("leaves a background check to the face in the header", () => {
+    Object.assign(state.agent, { companionChecking: true, companionRequested: false,
+      conversation: { runId: "check", items: [{ id: "r", type: "text", text: "An earlier answer." }] } });
+    openPanel();
+    expect(container.querySelector(".agent-working")).toBeNull();
+  });
+
+  it("names what the writer asked for and the passage it's on, one click from the note", () => {
+    const note = new Editor({ element: document.createElement("div"), extensions: [StarterKit, Markdown, ScratchDocument, AgentChanges],
+      content: "<p>A note that must not become a quote.</p>" });
+    onTestFinished(() => note.destroy());
+    // jsdom has no layout geometry for scrolling a passage into view.
+    note.setOptions({ editorProps: { handleScrollToSelection: () => true } });
+    state.agent.editor = note;
+    state.agent.requestWritingHelp = vi.fn(() => {
+      Object.assign(state.agent, { companionChecking: true, companionRequested: true });
+      return Promise.resolve();
+    });
+    act(() => root.render(<Workspace />));
+    openPanel();
+    act(() => { note.commands.setTextSelection({ from: 3, to: 7 }); });
+    act(() => button("Trace argument").click());
+    const indicator = container.querySelector(".agent-working")!;
+    expect(indicator.textContent).toBe("Tracing the argument · your highlight");
+    expect(indicator.querySelector("button")!.title).toBe("Show in note");
+  });
+
   it("shows the agent at work on a request that adds no message, not a caret on the last reply", () => {
     Object.assign(state.agent, { conversation: { runId: null, items: [{ id: "r", type: "text", text: "An earlier answer." }] } });
     openPanel();
     expect(container.querySelector(".agent-working")).toBeNull();
-    Object.assign(state.agent, { companionChecking: true, conversation: { runId: "trace", items: [{ id: "r", type: "text", text: "An earlier answer." }] } });
+    Object.assign(state.agent, { companionChecking: true, companionRequested: true, conversation: { runId: "trace", items: [{ id: "r", type: "text", text: "An earlier answer." }] } });
     act(() => root.render(<Workspace />));
     expect(container.querySelector(".agent-working")?.getAttribute("data-state")).toBe("reading");
   });

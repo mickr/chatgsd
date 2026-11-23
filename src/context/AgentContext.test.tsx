@@ -1184,6 +1184,8 @@ describe("writing companion", () => {
     vi.mocked(agent.reviewWriting).mockResolvedValue({ focus: "evidence", anchor: 0, route: "fast" });
     await act(async () => { await current.startCompanion(); });
     expect(current.open).toBe(false);
+    expect(current.companionChecking).toBe(true);
+    expect(current.companionRequested).toBe(false);
     expect(current.writingFocus).toBe("evidence");
     expect(current.writingTarget).toEqual({ from: 0, to: editor.state.doc.firstChild!.nodeSize });
     expect(agent.startRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -1481,6 +1483,8 @@ describe("structured writing offers", () => {
     await readyWithModels();
     const from = 1 + editor.getText().indexOf("Trip plan");
     await act(async () => { await current.requestWritingHelp("rewrite", { focus: { from, to: from + "Trip plan".length } }); });
+    // Help the writer asked for, which the panel shows working; a background check stays in the header.
+    expect(current.companionRequested).toBe(true);
     const prompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
     expect(prompt).toContain("Work on the passage I highlighted");
     expect(prompt).toContain('"highlighted":"Trip plan"');

@@ -68,7 +68,7 @@ import { agentPresence, displayInstruction } from "./InlineAgentActivity";
 import { InlineAgentFace } from "./InlineAgentFace";
 import { ModelPicker } from "./ModelPicker";
 import { WritingCompanionPointer } from "./WritingCompanionPointer";
-import { AgentWorking } from "./AgentWorking";
+import { AgentWorking, useLingering } from "./AgentWorking";
 import { ArgumentMapOverlay } from "./ArgumentMapOverlay";
 import { argumentMapFor } from "../editor/ArgumentMap";
 
@@ -82,14 +82,22 @@ const STARTERS: Array<{ label: string; kind: WritingRequest; fits: (scores: Writ
   { label: "Explore the order", kind: "move", fits: (scores) => scores.development },
 ];
 /** What the agent can do with a highlighted passage, tracing it first. */
-const SELECTION_ACTIONS: Array<Omit<SelectionAction, "onSelect"> & { kind: WritingRequest | "interview" }> = [
-  { label: "Trace this argument", icon: WorkflowIcon, kind: "outcome" },
-  { label: "Ask me questions", icon: HelpCircleIcon, kind: "interview" },
-  { label: "Check a claim", icon: SearchIcon, kind: "evidence" },
-  { label: "Read it back", icon: EyeIcon, kind: "readback" },
+const SELECTION_ACTIONS: Array<Omit<SelectionAction, "onSelect"> & {
+  kind: WritingRequest | "interview";
+  /** What the working indicator says while it's under way. */
+  doing: string;
+}> = [
+  { label: "Trace argument", title: "Trace this argument", icon: WorkflowIcon, kind: "outcome", doing: "Tracing the argument" },
+  { label: "Ask me questions", title: "Ask me questions, then improve it", icon: HelpCircleIcon, kind: "interview", doing: "Thinking of questions" },
+  { label: "Check claim", title: "Check a claim", icon: SearchIcon, kind: "evidence", doing: "Checking the claim" },
+  { label: "Read back", title: "Read it back as your reader", icon: EyeIcon, kind: "readback", doing: "Reading as your reader" },
 ];
 /** How long a reply may pause before the panel shows the agent working instead of a caret. */
 const FLOW_PAUSE_MS = 1500;
+/** The working indicator stays this long once shown, so a run trading tools and text doesn't blink. */
+const WORKING_MIN_MS = 600;
+/** And fades out over this long. */
+const WORKING_EXIT_MS = 160;
 /** What the writer is shown as having asked; the interview's instructions travel with it. */
 const INTERVIEW_REQUEST = "Ask me a few questions about this passage, then improve it with my answers.";
 /** A starter is marked as fitting once its score says help is more likely useful than not. */
@@ -351,13 +359,23 @@ export function AgentPanel({
     const timer = setTimeout(() => setFlowing(false), FLOW_PAUSE_MS);
     return () => clearTimeout(timer);
   }, [running, lastText]);
-  const working = (running || sending) && !waiting;
+  // A background check shows only on the face in the header; the transcript
+  // shows work the writer asked for.
+  // Requested help shows from the click, before its run starts.
+  const working = (running || sending || agent.companionRequested) && !waiting &&
+    (!agent.companionChecking || agent.companionRequested);
+  const workingPhase = useLingering(working && !flowing, WORKING_MIN_MS, WORKING_EXIT_MS);
   // A reply that paused mid-stream: the agent is between sentences or tools.
   const stalled = running && lastText !== null;
   const [workStart, setWorkStart] = useState(() => Date.now());
   useEffect(() => {
     if (working) setWorkStart(Date.now());
   }, [working]);
+  // What the writer asked for from the highlight, named while it's prepared.
+  const [asked, setAsked] = useState<string | null>(null);
+  useEffect(() => {
+    if (asked && !agent.companionRequested && !sending) setAsked(null);
+  }, [asked, agent.companionRequested, sending]);
   const sendLabel = pendingQuestion ? "Send answer" : steering ? "Steer agent" : "Send message";
   // A skill starts a request, so answers and steering stay plain text.
   const offersSkills = visible && !!currentNote && !pendingQuestion && !steering && skills !== null;
@@ -454,12 +472,21 @@ export function AgentPanel({
   // Each action works on the highlight itself, not the passage around the cursor.
   // An interview is a request to edit it, so it goes to the main agent; the rest are read-only offers.
   const selectionActions: SelectionAction[] = selectionRange && !reason
-    ? SELECTION_ACTIONS.map(({ kind, ...action }) => ({
-        ...action, onSelect: kind === "interview"
-          ? () => { void deliver(INTERVIEW_REQUEST, () => {}, { mode: "interview" }); }
-          : () => { void agent.requestWritingHelp(kind, { focus: selectionRange }); },
+    ? SELECTION_ACTIONS.map(({ kind, doing, ...action }) => ({
+        ...action, onSelect: () => {
+          setAsked(doing);
+          if (kind === "interview") void deliver(INTERVIEW_REQUEST, () => {}, { mode: "interview" });
+          else void agent.requestWritingHelp(kind, { focus: selectionRange });
+        },
       }))
     : [];
+  // Where the agent's attention is: the passage a run was sent with, or the
+  // highlight the writer asked about.
+  const workTarget = selectionSummary ?? (agent.companionRequested ? selection : null);
+  const workRange = workTarget?.range;
+  const showWorkTarget = useCallback(() => {
+    if (agent.editor && workRange) scrollPositionIntoView(agent.editor, workRange.from);
+  }, [agent.editor, workRange]);
   const presence = agentPresence(agent, sending);
   const suggestion = agent.writingSuggestion;
   const navigate = (direction: number) => {
@@ -694,12 +721,15 @@ export function AgentPanel({
               </div>
             </section>
           )}
-          {working && !flowing && (
+          {workingPhase && (
             <AgentWorking
               state={agent.companionChecking ? "reading" : stalled ? "thinking" : presence.state}
               expression={presence.expression}
-              label={stalled && !agent.companionChecking ? "Thinking" : presence.label}
+              label={asked && (sending || agent.companionRequested) ? asked
+                : stalled && !agent.companionChecking ? "Thinking" : presence.label}
               since={workStart}
+              leaving={workingPhase === "leaving"}
+              target={workRange ? { name: workTarget?.section ?? "your highlight", onShow: showWorkTarget } : null}
             />
           )}
           {conversation.cancelled && (
@@ -887,6 +917,7 @@ export function AgentPanel({
                 onClear={clearSelection}
                 actions={selectionActions}
                 busy={sending || agent.companionChecking}
+                compact={!!draft.trim()}
               />
             )}
             <textarea
@@ -968,9 +999,7 @@ export function AgentPanel({
                       : "Type to steer, or keep editing."
                     : running
                       ? "You can keep editing."
-                      : selectionSummary
-                        ? "Enter to send · Esc to clear selection"
-                        : "Enter to send · ⇧ Enter for newline"}
+                      : "Enter to send · ⇧ Enter for newline"}
               </span>
               <div className="flex shrink-0 items-center gap-1">
                 {running && !agent.companionChecking && (

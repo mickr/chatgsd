@@ -319,6 +319,8 @@ export interface AgentContextValue {
   memory: agent.NoteMemory | null;
   forgetMemory: (key: string) => Promise<void>;
   companionChecking: boolean;
+  /** The companion work under way is help the writer asked for, not a background check. */
+  companionRequested: boolean;
   writingFocus: agent.WritingFocus | null;
   /** Next moves the agent wrote for this note; empty until it has read it. */
   writingStarters: string[];
@@ -1777,6 +1779,11 @@ export function AgentProvider({
     [pendingQuestion, updateConversation],
   );
   const companionChecking = assessingWriting || (!!conversation.runId && !!runs.current.get(conversation.runId)?.suggestion);
+  // Before its run starts, an explicit request is the one requestWritingHelp is preparing;
+  // assessingWriting changing with it re-renders, so the ref is current here.
+  const companionRequested = companionChecking && (
+    !!(conversation.runId && runs.current.get(conversation.runId)?.suggestion?.requested) ||
+    (explicitWritingRequest.current !== -1 && explicitWritingRequest.current === reviewVersion.current));
   const currentSuggestion = writingSuggestion?.documentSession === editor?.storage.scratchDocument.session
     ? writingSuggestion : null;
   const currentOffer = writingOffer?.prepared.documentSession === editor?.storage.scratchDocument.session
@@ -2347,6 +2354,7 @@ export function AgentProvider({
       openRequest,
       memory, forgetMemory,
       companionChecking,
+      companionRequested,
       writingFocus,
       writingStarters,
       writingScores,
@@ -2440,6 +2448,7 @@ export function AgentProvider({
       openRequest,
       memory, forgetMemory,
       companionChecking,
+      companionRequested,
       writingFocus,
       writingStarters,
       writingScores,

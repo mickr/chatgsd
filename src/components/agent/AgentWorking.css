@@ -1,33 +1,47 @@
-.agent-working { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 12px; color: var(--color-text-muted); animation: agent-working-in 200ms cubic-bezier(.2, .8, .2, 1); }
+.agent-working { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 12px; color: var(--color-text-muted); animation: agent-working-in 200ms cubic-bezier(.2, .8, .2, 1); transition: opacity 160ms ease-in; }
+.agent-working[data-leaving] { opacity: 0; }
 .agent-working-figure { display: inline-flex; align-items: flex-end; gap: 3px; flex-shrink: 0; }
-.agent-working .inline-agent-face { width: 28px; height: 28px; }
+.agent-working .inline-agent-face { width: 28px; height: 28px; transform-origin: 50% 85%; }
 .agent-working-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-working-target { color: var(--color-text); cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 30%, transparent); text-underline-offset: 3px; transition: text-decoration-color 150ms; }
+.agent-working-target:hover { text-decoration-color: currentColor; }
+.agent-working-target:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 2px; }
 .agent-working-elapsed { font-variant-numeric: tabular-nums; opacity: .75; }
+
+/* At this size the eyes barely move, so the whole head acts out the work. */
+.agent-working[data-state="thinking"] .inline-agent-face { animation: agent-working-ponder 2.4s ease-in-out infinite; }
+.agent-working:is([data-state="reading"], [data-state="researching"]) .inline-agent-face { animation: agent-working-scan 2s ease-in-out infinite; }
+.agent-working[data-state="editing"] .inline-agent-face { animation: agent-working-nod .75s ease-in-out infinite; }
+@keyframes agent-working-ponder { 0%, 100% { transform: rotate(0); } 30%, 55% { transform: rotate(-8deg) translateY(-1px); } }
+@keyframes agent-working-scan { 0%, 100% { transform: translateX(-1.5px) rotate(-3deg); } 50% { transform: translateX(1.5px) rotate(3deg); } }
+@keyframes agent-working-nod { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(1.5px) rotate(2deg); } }
 
 /* Two blocks land, a third stacks on top, then they clear and it builds again. */
 .agent-working-blocks { position: relative; width: 16px; height: 14px; margin-bottom: 4px; }
 .agent-working-blocks i { position: absolute; width: 7.5px; height: 6.5px; border-radius: 1.5px; background: var(--color-text); opacity: 0; transform-origin: bottom; animation: agent-working-block 2.4s cubic-bezier(.3, .7, .3, 1) infinite; }
 .agent-working-blocks i:nth-child(1) { left: 0; bottom: 0; }
-.agent-working-blocks i:nth-child(2) { left: 8.5px; bottom: 0; animation-delay: .3s; }
-.agent-working-blocks i:nth-child(3) { left: 4.25px; bottom: 7.5px; animation-delay: .6s; }
+.agent-working-blocks i:nth-child(2) { left: 8.5px; bottom: 0; animation-delay: .25s; }
+.agent-working-blocks i:nth-child(3) { left: 4.25px; bottom: 7.5px; animation-delay: .5s; }
 /* Editing builds faster: the agent is putting words down, not weighing them. */
 .agent-working[data-state="editing"] .agent-working-blocks i { animation-duration: 1.5s; }
-.agent-working[data-state="editing"] .agent-working-blocks i:nth-child(2) { animation-delay: .18s; }
-.agent-working[data-state="editing"] .agent-working-blocks i:nth-child(3) { animation-delay: .36s; }
+.agent-working[data-state="editing"] .agent-working-blocks i:nth-child(2) { animation-delay: .15s; }
+.agent-working[data-state="editing"] .agent-working-blocks i:nth-child(3) { animation-delay: .3s; }
 
+/* Each block drops, lands with a squash, holds, and is cleared only briefly. */
 @keyframes agent-working-block {
-  0% { opacity: 0; transform: translateY(-7px); }
-  14% { opacity: .85; transform: translateY(0); }
-  18% { transform: translateY(0) scaleY(.8); }
-  22%, 76% { opacity: .85; transform: none; }
-  90%, 100% { opacity: 0; transform: none; }
+  0% { opacity: 0; transform: translateY(-8px); }
+  9% { opacity: 1; transform: translateY(0); }
+  13% { transform: scale(1.15, .7); }
+  18%, 88% { opacity: 1; transform: none; }
+  96%, 100% { opacity: 0; transform: none; }
 }
-/* While the agent is shown working, a reply's caret would promise words that aren't coming. */
-.agent-panel-messages:has(> .agent-working) .agent-panel-caret { display: none; }
-
 @keyframes agent-working-in { from { opacity: 0; transform: translateY(3px); } }
 
+/* While the agent is shown working, a reply's caret would promise words that aren't coming. */
+.agent-panel-messages:has(> .agent-working:not([data-leaving])) .agent-panel-caret { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
-  .agent-working { animation: none; }
-  .agent-working-blocks i { animation: none; opacity: .85; }
+  .agent-working { animation: none; transition: none; }
+  .agent-working .inline-agent-face { animation: none; }
+  .agent-working-blocks i { animation: none; opacity: 1; }
 }
