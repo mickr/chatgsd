@@ -39,7 +39,12 @@ import {
   AntigravityIcon,
   ChatGPTIcon,
   CheckIcon,
+  BookIcon,
+  ArrowUpToLineIcon,
   EyeIcon,
+  FileDescriptionIcon,
+  FoldIcon,
+  ListOrderedIcon,
   HelpCircleIcon,
   HistoryIcon,
   SearchIcon,
@@ -58,36 +63,56 @@ import { ContinueWithChatGPT, ManageUsage, PlanNotice } from "./ChatGPTAccount";
 import { AgentTurnChanges, conversationTurns } from "./AgentTurnChanges";
 import { OpenNoteContext, SuggestionContext } from "./ui/registry";
 import { ComputerPermissions } from "./ComputerPermissions";
-import { SelectionCard, type SelectionAction } from "./SelectionCard";
+import { SelectionCard } from "./SelectionCard";
+import { AgentActions, type AgentAction } from "./AgentActions";
 import { WritingOfferCard, WritingOfferContext, hasWritingOfferCard, type WritingOfferControls } from "./WritingOfferCard";
 import { surfaceFromRecord, TraceLookupContext, TraceReopenContext } from "./ui/writingOfferContext";
 import { mapStepBlock, writingOfferChatText, type WritingRequest } from "../../lib/agent/writingOffers";
-import { isAntigravityModel, type WritingScores } from "../../services/agent";
+import { isAntigravityModel } from "../../services/agent";
 import { confidentIntent, inlineAgentPrompt, leavesRequestOpen, routeMessage, type ResponseMode } from "../../lib/agent/inlineDecision";
 import { agentPresence, displayInstruction } from "./InlineAgentActivity";
 import { InlineAgentFace } from "./InlineAgentFace";
 import { ModelPicker } from "./ModelPicker";
 import { WritingCompanionPointer } from "./WritingCompanionPointer";
 import { AgentWorking, useLingering } from "./AgentWorking";
+import { droppedFacts, noteMap } from "../../lib/agent/noteMap";
 import { ArgumentMapOverlay } from "./ArgumentMapOverlay";
 import { argumentMapFor } from "../editor/ArgumentMap";
 
-/** Each way to work together, and which of the gate's scores says it fits this passage. */
-const STARTERS: Array<{ label: string; kind: WritingRequest; fits: (scores: WritingScores) => number }> = [
-  { label: "Show a version", kind: "rewrite", fits: (scores) => scores.clarity },
-  { label: "Trace my argument", kind: "question", fits: (scores) => Math.max(scores.clarity, scores.development) },
-  { label: "Check a claim", kind: "evidence", fits: (scores) => scores.evidence },
-  { label: "Read it back", kind: "readback", fits: (scores) => scores.clarity },
-  { label: "Compare versions", kind: "compare", fits: (scores) => scores.development },
-  { label: "Explore the order", kind: "move", fits: (scores) => scores.development },
-];
-/** What the agent can do with a highlighted passage, tracing it first. */
-const SELECTION_ACTIONS: Array<Omit<SelectionAction, "onSelect"> & {
-  kind: WritingRequest | "interview";
+/** Work the main agent carries out from its own instructions: what the writer is shown as asking, and the mode that says how. */
+const AGENT_REQUESTS = {
+  interview: { request: "Ask me a few questions about this passage, then improve it with my answers.", mode: "interview" },
+  tighten: { request: "Tighten this passage without losing what the rest of the note relies on.", mode: "tighten" },
+  review: { request: "Read the whole note through and tell me what would most improve it.", mode: "review" },
+  lead: { request: "Restructure the note so it leads with its point.", mode: "lead" },
+  "tighten-note": { request: "Tighten the whole note without losing its argument.", mode: "tighten-note" },
+  summary: { request: "Add a short summary at the top of the note.", mode: "summary" },
+} satisfies Record<string, { request: string; mode: ResponseMode }>;
+type AgentRequest = keyof typeof AGENT_REQUESTS;
+const isAgentRequest = (kind: string): kind is AgentRequest => kind in AGENT_REQUESTS;
+/** Edits that cut or restructure, whose names and numbers code checks once they land. */
+const FACT_CHECKED: ReadonlySet<AgentRequest> = new Set(["tighten", "tighten-note", "lead"]);
+
+type ActionDefinition = Omit<AgentAction, "onSelect"> & {
+  /** A read-only writing offer, or work the main agent does from its own instructions. */
+  kind: WritingRequest | AgentRequest;
   /** What the working indicator says while it's under way. */
   doing: string;
-}> = [
+};
+/** Work on the whole note, read through first; later ones give up their labels first. */
+const NOTE_ACTIONS: ActionDefinition[] = [
+  { label: "Read it through", title: "Read the whole note and say what would most improve it", icon: BookIcon, kind: "review", doing: "Reading it through" },
+  { label: "Lead with the point", title: "Put the note's main point first and make headings say what they establish", icon: ArrowUpToLineIcon, kind: "lead", doing: "Leading with the point" },
+  { label: "Tighten the note", title: "Tighten the whole note without losing its argument", icon: FoldIcon, kind: "tighten-note", doing: "Tightening the note" },
+  { label: "Add a summary", title: "Add a short summary at the top, from what the note says", icon: FileDescriptionIcon, kind: "summary", doing: "Writing a summary" },
+  { label: "Check the order", title: "Check whether anything belongs earlier", icon: ListOrderedIcon, kind: "move", doing: "Checking the order" },
+];
+/** How many of the agent's own next moves for a note sit under the whole-note actions. */
+const SUGGESTED_MOVES = 2;
+/** What the agent can do with a highlighted passage, tracing it first. */
+const SELECTION_ACTIONS: ActionDefinition[] = [
   { label: "Trace argument", title: "Trace this argument", icon: WorkflowIcon, kind: "outcome", doing: "Tracing the argument" },
+  { label: "Tighten", title: "Tighten it against the rest of the note", icon: FoldIcon, kind: "tighten", doing: "Tightening" },
   { label: "Ask me questions", title: "Ask me questions, then improve it", icon: HelpCircleIcon, kind: "interview", doing: "Thinking of questions" },
   { label: "Check claim", title: "Check a claim", icon: SearchIcon, kind: "evidence", doing: "Checking the claim" },
   { label: "Read back", title: "Read it back as your reader", icon: EyeIcon, kind: "readback", doing: "Reading as your reader" },
@@ -98,17 +123,6 @@ const FLOW_PAUSE_MS = 1500;
 const WORKING_MIN_MS = 600;
 /** And fades out over this long. */
 const WORKING_EXIT_MS = 160;
-/** What the writer is shown as having asked; the interview's instructions travel with it. */
-const INTERVIEW_REQUEST = "Ask me a few questions about this passage, then improve it with my answers.";
-/** A starter is marked as fitting once its score says help is more likely useful than not. */
-const FITTING_STARTER = 0.5;
-
-/** The standing starters, best fit first; ties keep their usual order. */
-export function orderedStarters(scores: WritingScores | null) {
-  const ranked = STARTERS.map((starter) => ({ ...starter, score: scores ? starter.fits(scores) : 0 }));
-  ranked.sort((a, b) => b.score - a.score);
-  return ranked.map((starter, index) => ({ ...starter, fitting: index === 0 && starter.score >= FITTING_STARTER }));
-}
 function ResizeHandle() {
   const { width, setWidth } = useAgent();
   const drag = useRef<{ x: number; width: number; current: number } | null>(
@@ -371,6 +385,29 @@ export function AgentPanel({
   useEffect(() => {
     if (working) setWorkStart(Date.now());
   }, [working]);
+  // An edit that cuts or restructures is checked by code once it lands: names
+  // and numbers it dropped are shown, with a one-click way to put them back.
+  const factWatch = useRef<{ noteId: string; edited: string; before: string; keep: string[]; started: boolean } | null>(null);
+  const [dropped, setDropped] = useState<{ noteId: string; facts: string[] } | null>(null);
+  useEffect(() => {
+    const watch = factWatch.current;
+    if (!watch) return;
+    if (running) {
+      watch.started = true;
+      return;
+    }
+    if (sending) return;
+    factWatch.current = null;
+    const editor = agent.editor;
+    if (!watch.started || !editor || currentNote?.id !== watch.noteId) return;
+    const { doc } = editor.state;
+    const facts = droppedFacts(watch.edited, watch.before, doc.textBetween(0, doc.content.size, "\n"), watch.keep);
+    if (facts.length) setDropped({ noteId: watch.noteId, facts });
+  }, [running, sending, agent.editor, currentNote?.id]);
+  // Another request the writer starts makes the check stale; a background check doesn't.
+  useEffect(() => {
+    if (running && !agent.companionChecking) setDropped(null);
+  }, [running, agent.companionChecking]);
   // What the writer asked for from the highlight, named while it's prepared.
   const [asked, setAsked] = useState<string | null>(null);
   useEffect(() => {
@@ -467,19 +504,34 @@ export function AgentPanel({
   const sendSuggestion = !reason && !sending && !running && !waiting
     ? (message: string) => { void deliver(message, () => {}); }
     : null;
-  const starters = useMemo(() => orderedStarters(agent.writingScores), [agent.writingScores]);
   const selectionRange = selectionSummary?.range;
-  // Each action works on the highlight itself, not the passage around the cursor.
-  // An interview is a request to edit it, so it goes to the main agent; the rest are read-only offers.
-  const selectionActions: SelectionAction[] = selectionRange && !reason
-    ? SELECTION_ACTIONS.map(({ kind, doing, ...action }) => ({
-        ...action, onSelect: () => {
-          setAsked(doing);
-          if (kind === "interview") void deliver(INTERVIEW_REQUEST, () => {}, { mode: "interview" });
-          else void agent.requestWritingHelp(kind, { focus: selectionRange });
-        },
-      }))
-    : [];
+  // An edit or a review goes to the main agent in a mode it already knows;
+  // the rest are read-only offers. With a highlight, each works on it, not on
+  // the passage around the cursor; without one, on the whole note.
+  const actionsFor = (definitions: ActionDefinition[], focus?: { from: number; to: number }): AgentAction[] =>
+    definitions.map(({ kind, doing, ...action }) => ({
+      ...action, onSelect: () => {
+        setAsked(doing);
+        setDropped(null);
+        if (!isAgentRequest(kind)) {
+          void agent.requestWritingHelp(kind, focus ? { focus } : { whole: true });
+          return;
+        }
+        const editor = agent.editor;
+        if (editor && currentNote && FACT_CHECKED.has(kind)) {
+          const { doc } = editor.state;
+          const before = doc.textBetween(0, doc.content.size, "\n");
+          factWatch.current = {
+            noteId: currentNote.id, before, started: false,
+            edited: focus ? doc.textBetween(focus.from, focus.to, "\n") : before,
+            keep: focus ? noteMap(doc, editor.storage.scratchDocument.title, focus).keep : [],
+          };
+        }
+        void deliver(AGENT_REQUESTS[kind].request, () => {}, { mode: AGENT_REQUESTS[kind].mode });
+      },
+    }));
+  const selectionActions = selectionRange && !reason ? actionsFor(SELECTION_ACTIONS, selectionRange) : [];
+  const noteActions = actionsFor(NOTE_ACTIONS);
   // Where the agent's attention is: the passage a run was sent with, or the
   // highlight the writer asked about.
   const workTarget = selectionSummary ?? (agent.companionRequested ? selection : null);
@@ -721,6 +773,18 @@ export function AgentPanel({
               </div>
             </section>
           )}
+          {dropped && dropped.noteId === currentNote?.id && !running && (
+            <section className="agent-panel-observation" role="status" aria-label="What the edit dropped">
+              <p>That edit dropped {dropped.facts.join(", ")} from the note.</p>
+              <div>
+                <button type="button" disabled={sending || !!reason} onClick={() => {
+                  setDropped(null);
+                  void deliver(`Put back what your last edit dropped: ${dropped.facts.join(", ")}. Keep the rest of that edit.`, () => {});
+                }}>Put them back</button>
+                <button type="button" onClick={() => setDropped(null)}>Keep the edit</button>
+              </div>
+            </section>
+          )}
           {workingPhase && (
             <AgentWorking
               state={agent.companionChecking ? "reading" : stalled ? "thinking" : presence.state}
@@ -881,18 +945,21 @@ export function AgentPanel({
               Try again
             </button>
           )}
-          {/* A highlight brings its own actions, so the general starters step aside. */}
+          {/* Work on the whole note; a highlight brings its own actions instead. */}
           {!waiting && !draft && !offer && !reason && !selectionSummary && (
-            <div className="agent-panel-starters" aria-label="Ways to work together">
-              {/* Once the agent has read the note, its own next moves replace the standing suggestions. */}
-              {agent.writingStarters.length > 0 ? agent.writingStarters.map((starter) => (
-                <button type="button" key={starter} disabled={sending || (running && !agent.companionChecking)}
-                  onClick={() => { void deliver(starter, () => {}); }}>{starter}</button>
-              )) : starters.map(({ label, kind, fitting }) => (
-                <button type="button" key={label} data-fitting={fitting || undefined} disabled={sending || (running && !agent.companionChecking)}
-                  onClick={() => { void agent.requestWritingHelp(kind); }}>{label}</button>
-              ))}
-            </div>
+            <>
+              <AgentActions actions={noteActions} label="Work on the whole note"
+                busy={sending || (running && !agent.companionChecking)} />
+              {/* Once the agent has read the note, a couple of its own next moves for it. */}
+              {agent.writingStarters.length > 0 && (
+                <div className="agent-panel-starters" aria-label="Suggested for this note">
+                  {agent.writingStarters.slice(0, SUGGESTED_MOVES).map((starter) => (
+                    <button type="button" key={starter} disabled={sending || (running && !agent.companionChecking)}
+                      onClick={() => { void deliver(starter, () => {}); }}>{starter}</button>
+                  ))}
+                </div>
+              )}
+            </>
           )}
           <div ref={composerBox} className="agent-panel-input-wrap" data-holding={selectionSummary ? "" : undefined}>
             {typedSkill !== null && (

@@ -1,16 +1,8 @@
-import { memo, useLayoutEffect, useRef, useState, type ComponentType } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import type { SelectionSummary } from "../../lib/agent/selection";
 import { XIcon } from "../icons";
 import { MarkdownPreview } from "./AgentMarkdown";
-
-export type SelectionAction = {
-  /** Shown on the button while there's room; narrower panels show the icon alone. */
-  label: string;
-  /** The full name, for the tooltip and assistive technology. */
-  title: string;
-  icon: ComponentType<{ className?: string }>;
-  onSelect: () => void;
-};
+import { AgentActions, type AgentAction } from "./AgentActions";
 
 /**
  * The selection the agent will work with (or is working with), docked on the
@@ -31,7 +23,7 @@ export const SelectionCard = memo(function SelectionCard({
   onReveal: () => void;
   onClear: () => void;
   /** Empty while the agent can't be asked about the passage. */
-  actions?: SelectionAction[];
+  actions?: AgentAction[];
   busy?: boolean;
   /** The writer is typing about it, so the passage steps back to one line. */
   compact?: boolean;
@@ -87,24 +79,7 @@ export const SelectionCard = memo(function SelectionCard({
         {summary.section && <> · {summary.section}</>}
       </div>
       {!running && actions.length > 0 && (
-        <div className="agent-selection-actions" role="group" aria-label="Work with this passage">
-          {actions.map(({ label, title, icon: Icon, onSelect }, index) => (
-            // Lower-ranked actions give up their labels first as the panel narrows.
-            <button
-              type="button"
-              key={title}
-              aria-label={title}
-              title={title}
-              data-primary={index === 0 || undefined}
-              data-rank={index}
-              disabled={busy}
-              onClick={onSelect}
-            >
-              <Icon className="w-3 h-3 shrink-0" />
-              <span className="agent-selection-action-label">{label}</span>
-            </button>
-          ))}
-        </div>
+        <AgentActions actions={actions} label="Work with this passage" busy={busy} />
       )}
     </section>
   );

@@ -1444,6 +1444,66 @@ export function InfoIcon({ className = "w-4.5 h-4.5" }: IconProps) {
   );
 }
 
+export function BookIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 19a9 9 0 0 1 9 0a9 9 0 0 1 9 0" />
+      <path d="M3 6a9 9 0 0 1 9 0a9 9 0 0 1 9 0" />
+      <path d="M3 6v13" />
+      <path d="M12 6v13" />
+      <path d="M21 6v13" />
+    </svg>
+  );
+}
+
+export function FileDescriptionIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" />
+      <path d="M9 13h6" />
+      <path d="M9 17h6" />
+    </svg>
+  );
+}
+
+export function FoldIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 3v6l3 -3m-6 0l3 3" />
+      <path d="M12 21v-6l3 3m-6 0l3 -3" />
+      <path d="M4 12h1" />
+      <path d="M9 12h1" />
+      <path d="M14 12h1" />
+      <path d="M19 12h1" />
+    </svg>
+  );
+}
+
 export function HelpCircleIcon({ className = "w-4.5 h-4.5" }: IconProps) {
   return (
     <svg

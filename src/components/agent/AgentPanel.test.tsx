@@ -7,7 +7,7 @@ import { Markdown } from "@tiptap/markdown";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AgentChanges, ScratchDocument } from "../editor/AgentChanges";
 import { TooltipProvider } from "../ui";
-import { AgentPanel, orderedStarters } from "./AgentPanel";
+import { AgentPanel } from "./AgentPanel";
 import { useAgentPanelShortcut } from "./useAgentPanelShortcut";
 import type * as AgentContext from "../../context/AgentContext";
 import { prepareWritingOffer } from "../../lib/agent/writingOffers";
@@ -441,13 +441,13 @@ it("shows what the writer typed, not the context sent with it", () => {
   expect(log.textContent).not.toContain("Inline agent request");
 });
 
-it("offers the four ways to work together until the writer starts typing", () => {
+it("offers the whole-note actions until the writer starts typing", () => {
   const input = openPanel();
-  act(() => button("Check a claim").click());
-  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("evidence");
+  act(() => button("Check the order").click());
+  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("move", { whole: true });
   expect(state.agent.send).not.toHaveBeenCalled();
   type(input, "My own question");
-  expect(button("Check a claim")).toBeUndefined();
+  expect(button("Check the order")).toBeUndefined();
 });
 
 it("shows the face with the reason for a concern, and lets the writer explore or dismiss the suggestion", async () => {
@@ -572,21 +572,63 @@ it("holds suggested next steps while the agent is working", () => {
   expect(button("Check the dates").disabled).toBe(true);
 });
 
-it("puts the help that fits the passage first and marks it, without changing which help is on offer", () => {
-  expect(orderedStarters(null).map(starter => starter.kind)).toEqual(["rewrite", "question", "evidence", "readback", "compare", "move"]);
-  expect(orderedStarters(null).some(starter => starter.fitting)).toBe(false);
-  // A weak lead reorders nothing worth pointing at.
-  expect(orderedStarters({ clarity: 0.1, evidence: 0.4, development: 0.2 })[0]).toMatchObject({ kind: "evidence", fitting: false });
-  state.agent.writingScores = { clarity: 0.2, evidence: 0.8, development: 0.3 };
+it("offers work on the whole note, reading it through first, and sends each to the right place", async () => {
   openPanel();
-  const starters = [...container.querySelectorAll(".agent-panel-starters button")];
-  expect(starters.map(item => item.textContent)).toEqual(["Check a claim", "Trace my argument", "Compare versions", "Explore the order", "Show a version", "Read it back"]);
-  expect(starters.map(item => item.hasAttribute("data-fitting"))).toEqual([true, false, false, false, false, false]);
+  const group = container.querySelector('[aria-label="Work on the whole note"]')!;
+  const actions = [...group.querySelectorAll("button")];
+  expect(actions.map(item => item.textContent)).toEqual(["Read it through", "Lead with the point", "Tighten the note", "Add a summary", "Check the order"]);
+  expect(actions[0].hasAttribute("data-primary")).toBe(true);
+  // A review and a whole-note edit go to the main agent in a mode it already knows, unrouted.
+  await act(async () => { button("Tighten the note").click(); });
+  expect(invoke).not.toHaveBeenCalled();
+  const [prompt, , mode] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(mode).toBe("coedit");
+  expect(prompt).toContain("Response mode: tighten-note.");
+  expect(prompt).toContain("one edit_document call");
+  expect(prompt).toContain("User instruction:\n\nTighten the whole note");
+  // A summary is written from the note itself, at its top, replacing one that's already there.
+  await act(async () => { button("Add a summary").click(); });
+  const [summary] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[1];
+  expect(summary).toContain("Response mode: summary.");
+  expect(summary).toContain("Draw only on what the note says");
+  expect(summary).toContain("rewrite that one in place instead of adding another");
+  // The order is a read-only offer about the whole note, not the passage at the cursor.
+  act(() => button("Check the order").click());
+  expect(state.agent.requestWritingHelp).toHaveBeenCalledExactlyOnceWith("move", { whole: true });
 });
 
-it("replaces the standing starters with the agent's own next moves for this note and sends one as a message", async () => {
-  state.agent.writingStarters = ["Connect Venus to the opening", "Find a source for the Venus day"];
+it("checks a tightened note for names and numbers it dropped, and offers to put them back", async () => {
+  editor.commands.setContent("<p>Hubs keeps its own build until Q3.</p><p>Automate owns 70+ permutations.</p>");
+  // Sending starts the run, the edit lands, the run ends.
+  state.agent.send = vi.fn(async () => { state.agent.conversation = { runId: "run", items: [] }; return true; });
   openPanel();
+  await act(async () => { button("Tighten the note").click(); });
+  editor.commands.setContent("<p>Hubs keeps its own build.</p><p>Automate owns 70+ permutations.</p>");
+  state.agent.conversation = { runId: null, items: [] };
+  act(() => root.render(<Workspace />));
+  const notice = container.querySelector('[aria-label="What the edit dropped"]')!;
+  expect(notice.textContent).toContain("That edit dropped Q3 from the note.");
+  await act(async () => { button("Put them back").click(); });
+  const [prompt] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.lastCall!;
+  expect(prompt).toContain("Put back what your last edit dropped: Q3. Keep the rest of that edit.");
+  expect(container.querySelector('[aria-label="What the edit dropped"]')).toBeNull();
+});
+
+it("says nothing when an edit kept every name and number", async () => {
+  editor.commands.setContent("<p>Hubs keeps its own build until Q3, as planned and agreed.</p>");
+  state.agent.send = vi.fn(async () => { state.agent.conversation = { runId: "run", items: [] }; return true; });
+  openPanel();
+  await act(async () => { button("Tighten the note").click(); });
+  editor.commands.setContent("<p>Hubs keeps its own build until Q3.</p>");
+  state.agent.conversation = { runId: null, items: [] };
+  act(() => root.render(<Workspace />));
+  expect(container.querySelector('[aria-label="What the edit dropped"]')).toBeNull();
+});
+
+it("adds a couple of the agent's own next moves for this note under the whole-note actions and sends one as a message", async () => {
+  state.agent.writingStarters = ["Connect Venus to the opening", "Find a source for the Venus day", "Cut the second list"];
+  openPanel();
+  expect(container.querySelector('[aria-label="Work on the whole note"]')).not.toBeNull();
   const starters = [...container.querySelectorAll(".agent-panel-starters button")];
   expect(starters.map(item => item.textContent)).toEqual(["Connect Venus to the opening", "Find a source for the Venus day"]);
   await act(async () => { button("Connect Venus to the opening").click(); });
@@ -608,9 +650,9 @@ it("docks a highlight on the composer and points every action at that passage, n
   const card = composerBox.querySelector('[aria-label="Selected passage"]')!;
   expect(card.textContent).toContain("note");
   // The highlight's own actions replace the general starters, with the trace leading.
-  expect(container.querySelector(".agent-panel-starters")).toBeNull();
+  expect(container.querySelector('[aria-label="Work on the whole note"]')).toBeNull();
   const actions = [...card.querySelectorAll('[role="group"] button')];
-  expect(actions.map(item => item.getAttribute("aria-label"))).toEqual(["Trace this argument", "Ask me questions, then improve it", "Check a claim", "Read it back as your reader"]);
+  expect(actions.map(item => item.getAttribute("aria-label"))).toEqual(["Trace this argument", "Tighten it against the rest of the note", "Ask me questions, then improve it", "Check a claim", "Read it back as your reader"]);
   expect(actions[0].hasAttribute("data-primary")).toBe(true);
   expect(container.querySelector("textarea")!.placeholder).toBe("Ask about this passage…");
   // Once the writer starts asking, the passage steps back to a line.
@@ -623,7 +665,7 @@ it("docks a highlight on the composer and points every action at that passage, n
   // Clearing lets go of the passage and brings the general starters back.
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="Clear selection"]')!.click());
   expect(composerBox.querySelector('[aria-label="Selected passage"]')).toBeNull();
-  expect(container.querySelector(".agent-panel-starters")).not.toBeNull();
+  expect(container.querySelector('[aria-label="Work on the whole note"]')).not.toBeNull();
 });
 
 it("sends Ask me questions to the main agent as an interview that edits the highlight once answered", async () => {
@@ -646,6 +688,33 @@ it("sends Ask me questions to the main agent as an interview that edits the high
   expect(prompt).toContain("call ask_user once");
   expect(prompt).toContain("replace_selection");
   expect(prompt).toContain("User instruction:\n\nAsk me a few questions about this passage");
+});
+
+it("tightens the highlight in place with a map of the whole note, so later sections keep what they rely on", async () => {
+  const note = new Editor({ element: document.createElement("div"), extensions: [StarterKit, Markdown, ScratchDocument, AgentChanges] });
+  onTestFinished(() => note.destroy());
+  note.commands.setContent(note.storage.markdown.manager.parse(
+    "## Scope\n\nTeams fork Blueprint and pad every page.\n\n## Risks\n\nBlueprint drift grows."));
+  note.storage.scratchDocument.noteId = "note";
+  state.agent.editor = note;
+  act(() => root.render(<Workspace />));
+  openPanel();
+  let passage = { from: 0, to: 0 };
+  note.state.doc.descendants((node, pos) => {
+    if (node.isTextblock && node.textContent.startsWith("Teams")) passage = { from: pos + 1, to: pos + 1 + node.content.size };
+  });
+  act(() => { note.commands.setTextSelection(passage); });
+  await act(async () => { button("Tighten").click(); });
+  // An edit the panel already understands: no classifier, no read-only offer.
+  expect(invoke).not.toHaveBeenCalled();
+  expect(state.agent.requestWritingHelp).not.toHaveBeenCalled();
+  const [prompt, , mode] = vi.mocked(state.agent.send as (...args: unknown[]) => unknown).mock.calls[0];
+  expect(mode).toBe("coedit");
+  expect(prompt).toContain("Response mode: tighten.");
+  expect(prompt).toContain("replace_selection");
+  expect(prompt).toContain('"outline":["Scope","Risks"]');
+  expect(prompt).toContain('"keep":["Blueprint"]');
+  expect(prompt).toContain("User instruction:\n\nTighten this passage");
 });
 
 describe("while the agent works on a request", () => {

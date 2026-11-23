@@ -150,7 +150,13 @@ function revealIfHidden(editor: Editor, pos: number) {
 
 /** answer: the writer's reply to a question, or for realign their correction to the trace step at index step.
  * focus: a highlighted range to work from instead of the passage around the cursor. */
-export interface WritingHelpOptions { answer?: string; step?: number; focus?: { from: number; to: number } | null }
+export interface WritingHelpOptions {
+  answer?: string;
+  step?: number;
+  focus?: { from: number; to: number } | null;
+  /** About the whole note rather than the passage around the cursor. */
+  whole?: boolean;
+}
 
 export interface Conversation {
   items: TranscriptItem[];
@@ -2105,7 +2111,7 @@ export function AgentProvider({
       dismissWritingSuggestion();
     } catch (error) { toast.error(agent.errorMessage(error)); }
   }, [editor, currentOffer, conversation.runId, assessingWriting, dismissWritingSuggestion]);
-  const requestWritingHelp = useCallback(async (kind: WritingRequest, { answer, step, focus }: WritingHelpOptions = {}) => {
+  const requestWritingHelp = useCallback(async (kind: WritingRequest, { answer, step, focus, whole = false }: WritingHelpOptions = {}) => {
     if (!editor || !ready || modelsLoading || !model || explicitWritingRequest.current === reviewVersion.current) return;
     if (kind === "evidence" && !webAccess) {
       toast.error("Turn on internet access in agent settings to check sources.");
@@ -2181,7 +2187,8 @@ export function AgentProvider({
     const highlight = effectiveFocus && effectiveFocus.from < effectiveFocus.to && effectiveFocus.to <= doc.content.size
       ? doc.textBetween(effectiveFocus.from, Math.min(effectiveFocus.to, effectiveFocus.from + 4000), "\n").trim() : "";
     if (kind === "outcome" && !highlight) return;
-    const { passage } = writingPassage(editor, false, highlight ? effectiveFocus!.to : undefined);
+    const wholeNote = whole && !highlight;
+    const { passage } = writingPassage(editor, wholeNote, highlight ? effectiveFocus!.to : undefined);
     const offerKind = answering || kind === "compare" ? "rewrite" : kind === "readback" || kind === "outcome" ? "question" : kind;
     // Companion offers and traces draw on what this conversation already answered, researched, or edited.
     const latestItems = (currentNote && conversationsRef.current[currentNote.id]?.items) ?? conversation.items;
@@ -2209,7 +2216,8 @@ export function AgentProvider({
         ? "Work back from the passage I highlighted to how it got there. Trace the threads that converge on it: passages in the note it builds on, and anything in our conversation that shaped it (what I asked, discussion, research, a connected service, another note, or an edit you made). Cite conversation entries by their ledger id as source, quoting their exact text. Connect independent premises or sources to their merge step or null (the outcome) with leads_to instead of forcing one linear chain, mark competing points with role \"tensions\", and mark a step unsure where you filled a gap yourself (unless an earlier turn in the ledger already answered it). In the explanation, say what we learned along the way: what sources established and any step that looks weak now. Anchor the offer in the highlight and ask one useful question about it."
       : answering ? `Use my answer to develop the passage in my voice with a proposed rewrite. My answer: ${answer!.slice(0, 4000)}`
       // An action on a highlight is about that passage, not whatever sits around the cursor.
-      : `${requests[kind as keyof typeof requests]}${focus && highlight ? " Work on the passage I highlighted, and anchor the offer in it." : ""}`;
+      : `${requests[kind as keyof typeof requests]}${focus && highlight ? " Work on the passage I highlighted, and anchor the offer in it."
+        : wholeNote ? " Look across the whole note, not only the part around my cursor: read all of it first." : ""}`;
     setAssessingWriting(true);
     try {
       const route: agent.ModelRoute =

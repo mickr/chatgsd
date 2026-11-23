@@ -1479,6 +1479,13 @@ describe("structured writing offers", () => {
     await act(async () => { await current.requestWritingHelp("evidence"); });
     expect(agent.startRun).toHaveBeenLastCalledWith(expect.objectContaining({ model: "gpt-x", researchModel: "gpt-x", webAccess: true, readOnly: true }));
   });
+  it("looks across the whole note when asked about it rather than the passage at the cursor", async () => {
+    await readyWithModels();
+    await act(async () => { await current.requestWritingHelp("question", { whole: true }); });
+    const prompt = vi.mocked(agent.startRun).mock.lastCall![0].prompt;
+    expect(prompt).toContain("Look across the whole note");
+    expect(prompt).not.toContain("Work on the passage I highlighted");
+  });
   it("anchors other help on a highlight in that passage", async () => {
     await readyWithModels();
     const from = 1 + editor.getText().indexOf("Trip plan");
