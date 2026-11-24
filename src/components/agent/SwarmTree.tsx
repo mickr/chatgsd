@@ -1,6 +1,6 @@
 import { memo, useState, type CSSProperties } from "react";
 import type { SwarmItem, SwarmWorker } from "../../context/AgentContext";
-import type { SubagentStatus } from "../../services/agent";
+import type { SubagentStatus, SwarmBoardEntry } from "../../services/agent";
 import { StopIcon } from "../icons";
 
 const ACTIVE_STATUSES = new Set<SubagentStatus>([
@@ -88,6 +88,45 @@ function coordinatorSummary(workers: SwarmWorker[]): {
   };
 }
 
+const BOARD_SECTIONS: Array<{ kind: SwarmBoardEntry["kind"]; heading: string; noun: [string, string] }> = [
+  { kind: "decision", heading: "Decisions", noun: ["decision", "decisions"] },
+  { kind: "handoff", heading: "Handoffs", noun: ["handoff", "handoffs"] },
+  { kind: "question", heading: "Questions", noun: ["question", "questions"] },
+  { kind: "update", heading: "Updates", noun: ["update", "updates"] },
+];
+
+/** The run's shared board, grouped like the Markdown document the agents read. */
+export function SwarmBoard({ entries }: { entries: SwarmBoardEntry[] }) {
+  const sections = BOARD_SECTIONS.map((section) => ({
+    ...section,
+    entries: entries.filter((entry) => entry.kind === section.kind),
+  })).filter((section) => section.entries.length > 0);
+  const counts = sections
+    .map(({ entries: list, noun }) => `${list.length} ${noun[list.length === 1 ? 0 : 1]}`)
+    .join(" · ");
+  return (
+    <details className="agent-swarm-board">
+      <summary>Board · {counts}</summary>
+      {sections.map((section) => (
+        <section key={section.kind} className="agent-swarm-board-section" data-kind={section.kind}>
+          <h4>{section.heading}</h4>
+          <ul role="list">
+            {section.entries.map((entry, index) => (
+              <li
+                key={`${entry.timestampMs}-${index}`}
+                style={entry.color ? ({ "--worker-color": entry.color } as CSSProperties) : undefined}
+              >
+                <span className="agent-swarm-board-from">{entry.from}</span>
+                <span className="agent-swarm-board-message">{entry.message}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </details>
+  );
+}
+
 function outcomeTone(outcome: string): "pass" | "issues" | "blocked" {
   const upper = outcome.toUpperCase();
   if (upper === "PASS") return "pass";
@@ -173,6 +212,7 @@ export const SwarmTree = memo(function SwarmTree({
           </div>
         </div>
         {swarm.goal && <p className="agent-swarm-goal">{swarm.goal}</p>}
+        {swarm.board && swarm.board.length > 0 && <SwarmBoard entries={swarm.board} />}
       </div>
 
       {showBranches && workers.length > 0 && (

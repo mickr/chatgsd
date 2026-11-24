@@ -83,6 +83,8 @@ export interface SwarmItem {
   swarmId: string;
   goal: string | null;
   workers: SwarmWorker[];
+  /** The run's shared board as of this swarm's latest update. */
+  board?: agent.SwarmBoardEntry[];
 }
 export type TranscriptItem =
   | { id: string; type: "text"; text: string }
@@ -1110,6 +1112,18 @@ export function AgentProvider({
               workers,
             };
           });
+          return { ...conversation, items };
+        }
+        if (event.type === "swarm_board") {
+          // The board belongs to the run; its newest swarm card shows it.
+          let target = -1;
+          conversation.items.forEach((item, idx) => {
+            if (item.type === "swarm" && item.runId === payload.runId) target = idx;
+          });
+          if (target === -1) return conversation;
+          const items = conversation.items.map((item, idx) =>
+            idx === target && item.type === "swarm" ? { ...item, board: event.entries } : item,
+          );
           return { ...conversation, items };
         }
         if (event.type === "skill_offer") {

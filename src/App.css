@@ -1640,6 +1640,15 @@ table.not-prose th {
 .agent-swarm-coord-title { font-weight: 600; color: var(--color-text); }
 .agent-swarm-coord-summary { color: var(--color-text-muted); font-size: 10.5px; }
 .agent-swarm-goal { margin-top: 4px; padding-left: 14px; font-size: 11px; line-height: 1.45; color: var(--color-text-muted); }
+.agent-swarm-board { margin: 6px 0 0 14px; }
+.agent-swarm-board summary { cursor: pointer; font-size: 10px; color: var(--color-text-muted); user-select: none; }
+.agent-swarm-board summary:hover { color: var(--color-text); }
+.agent-swarm-board-section { margin-top: 6px; }
+.agent-swarm-board-section h4 { font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--color-text-muted); }
+.agent-swarm-board-section ul { margin-top: 3px; padding: 5px 8px; border-radius: 6px; background: var(--color-bg-muted); max-height: 160px; overflow-y: auto; }
+.agent-swarm-board-section li { font-size: 10.5px; line-height: 1.5; color: var(--color-text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-swarm-board-section li + li { margin-top: 3px; }
+.agent-swarm-board-from { font-weight: 600; color: var(--worker-color, var(--color-text)); margin-right: 6px; }
 .agent-swarm-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; }
 .agent-swarm-btn { padding: 2px 7px; font-size: 10px; font-weight: 500; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-bg); color: var(--color-text); cursor: pointer; transition: border-color 150ms, background 150ms, color 150ms; }
 .agent-swarm-btn:hover { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 8%, transparent); }

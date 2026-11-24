@@ -178,3 +178,50 @@ it("offers Clean up when all agents settle and collapses once cleaned up", () =>
   act(() => buttonByText("Inspect")!.click());
   expect(container.querySelectorAll(".agent-swarm-branch-row").length).toBe(2);
 });
+
+it("shows the shared board on the coordinator, grouped so a worker's question stands out", () => {
+  const swarm: SwarmItem = {
+    ...baseSwarm([
+      { workerId: "w1", name: "Intro", role: "Editor", status: "running", steps: 1, updatedAt: 1000 },
+    ]),
+    board: [
+      { from: "Intro", role: "Editor", color: "#2563eb", kind: "update", message: "Opening done.", timestampMs: 1 },
+      { from: "Coordinator", role: "Coordinator", kind: "decision", message: "Use \"config store\".", timestampMs: 2 },
+      { from: "Intro", role: "Editor", kind: "question", message: "Keep the ER diagram?", timestampMs: 3 },
+    ],
+  };
+  act(() => {
+    root.render(
+      <SwarmTree
+        swarm={swarm}
+        activeRun
+        onStopWorker={vi.fn()}
+        onStopAll={vi.fn()}
+        onDrain={vi.fn()}
+        onCleanup={vi.fn()}
+      />,
+    );
+  });
+
+  const board = container.querySelector(".agent-swarm-coordinator .agent-swarm-board");
+  expect(board?.querySelector("summary")?.textContent).toBe("Board · 1 decision · 1 question · 1 update");
+  const headings = [...board!.querySelectorAll("h4")].map((h) => h.textContent);
+  expect(headings).toEqual(["Decisions", "Questions", "Updates"]);
+  expect(board!.querySelector('[data-kind="question"] li')?.textContent).toContain("Keep the ER diagram?");
+});
+
+it("hides the board until someone posts", () => {
+  act(() => {
+    root.render(
+      <SwarmTree
+        swarm={{ ...baseSwarm([]), board: [] }}
+        activeRun
+        onStopWorker={vi.fn()}
+        onStopAll={vi.fn()}
+        onDrain={vi.fn()}
+        onCleanup={vi.fn()}
+      />,
+    );
+  });
+  expect(container.querySelector(".agent-swarm-board")).toBeNull();
+});

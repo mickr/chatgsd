@@ -104,6 +104,15 @@ export interface SubagentEvent {
   checkedAt?: number | null;
   updatedAt: number;
 }
+/** One entry on a run's shared swarm board. */
+export interface SwarmBoardEntry {
+  from: string;
+  role: string;
+  color?: string;
+  kind: "decision" | "handoff" | "question" | "update";
+  message: string;
+  timestampMs: number;
+}
 export type AgentEvent =
   | ({ type: "computer_unavailable" } & ComputerUnavailable)
   | { type: "session"; sessionId: string }
@@ -114,6 +123,7 @@ export type AgentEvent =
   | { type: "tool_result"; callId: string; ok: boolean; output: string }
   | ({ type: "skill_offer" } & SkillOffer)
   | ({ type: "subagent" } & SubagentEvent)
+  | { type: "swarm_board"; entries: SwarmBoardEntry[] }
   | { type: "done"; stopReason: "completed" | "cancelled" }
   | { type: "error"; kind: AgentErrorKind; message: string };
 export interface AgentEventPayload {

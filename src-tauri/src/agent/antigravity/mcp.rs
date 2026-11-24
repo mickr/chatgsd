@@ -9,7 +9,7 @@ use crate::agent::{
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
@@ -35,10 +35,14 @@ pub(super) struct ActiveMcpRun {
     pub worker_request: Option<subagents::WorkerRequest>,
 }
 
+/// Names of the tools this server answered its first `tools/list` with.
+type Listed = Arc<StdMutex<Option<HashSet<String>>>>;
+
 pub(super) struct McpServer {
     pub url: String,
     pub token: String,
     active: Arc<RwLock<Option<ActiveMcpRun>>>,
+    listed: Listed,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -54,6 +58,8 @@ impl McpServer {
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
         let active = Arc::new(RwLock::new(None));
         let task_active = Arc::clone(&active);
+        let listed: Listed = Arc::default();
+        let task_listed = Arc::clone(&listed);
         let expected_auth = format!("Bearer {token}");
         let task = tokio::spawn(async move {
             loop {
@@ -62,9 +68,10 @@ impl McpServer {
                 };
                 let _ = stream.set_nodelay(true);
                 let state = Arc::clone(&task_active);
+                let listed = Arc::clone(&task_listed);
                 let auth = expected_auth.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, state, &auth, default_read_only).await;
+                    let _ = handle_connection(stream, state, listed, &auth, default_read_only).await;
                 });
             }
         });
@@ -72,12 +79,25 @@ impl McpServer {
             url: format!("http://127.0.0.1:{port}/mcp"),
             token,
             active,
+            listed,
             task,
         })
     }
 
     pub async fn set_active(&self, run: Option<ActiveMcpRun>) {
         *self.active.write().await = run;
+    }
+
+    /// Whether this server's `agy` process lists exactly `permitted`: `None` if
+    /// it hasn't listed tools yet. `agy acp` calls `tools/list` once per process
+    /// and reuses that list for every later session, so a process that listed
+    /// another set hides or offers the wrong tools for this run.
+    pub fn lists(&self, permitted: &HashSet<String>) -> Option<bool> {
+        self.listed
+            .lock()
+            .expect("listed tools mutex")
+            .as_ref()
+            .map(|listed| listed == permitted)
     }
 
     pub fn mcp_server_config(&self) -> Value {
@@ -99,9 +119,10 @@ impl Drop for McpServer {
     }
 }
 
-/// The tools for one run. A session keeps the list it started with, so a
+/// The tools for one run. `agy` keeps the first list its process saw, so a
 /// conversation always lists the web tools and each call checks whether the
-/// message has internet access; a check-in lists them only when it has.
+/// message has internet access; a check-in lists them only when it has, and a
+/// client that listed another set is replaced (see `McpServer::lists`).
 /// When computer access is active, the run's CUA tools are appended as well.
 pub(super) fn mcp_tool_list(
     read_only: bool,
@@ -167,6 +188,7 @@ fn clean_tool_args(mut args: Value) -> Value {
 async fn handle_connection<S>(
     stream: S,
     active: Arc<RwLock<Option<ActiveMcpRun>>>,
+    listed: Listed,
     expected_auth: &str,
     default_read_only: bool,
 ) -> std::io::Result<()>
@@ -213,7 +235,7 @@ where
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return write_http(reader.get_mut(), 400, "Bad Request", None).await;
     };
-    let Some(response) = dispatch_rpc(request, &active, default_read_only).await else {
+    let Some(response) = dispatch_rpc(request, &active, &listed, default_read_only).await else {
         return write_http(reader.get_mut(), 202, "Accepted", None).await;
     };
     let bytes = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
@@ -249,6 +271,7 @@ where
 async fn dispatch_rpc(
     request: Value,
     active: &Arc<RwLock<Option<ActiveMcpRun>>>,
+    listed: &Listed,
     default_read_only: bool,
 ) -> Option<Value> {
     let method = request["method"].as_str().unwrap_or_default();
@@ -277,6 +300,12 @@ async fn dispatch_rpc(
                     None => mcp_tool_list(default_read_only, false, &[]).0,
                 }
             };
+            listed.lock().expect("listed tools mutex").get_or_insert_with(|| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                    .collect()
+            });
             json!({ "tools": tools })
         }
         "tools/call" => {
@@ -428,8 +457,10 @@ mod tests {
     #[tokio::test]
     async fn mcp_handler_enforces_bearer_auth_and_lists_tools() {
         let active = Arc::new(RwLock::new(None));
+        let listed: Listed = Arc::default();
         let send = |headers: &str, body: &str| {
             let active = Arc::clone(&active);
+            let listed = Arc::clone(&listed);
             let req = format!(
                 "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Length: {}\r\n\r\n{body}",
                 body.len()
@@ -437,7 +468,7 @@ mod tests {
             async move {
                 let (mut client, server) = tokio::io::duplex(64 * 1024);
                 let task = tokio::spawn(async move {
-                    handle_connection(server, active, "Bearer secret", false).await
+                    handle_connection(server, active, listed, "Bearer secret", false).await
                 });
                 client.write_all(req.as_bytes()).await.unwrap();
                 client.shutdown().await.unwrap();
@@ -468,5 +499,9 @@ mod tests {
         assert!(names.contains(&"read_document"));
         assert!(names.contains(&"edit_document"));
         assert!(names.contains(&"offer_writing_help"));
+
+        // agy keeps this first answer for the life of its process; reuse decisions read it back.
+        let first: HashSet<String> = names.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(listed.lock().unwrap().as_ref(), Some(&first));
     }
 }

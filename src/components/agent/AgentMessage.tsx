@@ -84,6 +84,8 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
     return item.ok ? "Drained agents" : "Draining agents";
   if (item.name === "stop_subagents")
     return input.cleanup ? "Cleaned up agents" : "Stopped agents";
+  if (item.name === "swarm_message")
+    return input.action === "post" ? "Posted to the swarm board" : "Read the swarm board";
   return item.name.replace(/_/g, " ");
 }
 /** User messages longer than this start collapsed. */

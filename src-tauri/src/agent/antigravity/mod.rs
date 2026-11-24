@@ -14,6 +14,7 @@ use super::{
 use mcp::{mcp_tool_list, ActiveMcpRun};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
@@ -30,9 +31,31 @@ static CLIENT: Mutex<Option<AcpClient>> = Mutex::const_new(None);
 /// Separate warm client for background read-only check-ins so they never block
 /// interactive user edits on `CLIENT`.
 static CHECKIN_CLIENT: Mutex<Option<AcpClient>> = Mutex::const_new(None);
+/// Conversation turns with computer access. `agy` keeps one tool list per
+/// process, so these get their own client rather than restarting `CLIENT`
+/// (and dropping its warm sessions) each time computer access is toggled.
+static COMPUTER_CLIENT: Mutex<Option<AcpClient>> = Mutex::const_new(None);
 /// Pre-warmed Antigravity ACP clients for low-TTFT parallel swarm workers.
 static WORKER_POOL: Mutex<Vec<AcpClient>> = Mutex::const_new(Vec::new());
 const MAX_WARM_AGY_WORKERS: usize = 3;
+
+/// Takes a live pooled client already listing `permitted`, else one that hasn't
+/// listed tools yet. A read-only reviewer's client handed to an editor would
+/// never list `edit_document`.
+fn take_warm_worker(pool: &mut Vec<AcpClient>, permitted: &HashSet<String>) -> Option<AcpClient> {
+    pool.retain_mut(AcpClient::is_alive);
+    let lists: Vec<_> = pool.iter().map(|client| client.mcp.lists(permitted)).collect();
+    let index = reusable_worker_index(&lists)?;
+    Some(pool.swap_remove(index))
+}
+
+/// `lists[i]` is whether client `i` lists the wanted tools (`None`: hasn't listed yet).
+fn reusable_worker_index(lists: &[Option<bool>]) -> Option<usize> {
+    lists
+        .iter()
+        .position(|lists| *lists == Some(true))
+        .or_else(|| lists.iter().position(Option::is_none))
+}
 /// Active `agy acp --login` process awaiting the pasted OAuth code or callback URL.
 static LOGIN_SESSION: Mutex<Option<LoginSession>> = Mutex::const_new(None);
 
@@ -91,13 +114,20 @@ fn classify_error(message: String) -> AgentError {
     AgentError { kind, message }
 }
 
+/// Returns the slot's live client, starting one if needed. With `permitted`,
+/// a client whose process already listed other tools is replaced, since `agy`
+/// would keep offering that stale list to every new session.
 async fn ensure_client<'a>(
     guard: &'a mut Option<AcpClient>,
     app: &tauri::AppHandle,
     default_read_only: bool,
+    permitted: Option<&HashSet<String>>,
 ) -> Result<&'a mut AcpClient, String> {
-    let alive = guard.as_mut().is_some_and(AcpClient::is_alive);
-    if !alive {
+    let usable = guard.as_mut().is_some_and(|client| {
+        client.is_alive()
+            && permitted.is_none_or(|permitted| client.mcp.lists(permitted) != Some(false))
+    });
+    if !usable {
         *guard = None;
         *guard = Some(AcpClient::start(app, default_read_only).await?);
     }
@@ -107,6 +137,7 @@ async fn ensure_client<'a>(
 async fn clear_clients() {
     *CLIENT.lock().await = None;
     *CHECKIN_CLIENT.lock().await = None;
+    *COMPUTER_CLIENT.lock().await = None;
     WORKER_POOL.lock().await.clear();
     *LOGIN_SESSION.lock().await = None;
 }
@@ -164,7 +195,7 @@ pub async fn status(app: &tauri::AppHandle) -> AntigravityStatus {
     let binary_path = Some(binary.to_string_lossy().into_owned());
     let mut guard = CLIENT.lock().await;
     let result = async {
-        let client = ensure_client(&mut guard, app, false).await?;
+        let client = ensure_client(&mut guard, app, false, None).await?;
         if client.cached_models.is_empty() {
             client.discover_models().await?;
         }
@@ -198,7 +229,7 @@ pub async fn status(app: &tauri::AppHandle) -> AntigravityStatus {
 
 pub async fn list_models(app: &tauri::AppHandle) -> Result<Vec<ModelInfo>, String> {
     let mut guard = CLIENT.lock().await;
-    let client = ensure_client(&mut guard, app, false).await?;
+    let client = ensure_client(&mut guard, app, false, None).await?;
     if !client.cached_models.is_empty() {
         return Ok(client.cached_models.clone());
     }
@@ -252,6 +283,7 @@ pub async fn antigravity_sign_in_complete(
     session.complete(&code).await?;
     *CLIENT.lock().await = None;
     *CHECKIN_CLIENT.lock().await = None;
+    *COMPUTER_CLIENT.lock().await = None;
     Ok(status(&app).await)
 }
 
@@ -365,10 +397,20 @@ pub async fn run(
     let memory = memory_result.map_err(other)?;
     let snapshot = serde_json::to_string(&memory).map_err(|error| other(error.to_string()))?;
 
-    let pool = if ctx.read_only { &CHECKIN_CLIENT } else { &CLIENT };
+    let pool = if ctx.read_only {
+        &CHECKIN_CLIENT
+    } else if computer_available {
+        // The conversation's warm session on `CLIENT` hasn't seen this turn;
+        // drop it so the next turn there re-imports the transcript.
+        invalidate_session(&session_id).await;
+        &COMPUTER_CLIENT
+    } else {
+        &CLIENT
+    };
+    let wanted = permitted.clone();
     let mut guard = pool.lock().await;
     let was_warm = guard.as_mut().is_some_and(AcpClient::is_alive);
-    let mut client = ensure_client(&mut guard, &app, ctx.read_only)
+    let mut client = ensure_client(&mut guard, &app, ctx.read_only, Some(&wanted))
         .await
         .map_err(classify_error)?;
     if !ctx.read_only && !enabled_skills.is_empty() {
@@ -392,11 +434,7 @@ pub async fn run(
     let session_key = (!ctx.read_only).then_some(session_id.as_str());
     let mut prepared = async {
         let ensured = if computer_available {
-            // Computer turns are ephemeral so screenshots never persist in a warm
-            // ACP session and `tools/list` always discovers the active `cua_*` catalog.
-            if let Some(key) = session_key {
-                client.drop_session(key).await;
-            }
+            // Computer turns are ephemeral so screenshots never persist in a warm ACP session.
             let acp_session_id = client.create_ephemeral_session(&instructions).await?;
             EnsuredSession {
                 acp_session_id,
@@ -425,7 +463,7 @@ pub async fn run(
     if prepared.is_err() && was_warm {
         client.mcp.set_active(None).await;
         *guard = None;
-        client = ensure_client(&mut guard, &app, ctx.read_only)
+        client = ensure_client(&mut guard, &app, ctx.read_only, Some(&wanted))
             .await
             .map_err(classify_error)?;
         client.mcp.set_active(Some(active_run)).await;
@@ -796,22 +834,13 @@ pub(super) fn run_worker<'a>(
     mut cancel: oneshot::Receiver<()>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
     Box::pin(async move {
-    let pooled = {
-        let mut pool = WORKER_POOL.lock().await;
-        let mut chosen = None;
-        while let Some(mut candidate) = pool.pop() {
-            if candidate.is_alive() {
-                chosen = Some(candidate);
-                break;
-            }
-        }
-        chosen
-    };
+    let (tools, permitted) = mcp::subagent_mcp_tool_list(ctx.web_access, req.can_edit);
+    let wanted = permitted.clone();
+    let pooled = take_warm_worker(&mut *WORKER_POOL.lock().await, &wanted);
     let mut client = match pooled {
         Some(client) => client,
         None => AcpClient::start(app, true).await?,
     };
-    let (tools, permitted) = mcp::subagent_mcp_tool_list(ctx.web_access, req.can_edit);
     let active_run = ActiveMcpRun {
         app: app.clone(),
         ctx: ctx.clone(),
@@ -937,10 +966,49 @@ pub(super) fn run_worker<'a>(
     if result.is_ok() && !client.dirty && client.is_alive() {
         client.close_session(&ensured.acp_session_id).await;
         let mut pool = WORKER_POOL.lock().await;
+        if pool.len() >= MAX_WARM_AGY_WORKERS {
+            // Make room so a full pool listing other tools can't starve this toolset.
+            if let Some(index) = pool.iter().position(|warm| warm.mcp.lists(&wanted) != Some(true)) {
+                pool.swap_remove(index);
+            }
+        }
         if pool.len() < MAX_WARM_AGY_WORKERS {
             pool.push(client);
         }
     }
     result
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a pooled client's recorded list says for a worker wanting `wanted`.
+    fn lists(listed: &[Option<&HashSet<String>>], wanted: &HashSet<String>) -> Vec<Option<bool>> {
+        listed.iter().map(|l| l.map(|l| l == wanted)).collect()
+    }
+
+    /// A reviewer's client keeps its read-only tool list for good; handing it to
+    /// an editor left every pooled editor without edit_document, so it reported BLOCKED.
+    #[test]
+    fn editors_never_reuse_a_read_only_workers_client() {
+        let reviewer = mcp::subagent_mcp_tool_list(false, false).1;
+        let editor = mcp::subagent_mcp_tool_list(false, true).1;
+        assert!(editor.contains("edit_document") && !reviewer.contains("edit_document"));
+
+        let pool = [Some(&reviewer), Some(&reviewer), Some(&reviewer)];
+        assert_eq!(reusable_worker_index(&lists(&pool, &editor)), None);
+        assert_eq!(reusable_worker_index(&lists(&pool, &reviewer)), Some(0));
+    }
+
+    #[test]
+    fn reuse_prefers_a_matching_client_then_a_fresh_one() {
+        let reviewer = mcp::subagent_mcp_tool_list(false, false).1;
+        let editor = mcp::subagent_mcp_tool_list(false, true).1;
+        let web_editor = mcp::subagent_mcp_tool_list(true, true).1;
+        let pool = [Some(&reviewer), None, Some(&editor)];
+        assert_eq!(reusable_worker_index(&lists(&pool, &editor)), Some(2));
+        assert_eq!(reusable_worker_index(&lists(&pool, &web_editor)), Some(1));
+    }
 }

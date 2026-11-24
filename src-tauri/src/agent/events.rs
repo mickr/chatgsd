@@ -42,6 +42,10 @@ pub enum AgentEvent {
     SkillOffer(SkillOffer),
     /// Live status update from a coordinated subagent / swarm worker.
     Subagent(super::subagents::SubagentEvent),
+    /// The run's whole swarm board after a post, shown on its newest swarm card.
+    SwarmBoard {
+        entries: Vec<super::subagents::SwarmNote>,
+    },
     Done {
         stop_reason: String,
     },
