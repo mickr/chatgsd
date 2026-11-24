@@ -111,8 +111,8 @@ async fn run(app: &tauri::AppHandle, ctx: &RunContext, model: Option<&str>, call
     let Some(question) = args["question"].as_str().map(str::trim).filter(|question| !question.is_empty()) else {
         return Ok(ResearchResult::error("question must be a nonempty string"));
     };
-    let mut server = Server::start(app).await.map_err(other)?;
-    if account::read(&mut server).await.map_err(other)?.is_none() { return Err(super::auth("Sign in with ChatGPT to research")); }
+    let mut server = Server::acquire(app, false).await.map_err(other)?;
+    if account::read_cached(&mut server).await.map_err(other)?.is_none() { return Err(super::auth("Sign in with ChatGPT to research")); }
     let fetch = dynamic_tool("web_fetch", "Read a public web page as markdown. Pass url and nullable 1-based start_line/end_line (at most 400 lines) for long pages.", json!({"type":"object","properties":{"url":{"type":"string"},"start_line":{"type":["integer","null"]},"end_line":{"type":["integer","null"]}},"required":["url","start_line","end_line"],"additionalProperties":false}));
     let started = server.rpc("thread/start", json!({"model":model,"cwd":server.cwd,"ephemeral":true,"sandbox":"read-only","approvalPolicy":"on-request","environments":[],"baseInstructions":prompt::research_instructions(ctx.research_brief.as_deref()),"config":{"web_search":"live"},"dynamicTools":[fetch]})).await.map_err(other)?;
     let thread = started["thread"]["id"].as_str().ok_or_else(|| other("Codex returned no research thread ID"))?.to_owned();

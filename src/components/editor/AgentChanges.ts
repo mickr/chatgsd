@@ -32,10 +32,17 @@ interface TextArrival {
   positions: number[];
   revealed: number;
 }
+export interface PresenceEntry {
+  from: number;
+  to: number;
+  label?: string;
+  color?: string;
+  writing?: boolean;
+}
 interface ChangeState {
   hunks: AgentChange[];
   focusRanges: FocusRange[];
-  presence: Record<string, { from: number; to: number }>;
+  presence: Record<string, PresenceEntry>;
   /** Counts the agent's moves, so the idle caret's fade restarts with each one. */
   presenceMoves: number;
   arrival: TextArrival | null;
@@ -49,10 +56,10 @@ interface ChangeMeta {
   focus?: FocusRange;
   releaseFocus?: string;
   dismissSelection?: boolean;
-  /** Agent presence metadata - keys are runIds, values are ranges */
-  presence?: { [runId: string]: { from: number; to: number } };
-  /** Clear presence for a specific runId */
-  clearPresence?: string;
+  /** Agent & swarm worker presence metadata - keys are "agent" or workerIds */
+  presence?: { [actorId: string]: PresenceEntry };
+  /** Clear presence for a specific actorId, list of actorIds, "all-workers", or "*" */
+  clearPresence?: string | string[];
   arrival?: Array<{ from: number; to: number }>;
   clearArrival?: boolean;
   reveal?: number;
@@ -339,24 +346,52 @@ function decorations(editor: Editor, state: ChangeState): DecorationSet {
         Decoration.inline(range.from, range.to, { class: "agent-selection" }),
       );
   
-  // Render single agent presence caret (not accumulating per-run carets)
-  const agentPresence = state.presence["agent"];
-  if (agentPresence) {
-    const { from, to } = agentPresence;
-    if (from < to)
-      result.push(Decoration.inline(from, to, { class: "agent-working-range" }));
-    result.push(Decoration.widget(state.arrival ? arrivalCaret(state.arrival) : to, () => {
-      const caret = document.createElement("span");
-      caret.className = "agent-presence-caret";
-      caret.dataset.writing = String(Boolean(state.arrival));
-      caret.contentEditable = "false";
-      caret.setAttribute("aria-label", "Agent working here");
-      const label = document.createElement("span");
-      label.className = "agent-presence-label";
-      label.textContent = "Agent";
-      caret.append(label);
-      return caret;
-    }, { key: state.arrival ? "agent-presence-writing" : `agent-presence-idle-${state.presenceMoves}`, side: -1 }));
+  // Render main agent + every active swarm worker presence caret
+  for (const [actorId, entry] of Object.entries(state.presence)) {
+    const isMain = actorId === "agent";
+    const { from, to } = entry;
+    const color = entry.color;
+    const style = color ? `--presence-color: ${color};` : undefined;
+    if (from < to) {
+      result.push(
+        Decoration.inline(from, to, {
+          class: isMain ? "agent-working-range" : "agent-working-range agent-worker-range",
+          ...(style ? { style } : {}),
+        }),
+      );
+    }
+    const pos = isMain && state.arrival ? arrivalCaret(state.arrival) : to;
+    const writing = isMain ? Boolean(state.arrival) : Boolean(entry.writing ?? true);
+    const labelText = entry.label || "Agent";
+    result.push(
+      Decoration.widget(
+        pos,
+        () => {
+          const caret = document.createElement("span");
+          caret.className = isMain
+            ? "agent-presence-caret"
+            : "agent-presence-caret agent-worker-caret";
+          if (color) caret.style.setProperty("--presence-color", color);
+          caret.dataset.writing = String(writing);
+          caret.dataset.actor = actorId;
+          caret.contentEditable = "false";
+          caret.setAttribute("aria-label", `${labelText} working here`);
+          const label = document.createElement("span");
+          label.className = "agent-presence-label";
+          label.textContent = labelText;
+          caret.append(label);
+          return caret;
+        },
+        {
+          key: isMain
+            ? state.arrival
+              ? "agent-presence-writing"
+              : `agent-presence-idle-${state.presenceMoves}`
+            : `worker-presence-${actorId}-${state.presenceMoves}`,
+          side: -1,
+        },
+      ),
+    );
   }
   
   return DecorationSet.create(doc, result);
@@ -493,7 +528,30 @@ export function detachSelection(editor: Editor): void {
 export function clearAgentPresence(editor: Editor): void {
   editor.view.dispatch(
     setChangeMeta(editor.state.tr, {
-      clearPresence: "agent",
+      clearPresence: "*",
+    }).setMeta("addToHistory", false),
+  );
+}
+
+/** Clear one swarm worker's cursor without disturbing peers or the main agent. */
+export function clearWorkerPresence(editor: Editor | null, workerId: string): void {
+  if (!editor || editor.isDestroyed) return;
+  if (!agentChangesKey.getState(editor.state)?.presence[workerId]) return;
+  editor.view.dispatch(
+    setChangeMeta(editor.state.tr, {
+      clearPresence: workerId,
+    }).setMeta("addToHistory", false),
+  );
+}
+
+/** Clear every swarm worker cursor while preserving the main agent caret if any. */
+export function clearAllWorkerPresence(editor: Editor | null): void {
+  if (!editor || editor.isDestroyed) return;
+  const presence = agentChangesKey.getState(editor.state)?.presence;
+  if (!presence || !Object.keys(presence).some((key) => key !== "agent")) return;
+  editor.view.dispatch(
+    setChangeMeta(editor.state.tr, {
+      clearPresence: "all-workers",
     }).setMeta("addToHistory", false),
   );
 }
@@ -618,19 +676,36 @@ export const AgentChanges = Extension.create({
             if (meta?.focus) focusRanges.push(meta.focus);
             
             const presence: ChangeState["presence"] = {};
-            const previousPresence = previous.presence.agent;
-            if (previousPresence && meta?.clearPresence !== "agent") {
-              if (previousPresence.from === previousPresence.to) {
-                const pos = tr.mapping.map(previousPresence.to, 1);
-                presence.agent = { from: pos, to: pos };
+            const isCleared = (key: string) => {
+              const clear = meta?.clearPresence;
+              if (!clear) return false;
+              if (clear === "*") return true;
+              if (clear === "all-workers") return key !== "agent";
+              if (Array.isArray(clear)) return clear.includes(key);
+              return clear === key;
+            };
+            for (const [key, prev] of Object.entries(previous.presence)) {
+              if (isCleared(key)) continue;
+              if (prev.from === prev.to) {
+                const pos = tr.mapping.map(prev.to, 1);
+                presence[key] = key === "agent" ? { from: pos, to: pos } : { ...prev, from: pos, to: pos };
               } else {
-                const from = tr.mapping.map(previousPresence.from, 1);
-                const to = tr.mapping.map(previousPresence.to, -1);
-                if (from < to) presence.agent = { from, to };
+                const from = tr.mapping.map(prev.from, 1);
+                const to = tr.mapping.map(prev.to, -1);
+                if (from < to) {
+                  presence[key] = key === "agent" ? { from, to } : { ...prev, from, to };
+                } else if (key !== "agent") {
+                  const pos = tr.mapping.map(prev.to, 1);
+                  presence[key] = { ...prev, from: pos, to: pos };
+                }
               }
             }
-            if (meta?.presence?.agent) presence.agent = meta.presence.agent;
-            const presenceMoves = previous.presenceMoves + (meta?.presence?.agent ? 1 : 0);
+            if (meta?.presence) {
+              for (const [key, entry] of Object.entries(meta.presence)) {
+                presence[key] = entry;
+              }
+            }
+            const presenceMoves = previous.presenceMoves + (meta?.presence && Object.keys(meta.presence).length ? 1 : 0);
             if (presence.agent && (dismissSelection || focusRanges.some(range => range.dismissed)))
               presence.agent = { from: presence.agent.to, to: presence.agent.to };
             

@@ -5,6 +5,7 @@ import { AgentQuestion } from "./AgentQuestion";
 import { TraceRecordCard } from "./TraceRecordCard";
 import { SelectionQuote } from "./SelectionCard";
 import { SkillOfferCard, sourceHost } from "./SkillOfferCard";
+import { SwarmTree } from "./SwarmTree";
 /** " (lines 120–260)" for a ranged read, otherwise nothing. */
 function lineRange(input: Record<string, unknown>) {
   const start = typeof input.start_line === "number" ? input.start_line : null;
@@ -63,6 +64,26 @@ function toolLabel(item: Extract<TranscriptItem, { type: "tool" }>) {
     return `Used skill: ${String(input.name ?? "")}`;
   if (item.name === "offer_skill")
     return item.ok === false ? "Couldn't offer a skill" : "Offered a skill";
+  if (item.name === "shell_command" || item.name === "run_command") {
+    const cmd = typeof input.command === "string"
+      ? input.command
+      : typeof input.CommandLine === "string"
+        ? input.CommandLine
+        : "";
+    const short = cmd.replace(/\s+/g, " ").trim();
+    return short ? `Run: ${short.length > 64 ? `${short.slice(0, 63)}…` : short}` : "Run command";
+  }
+  if (item.name === "spawn_subagents") {
+    const count = Array.isArray(input.workers) ? input.workers.length : 1;
+    const goal = typeof input.goal === "string" && input.goal.trim() ? `: ${input.goal.trim()}` : "";
+    return `${item.ok ? "Fanned out" : "Fanning out"} ${count} ${count === 1 ? "agent" : "agents"}${goal}`;
+  }
+  if (item.name === "check_subagents")
+    return item.ok ? "Checked on agents" : "Checking on agents";
+  if (item.name === "drain_subagents")
+    return item.ok ? "Drained agents" : "Draining agents";
+  if (item.name === "stop_subagents")
+    return input.cleanup ? "Cleaned up agents" : "Stopped agents";
   return item.name.replace(/_/g, " ");
 }
 /** User messages longer than this start collapsed. */
@@ -99,6 +120,10 @@ export const AgentMessage = memo(function AgentMessage({
   pendingQuestionId,
   onAnswer,
   onDismissOffer,
+  onStopSubagent,
+  onStopAllSubagents,
+  onDrainSubagents,
+  onCleanupSubagents,
 }: {
   item: TranscriptItem;
   streaming: boolean;
@@ -106,8 +131,35 @@ export const AgentMessage = memo(function AgentMessage({
   pendingQuestionId: string | null;
   onAnswer: (answer: QuestionAnswer) => void;
   onDismissOffer: (id: string) => void;
+  onStopSubagent?: (runId: string, workerId: string) => void;
+  onStopAllSubagents?: (runId: string) => void;
+  onDrainSubagents?: (runId: string) => void;
+  onCleanupSubagents?: (runId: string, swarmId: string) => void;
 }) {
   if (item.type === "changes") return null;
+  if (item.type === "thinking")
+    return (
+      <details className="agent-panel-thinking" open={streaming || undefined}>
+        <summary>
+          <span
+            className={`agent-panel-tool-dot ${streaming ? "bg-accent animate-pulse" : "bg-text-muted"}`}
+          />
+          <span>{streaming ? "Thinking…" : "Thought process"}</span>
+        </summary>
+        <div className="agent-panel-thinking-body">{item.text}</div>
+      </details>
+    );
+  if (item.type === "swarm")
+    return (
+      <SwarmTree
+        swarm={item}
+        activeRun={active}
+        onStopWorker={(runId, workerId) => onStopSubagent?.(runId, workerId)}
+        onStopAll={(runId) => onStopAllSubagents?.(runId)}
+        onDrain={(runId) => onDrainSubagents?.(runId)}
+        onCleanup={(runId, swarmId) => onCleanupSubagents?.(runId, swarmId)}
+      />
+    );
   if (item.type === "question")
     return (
       <AgentQuestion

@@ -20,10 +20,10 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const BASE_BRIDGE_RULES: &str = "\
 Runtime bridge rules:
 - You are connected to ChatGSD through the `scratch` MCP server.
-- Use ONLY the `mcp_scratch_*` tools. Every tool your instructions name is one of them under \
+- Use `mcp_scratch_*` tools for all ChatGSD note, project, skill, and swarm actions. Every tool your instructions name is one of them under \
 that prefix: `mcp_tools` is `mcp_scratch_mcp_tools`.
-- Never call built-in shell, terminal, browser, or filesystem tools; the workspace folder is \
-intentionally empty and every note lives inside ChatGSD's tracked editor tools.
+- Never edit note files directly through filesystem tools; every note edit must go through ChatGSD's tracked `mcp_scratch_edit_document`, `mcp_scratch_replace_selection`, or `mcp_scratch_edit_note` tools.
+- When an installed skill or user request calls for executing a script or shell command, you may use `run_command` (the user will be asked to approve commands in ChatGSD). Enabled skills and their bundled scripts are mirrored inside `skills/<name>/` in your workspace directory.
 - Every turn already includes the live open note snapshot inside `<live_note>` (identical to \
 calling `read_document`). Do NOT call `read_document` first—go straight to `edit_document`, \
 `replace_selection`, `offer_writing_help`, or your direct answer. Only call `read_document` if \
@@ -115,19 +115,17 @@ pub(super) fn is_auth_error(message: &str) -> bool {
         || lower.contains("unauthorized")
 }
 
-pub(super) fn permission_outcome(params: &Value) -> Value {
-    let tool_name = params["toolCall"]["name"].as_str().unwrap_or_default();
-    let allow = tool_name.starts_with("mcp_scratch_");
+pub(super) fn select_permission_option(
+    params: &Value,
+    decision: crate::agent::ApprovalDecision,
+) -> Value {
     let options = params["options"].as_array();
-    let option_id = if allow {
-        options
+    let option_id = match decision {
+        crate::agent::ApprovalDecision::AllowSession => options
             .and_then(|opts| {
                 opts.iter()
                     .find(|opt| opt["kind"].as_str() == Some("allow_always"))
-                    .or_else(|| {
-                        opts.iter()
-                            .find(|opt| opt["kind"].as_str() == Some("allow_once"))
-                    })
+                    .or_else(|| opts.iter().find(|opt| opt["kind"].as_str() == Some("allow_once")))
                     .or_else(|| {
                         opts.iter().find(|opt| {
                             opt["kind"]
@@ -137,9 +135,22 @@ pub(super) fn permission_outcome(params: &Value) -> Value {
                     })
                     .and_then(|opt| opt["optionId"].as_str())
             })
-            .unwrap_or("allow")
-    } else {
-        options
+            .unwrap_or("allow"),
+        crate::agent::ApprovalDecision::AllowOnce => options
+            .and_then(|opts| {
+                opts.iter()
+                    .find(|opt| opt["kind"].as_str() == Some("allow_once"))
+                    .or_else(|| {
+                        opts.iter().find(|opt| {
+                            opt["kind"]
+                                .as_str()
+                                .is_some_and(|kind| kind.starts_with("allow"))
+                        })
+                    })
+                    .and_then(|opt| opt["optionId"].as_str())
+            })
+            .unwrap_or("allow"),
+        crate::agent::ApprovalDecision::Deny => options
             .and_then(|opts| {
                 opts.iter()
                     .find(|opt| opt["kind"].as_str() == Some("reject_once"))
@@ -152,7 +163,7 @@ pub(super) fn permission_outcome(params: &Value) -> Value {
                     })
                     .and_then(|opt| opt["optionId"].as_str())
             })
-            .unwrap_or("deny")
+            .unwrap_or("deny"),
     };
     json!({
         "outcome": {
@@ -160,6 +171,16 @@ pub(super) fn permission_outcome(params: &Value) -> Value {
             "optionId": option_id,
         }
     })
+}
+
+pub(super) fn permission_outcome(params: &Value) -> Value {
+    let tool_name = params["toolCall"]["name"].as_str().unwrap_or_default();
+    let decision = if tool_name.starts_with("mcp_scratch_") {
+        crate::agent::ApprovalDecision::AllowSession
+    } else {
+        crate::agent::ApprovalDecision::Deny
+    };
+    select_permission_option(params, decision)
 }
 
 fn workspace_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -748,6 +769,16 @@ impl AcpClient {
         })
     }
 
+    pub async fn create_ephemeral_session(&mut self, system_prompt: &str) -> Result<String, String> {
+        self.create_session(system_prompt).await
+    }
+
+    pub async fn drop_session(&mut self, chat_session_id: &str) {
+        if let Some(existing) = self.sessions.remove(chat_session_id) {
+            self.close_session(&existing.acp_session_id).await;
+        }
+    }
+
     pub async fn close_session(&mut self, acp_session_id: &str) {
         self.session_models.remove(acp_session_id);
         let _ = self
@@ -1080,6 +1111,18 @@ mod tests {
         });
         assert_eq!(
             permission_outcome(&shell_req),
+            json!({ "outcome": { "outcome": "selected", "optionId": "deny" } })
+        );
+        assert_eq!(
+            select_permission_option(&shell_req, crate::agent::ApprovalDecision::AllowOnce),
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow_once_id" } })
+        );
+        assert_eq!(
+            select_permission_option(&shell_req, crate::agent::ApprovalDecision::AllowSession),
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow_always_id" } })
+        );
+        assert_eq!(
+            select_permission_option(&shell_req, crate::agent::ApprovalDecision::Deny),
             json!({ "outcome": { "outcome": "selected", "optionId": "deny" } })
         );
     }

@@ -3,8 +3,9 @@
 
 use crate::agent::{
     codex::Research,
+    computer::SharedComputer,
     events::{self, AgentEvent},
-    tools, RunContext,
+    subagents, tools, RunContext,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -26,6 +27,12 @@ pub(super) struct ActiveMcpRun {
     pub tools: Vec<Value>,
     /// Shared by the copies of this run, so its research limits hold across calls.
     pub research: Arc<Mutex<Research>>,
+    /// Provider-agnostic CUA session when computer access is active for this run.
+    pub computer: Option<SharedComputer>,
+    /// Present only for subagent workers so their tool calls report into
+    /// the Swarm UI and use per-worker coordination/editing instead of cluttering the parent transcript.
+    pub worker_progress: Option<subagents::ProgressSink>,
+    pub worker_request: Option<subagents::WorkerRequest>,
 }
 
 pub(super) struct McpServer {
@@ -95,10 +102,15 @@ impl Drop for McpServer {
 /// The tools for one run. A session keeps the list it started with, so a
 /// conversation always lists the web tools and each call checks whether the
 /// message has internet access; a check-in lists them only when it has.
-pub(super) fn mcp_tool_list(read_only: bool, web_access: bool) -> (Vec<Value>, HashSet<String>) {
+/// When computer access is active, the run's CUA tools are appended as well.
+pub(super) fn mcp_tool_list(
+    read_only: bool,
+    web_access: bool,
+    computer_tools: &[Value],
+) -> (Vec<Value>, HashSet<String>) {
     let specs = tools::catalog(!read_only || web_access, read_only);
-    let mut permitted = HashSet::with_capacity(specs.len());
-    let mut list = Vec::with_capacity(specs.len());
+    let mut permitted = HashSet::with_capacity(specs.len() + computer_tools.len());
+    let mut list = Vec::with_capacity(specs.len() + computer_tools.len());
     for spec in specs {
         permitted.insert(spec.name.to_owned());
         let description = if spec.name == "read_document" {
@@ -109,6 +121,34 @@ pub(super) fn mcp_tool_list(read_only: bool, web_access: bool) -> (Vec<Value>, H
         list.push(json!({
             "name": spec.name,
             "description": description,
+            "inputSchema": spec.parameters,
+        }));
+    }
+    if !read_only {
+        for tool in computer_tools {
+            let Some(name) = tool["name"].as_str().filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            permitted.insert(name.to_owned());
+            list.push(json!({
+                "name": name,
+                "description": tool["description"].as_str().unwrap_or(name),
+                "inputSchema": tool["parameters"],
+            }));
+        }
+    }
+    (list, permitted)
+}
+
+pub(super) fn subagent_mcp_tool_list(web_access: bool, can_edit: bool) -> (Vec<Value>, HashSet<String>) {
+    let specs = tools::subagent_catalog(web_access, can_edit);
+    let mut permitted = HashSet::with_capacity(specs.len());
+    let mut list = Vec::with_capacity(specs.len());
+    for spec in specs {
+        permitted.insert(spec.name.to_owned());
+        list.push(json!({
+            "name": spec.name,
+            "description": spec.description,
             "inputSchema": spec.parameters,
         }));
     }
@@ -234,7 +274,7 @@ async fn dispatch_rpc(
                 let guard = active.read().await;
                 match guard.as_ref() {
                     Some(run) => run.tools.clone(),
-                    None => mcp_tool_list(default_read_only, false).0,
+                    None => mcp_tool_list(default_read_only, false, &[]).0,
                 }
             };
             json!({ "tools": tools })
@@ -260,17 +300,37 @@ async fn dispatch_rpc(
                 }));
             };
             let call_id = format!("agy-{}", uuid::Uuid::new_v4().simple());
-            events::emit(
-                &run.app,
-                &run.ctx.run_id,
-                AgentEvent::ToolCall {
-                    call_id: call_id.clone(),
-                    name: name.to_owned(),
-                    input: args.clone(),
-                },
-            );
+            if let Some(progress) = run.worker_progress.as_ref() {
+                progress(subagents::activity_label(name, &args), true);
+            } else {
+                events::emit(
+                    &run.app,
+                    &run.ctx.run_id,
+                    AgentEvent::ToolCall {
+                        call_id: call_id.clone(),
+                        name: name.to_owned(),
+                        input: args.clone(),
+                    },
+                );
+            }
+            let mut content_blocks: Vec<Value> = Vec::new();
             let (ok, text) = if !run.permitted.contains(name) {
                 (false, "This tool is not available in ChatGSD.".to_owned())
+            } else if name.starts_with("cua_") {
+                match run.computer.as_ref() {
+                    Some(computer) => {
+                        let obs = computer.lock().await.call_formatted(name, args).await;
+                        for image in obs.images {
+                            content_blocks.push(json!({
+                                "type": "image",
+                                "data": image.data,
+                                "mimeType": image.mime_type,
+                            }));
+                        }
+                        (obs.ok, obs.text)
+                    }
+                    None => (false, "Computer access is off for this message.".to_owned()),
+                }
             } else if name == "remember_work" {
                 match tools::remember_work(&run.app, &run.ctx, &run.session_id, &run.account, args)
                     .await
@@ -296,21 +356,27 @@ async fn dispatch_rpc(
                     }
                     Err(refusal) => (false, refusal),
                 }
+            } else if let Some(worker_req) = run.worker_request.as_ref() {
+                let out = subagents::execute_worker_tool(&run.app, &run.ctx, worker_req, name, args).await;
+                (out.ok, out.text)
             } else {
                 let out = tools::execute(&run.app, &run.ctx.run_id, name, args).await;
                 (out.ok, out.text)
             };
-            events::emit(
-                &run.app,
-                &run.ctx.run_id,
-                AgentEvent::ToolResult {
-                    call_id,
-                    ok,
-                    output: text.chars().take(2000).collect(),
-                },
-            );
+            if run.worker_progress.is_none() {
+                events::emit(
+                    &run.app,
+                    &run.ctx.run_id,
+                    AgentEvent::ToolResult {
+                        call_id,
+                        ok,
+                        output: text.chars().take(2000).collect(),
+                    },
+                );
+            }
+            content_blocks.insert(0, json!({ "type": "text", "text": text }));
             json!({
-                "content": [{ "type": "text", "text": text }],
+                "content": content_blocks,
                 "isError": !ok,
             })
         }
@@ -340,7 +406,7 @@ mod tests {
     // tools; a session that doesn't list them leaves it unable to follow them.
     #[test]
     fn a_conversation_lists_the_web_and_service_tools_its_instructions_name() {
-        let listed = |read_only, web_access| mcp_tool_list(read_only, web_access).1;
+        let listed = |read_only, web_access| mcp_tool_list(read_only, web_access, &[]).1;
         let conversation = listed(false, false);
         for name in ["research", "offer_skill", "mcp_tools", "mcp_call", "list_projects", "search_projects"] {
             assert!(conversation.contains(name), "{name} is listed whether or not this message has internet access");
@@ -348,6 +414,15 @@ mod tests {
         assert!(listed(true, true).contains("research"));
         assert!(!listed(true, false).contains("research"), "a check-in without internet access can't research");
         assert!(!listed(true, true).contains("mcp_call"), "a check-in never reaches connected services");
+
+        let cua = vec![json!({
+            "type": "function",
+            "name": "cua_list_apps",
+            "description": "List open apps",
+            "parameters": { "type": "object", "properties": {} }
+        })];
+        assert!(mcp_tool_list(false, false, &cua).1.contains("cua_list_apps"));
+        assert!(!mcp_tool_list(true, false, &cua).1.contains("cua_list_apps"));
     }
 
     #[tokio::test]

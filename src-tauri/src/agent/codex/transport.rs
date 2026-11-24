@@ -5,7 +5,85 @@ use tokio::{io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader}, proce
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_WARM_WORKERS: usize = 2;
 static CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Default)]
+struct WarmPool {
+    interactive: Option<Server>,
+    workers: Vec<Server>,
+    warming: bool,
+}
+
+static WARM_POOL: tokio::sync::Mutex<WarmPool> = tokio::sync::Mutex::const_new(WarmPool {
+    interactive: None,
+    workers: Vec::new(),
+    warming: false,
+});
+
+pub(super) async fn clear_pool() {
+    let mut pool = WARM_POOL.lock().await;
+    pool.interactive = None;
+    pool.workers.clear();
+}
+
+/// Pre-warms 1 interactive shell-enabled Codex process and up to 2 worker
+/// processes in the background so interactive turns and swarm fan-outs start
+/// with near-zero local spawn latency.
+pub(super) fn warm_pool(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let (need_interactive, need_workers) = {
+            let mut pool = WARM_POOL.lock().await;
+            if pool.warming {
+                return;
+            }
+            if pool
+                .interactive
+                .as_mut()
+                .is_some_and(|server| !server.is_alive())
+            {
+                pool.interactive = None;
+            }
+            pool.workers.retain_mut(Server::is_alive);
+            let need_interactive = pool.interactive.is_none();
+            let need_workers = MAX_WARM_WORKERS.saturating_sub(pool.workers.len());
+            if !need_interactive && need_workers == 0 {
+                return;
+            }
+            pool.warming = true;
+            (need_interactive, need_workers)
+        };
+
+        let interactive_fut = async {
+            if need_interactive {
+                Server::start_with_shell(&app, true).await.ok()
+            } else {
+                None
+            }
+        };
+        let workers_fut = async {
+            let futs = (0..need_workers).map(|_| Server::start_with_shell(&app, false));
+            futures_util::future::join_all(futs)
+                .await
+                .into_iter()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        };
+        let (interactive, workers) = tokio::join!(interactive_fut, workers_fut);
+
+        let mut pool = WARM_POOL.lock().await;
+        if pool.interactive.is_none() {
+            pool.interactive = interactive;
+        }
+        for worker in workers {
+            if pool.workers.len() < MAX_WARM_WORKERS {
+                pool.workers.push(worker);
+            }
+        }
+        pool.warming = false;
+    });
+}
 
 /// An owned, private app server. Dropping a cancelled future closes stdin and
 /// kills the process; there is no detached dispatcher that can execute tools.
@@ -19,6 +97,7 @@ pub(super) struct Server {
     /// dropped while waiting loses nothing.
     partial: Vec<u8>,
     request_id: u64,
+    allow_shell: bool,
     pub home: PathBuf,
     pub cwd: PathBuf,
 }
@@ -46,13 +125,14 @@ fn executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Err("The bundled Codex runtime is missing. Reinstall ChatGSD.".into())
 }
 
-// These are runtime restrictions, not instructions. Read-only plus rejection
-// of every native approval prevents a hallucinated patch from writing notes.
-const OVERRIDES: &[&str] = &[
+// Base runtime restrictions shared by every Codex process. Shell execution is
+// only enabled on interactive turns (with approval_policy="on-request"), never
+// on background check-ins, research, or compaction.
+const BASE_OVERRIDES: &[&str] = &[
     "cli_auth_credentials_store=\"file\"", "forced_login_method=\"chatgpt\"",
-    "approval_policy=\"on-request\"", "sandbox_mode=\"read-only\"",
+    "approval_policy=\"on-request\"",
     "project_doc_max_bytes=0", "web_search=\"disabled\"", "agents.enabled=false",
-    "features.shell_tool=false", "features.unified_exec=false", "features.view_image=false",
+    "features.view_image=false",
     "features.hooks=false", "features.plugins=false", "features.apps=false",
     "features.browser_use=false", "features.computer_use=false", "features.multi_agent=false",
     "features.multi_agent_v2=false", "features.js_repl=false", "features.code_mode=false",
@@ -63,34 +143,93 @@ const OVERRIDES: &[&str] = &[
     "tools.experimental_request_user_input.enabled=false", "tools.update_plan.enabled=false",
 ];
 
+const READ_ONLY_OVERRIDES: &[&str] = &[
+    "sandbox_mode=\"read-only\"",
+    "features.shell_tool=false",
+    "features.unified_exec=false",
+];
+
+const SHELL_OVERRIDES: &[&str] = &[
+    "sandbox_mode=\"workspace-write\"",
+    "features.shell_tool=true",
+    "features.unified_exec=true",
+];
+
 impl Server {
-    pub async fn start(app: &tauri::AppHandle) -> Result<Self, String> {
-        Self::spawn(&executable(app)?, &home(app)?).await
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
+    pub async fn start(app: &tauri::AppHandle) -> Result<Self, String> {
+        Self::start_with_shell(app, false).await
+    }
+
+    /// Takes a pre-warmed Codex server when available (0ms spawn) and triggers
+    /// background replenishment for the next turn or swarm fan-out.
+    pub async fn acquire(app: &tauri::AppHandle, allow_shell: bool) -> Result<Self, String> {
+        let cached = {
+            let mut pool = WARM_POOL.lock().await;
+            if allow_shell {
+                pool.interactive.take().filter(|s| {
+                    // Check liveness before handing out.
+                    let _ = s;
+                    true
+                })
+            } else {
+                pool.workers.pop()
+            }
+        };
+        if let Some(mut server) = cached {
+            if server.is_alive() {
+                warm_pool(app);
+                return Ok(server);
+            }
+        }
+        let server = Self::start_with_shell(app, allow_shell).await?;
+        warm_pool(app);
+        Ok(server)
+    }
+
+    pub async fn start_with_shell(app: &tauri::AppHandle, allow_shell: bool) -> Result<Self, String> {
+        Self::spawn_with_options(&executable(app)?, &home(app)?, allow_shell).await
+    }
+
+    #[cfg(test)]
     async fn spawn(binary: &Path, home: &Path) -> Result<Self, String> {
-        let _configuration = CONFIG_LOCK.lock().await;
+        Self::spawn_with_options(binary, home, false).await
+    }
+
+    async fn spawn_with_options(binary: &Path, home: &Path, allow_shell: bool) -> Result<Self, String> {
         let cwd = home.join("workspace");
         let user_home = home.join("home");
-        tokio::fs::create_dir_all(&cwd).await.map_err(|error| error.to_string())?;
-        tokio::fs::create_dir_all(&user_home).await.map_err(|error| error.to_string())?;
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).await.map_err(|error| error.to_string())?;
+        {
+            let _configuration = CONFIG_LOCK.lock().await;
+            tokio::fs::create_dir_all(&cwd).await.map_err(|error| error.to_string())?;
+            tokio::fs::create_dir_all(&user_home).await.map_err(|error| error.to_string())?;
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).await.map_err(|error| error.to_string())?;
+            }
+            // This home belongs exclusively to ChatGSD. Never inherit providers,
+            // MCP servers, hooks or executable configuration from a CLI profile.
+            let config = home.join(format!(".config-{}.tmp", uuid::Uuid::new_v4()));
+            tokio::fs::write(&config, "# Managed by ChatGSD; configure skills in the app.\n").await.map_err(|error| error.to_string())?;
+            tokio::fs::rename(&config, home.join("config.toml")).await.map_err(|error| error.to_string())?;
         }
-        // This home belongs exclusively to ChatGSD. Never inherit providers,
-        // MCP servers, hooks or executable configuration from a CLI profile.
-        let config = home.join(format!(".config-{}.tmp", uuid::Uuid::new_v4()));
-        tokio::fs::write(&config, "# Managed by ChatGSD; configure skills in the app.\n").await.map_err(|error| error.to_string())?;
-        tokio::fs::rename(&config, home.join("config.toml")).await.map_err(|error| error.to_string())?;
         let mut command = Command::new(binary);
         command.arg("app-server").args(["--listen", "stdio://"])
             .env_clear().env("CODEX_HOME", home).env("HOME", &user_home)
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .current_dir(&cwd).kill_on_drop(true)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if allow_shell {
+            command.env("PATH", super::super::mcp::search_path().await);
+        } else {
+            command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        }
         // CLI restrictions remain authoritative over native skill configuration.
-        for value in OVERRIDES { command.args(["-c", value]); }
+        for value in BASE_OVERRIDES { command.args(["-c", value]); }
+        let mode_overrides = if allow_shell { SHELL_OVERRIDES } else { READ_ONLY_OVERRIDES };
+        for value in mode_overrides { command.args(["-c", value]); }
         let mut child = command.spawn().map_err(|error| format!("Cannot start Codex: {error}"))?;
         let input = child.stdin.take().ok_or("Codex did not open stdin")?;
         let output = BufReader::new(child.stdout.take().ok_or("Codex did not open stdout")?);
@@ -101,7 +240,7 @@ impl Server {
             let mut bytes = [0; 4096];
             while matches!(stderr.read(&mut bytes).await, Ok(count) if count > 0) {}
         });
-        let mut server = Self { child, input, output, stderr: drain, queued: VecDeque::new(), partial: Vec::new(), request_id: 0, home: home.into(), cwd };
+        let mut server = Self { child, input, output, stderr: drain, queued: VecDeque::new(), partial: Vec::new(), request_id: 0, allow_shell, home: home.into(), cwd };
         server.rpc("initialize", json!({"clientInfo":{"name":"chatgsd","title":"ChatGSD","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         server.send(json!({"method":"initialized"})).await?;
         Ok(server)
@@ -148,8 +287,15 @@ impl Server {
                     if let Some(error) = message.get("error") { return Err(format!("Codex {method}: {error}")); }
                     return message.get("result").cloned().ok_or_else(|| format!("Codex {method} returned no result"));
                 }
-                if message.get("id").is_some() && message.get("method").is_some() && message["method"] != "item/tool/call" {
-                    // Never authorize native execution or permission requests.
+                let method_name = message["method"].as_str().unwrap_or_default();
+                let queueable_request = method_name == "item/tool/call"
+                    || (self.allow_shell
+                        && matches!(
+                            method_name,
+                            "item/commandExecution/requestApproval" | "execCommandApproval"
+                        ));
+                if message.get("id").is_some() && message.get("method").is_some() && !queueable_request {
+                    // Reject unpermitted native execution or file-change requests.
                     self.reject(&message).await?;
                 } else {
                     if self.queued.len() >= 4096 { return Err("Codex sent too many pending notifications".into()); }

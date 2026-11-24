@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useNotes } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
+import { DARK_THEMES, LIGHT_THEMES } from "../../lib/themes";
 import { useGit } from "../../context/GitContext";
 import { useAgent } from "../../context/AgentContext";
 import { useAgentChanges } from "../editor/AgentChanges";
@@ -93,7 +94,7 @@ export function CommandPalette({
     unpinNote,
     notesFolder,
   } = useNotes();
-  const { setTheme } = useTheme();
+  const { setTheme, setLightTheme, setDarkTheme } = useTheme();
   const { status, gitAvailable, gitEnabled, commit, sync, isSyncing } = useGit();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -440,6 +441,24 @@ export function CommandPalette({
           onClose();
         },
       },
+      ...LIGHT_THEMES.map((preset) => ({
+        id: `light-theme-${preset.id}`,
+        label: `Light Theme: ${preset.name}`,
+        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          setLightTheme(preset.id);
+          onClose();
+        },
+      })),
+      ...DARK_THEMES.map((preset) => ({
+        id: `dark-theme-${preset.id}`,
+        label: `Dark Theme: ${preset.name}`,
+        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          setDarkTheme(preset.id);
+          onClose();
+        },
+      })),
     );
 
     return baseCommands;
@@ -454,6 +473,8 @@ export function CommandPalette({
     agent.editor,
     changes.length,
     setTheme,
+    setLightTheme,
+    setDarkTheme,
     gitEnabled,
     gitAvailable,
     status,

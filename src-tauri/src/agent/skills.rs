@@ -59,6 +59,7 @@ const TOO_MUCH: &str =
 pub struct Parsed {
     pub name: String,
     pub description: String,
+    pub disable_model_invocation: bool,
 }
 
 /// 1 to 64 of `a-z`, `0-9` and `-`, with no leading, trailing or doubled
@@ -132,7 +133,15 @@ pub fn parse(content: &str) -> Result<Parsed, String> {
             "A skill needs a description of 1 to {MAX_DESCRIPTION_CHARS} characters"
         ));
     }
-    Ok(Parsed { name, description })
+    let disable_model_invocation = documents
+        .first()
+        .and_then(|document| document["disable-model-invocation"].as_bool())
+        .unwrap_or(false);
+    Ok(Parsed {
+        name,
+        description,
+        disable_model_invocation,
+    })
 }
 
 /// `references/api.md` for a path that stays inside a skill's folder, else
@@ -901,8 +910,13 @@ async fn mirror_codex_in(source: &Path, destination: &Path) -> Result<(), String
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    // Writing text never installs dependencies or executes scripts.
-                    tokio::fs::write(target, text).await?;
+                    // Preserve shebang scripts as executable so harness shell runs can invoke them directly.
+                    tokio::fs::write(&target, text).await?;
+                    #[cfg(unix)]
+                    if text.starts_with("#!") {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).await;
+                    }
                 }
             }
             tokio::fs::rename(&staging, &snapshot).await
@@ -928,7 +942,9 @@ async fn mirror_codex_in(source: &Path, destination: &Path) -> Result<(), String
     Ok(())
 }
 
-/// Name and description of each enabled skill, for the agent's instructions.
+/// Name and description of each enabled skill that allows automatic model
+/// invocation. Skills with `disable-model-invocation: true` stay invocable via
+/// `/<name>` but are omitted from the model's auto-discovery list.
 pub async fn enabled(app: &tauri::AppHandle) -> Vec<(String, String)> {
     let skills = match root(app) {
         Ok(root) => list_in(&root).await,
@@ -937,7 +953,12 @@ pub async fn enabled(app: &tauri::AppHandle) -> Vec<(String, String)> {
     match skills {
         Ok(skills) => skills
             .into_iter()
-            .filter(|skill| skill.enabled)
+            .filter(|skill| {
+                skill.enabled
+                    && !parse(&skill.content)
+                        .map(|parsed| parsed.disable_model_invocation)
+                        .unwrap_or(false)
+            })
             .map(|skill| (skill.name, skill.description))
             .collect(),
         Err(error) => {
@@ -1806,5 +1827,16 @@ mod tests {
         );
         let other = url::Url::parse("https://example.com/acme/skills/blob/main/SKILL.md").unwrap();
         assert_eq!(raw_address(&other), other);
+    }
+
+    #[test]
+    fn parse_reads_disable_model_invocation_frontmatter() {
+        let manual = "---\nname: swarm\ndescription: Fan out workers.\ndisable-model-invocation: true\n---\n\n# Swarm\n";
+        let parsed = parse(manual).unwrap();
+        assert_eq!(parsed.name, "swarm");
+        assert!(parsed.disable_model_invocation);
+
+        let default_skill = parse(SKILL).unwrap();
+        assert!(!default_skill.disable_model_invocation);
     }
 }

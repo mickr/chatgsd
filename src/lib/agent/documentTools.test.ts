@@ -586,4 +586,45 @@ describe("agent presence", () => {
     editor.commands.undo();
     expect(serializeDocument(editor)).toBe("Start.");
   });
+
+  it("tracks multiple named colored swarm worker cursors simultaneously through concurrent edits", async () => {
+    const editor = openNote("# Intro\n\nOpening paragraph here.\n\n# Details\n\nSecond section details.");
+    const binding = captureRunBinding(editor, "swarm-run", false)!;
+
+    const p1 = await executeDocumentTool(editor, binding, "worker_presence", {
+      workerId: "w1",
+      label: "Intro Editor",
+      color: "#2563eb",
+      quote: "Opening paragraph here.",
+    });
+    expect(p1.ok).toBe(true);
+
+    const p2 = await executeDocumentTool(editor, binding, "worker_presence", {
+      workerId: "w2",
+      label: "Details Editor",
+      color: "#059669",
+      quote: "Second section details.",
+    });
+    expect(p2.ok).toBe(true);
+
+    const beforeW2 = agentChangesKey.getState(editor.state)!.presence.w2;
+    expect(beforeW2.label).toBe("Details Editor");
+    expect(beforeW2.color).toBe("#059669");
+
+    // Worker 1 edits the opening paragraph; Worker 2's cursor maps forward cleanly without disappearing.
+    const edit1 = await executeDocumentTool(editor, binding, "edit_document", {
+      edits: [{ old_text: "Opening paragraph here.", new_text: "Much longer expanded opening paragraph right here." }],
+      _actor: { id: "w1", label: "Intro Editor", color: "#2563eb" },
+    });
+    expect(edit1.ok).toBe(true);
+
+    const stateAfter = agentChangesKey.getState(editor.state)!;
+    expect(stateAfter.presence.w1.label).toBe("Intro Editor");
+    expect(stateAfter.presence.w2.label).toBe("Details Editor");
+    expect(stateAfter.presence.w2.from).toBeGreaterThan(beforeW2.from);
+    expect(editor.view.dom.querySelectorAll(".agent-worker-caret").length).toBe(2);
+
+    releaseRunBinding(editor, binding, false);
+    expect(Object.keys(agentChangesKey.getState(editor.state)!.presence)).toEqual([]);
+  });
 });

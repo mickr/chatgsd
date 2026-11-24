@@ -23,6 +23,10 @@ pub enum AgentEvent {
     TextDelta {
         text: String,
     },
+    /// Streamed reasoning / thinking summary from Codex or Antigravity.
+    ThinkingDelta {
+        text: String,
+    },
     ToolCall {
         call_id: String,
         name: String,
@@ -36,6 +40,8 @@ pub enum AgentEvent {
     Expression(ExpressionUpdate),
     /// A skill found on the web, for the user to review and save from a card.
     SkillOffer(SkillOffer),
+    /// Live status update from a coordinated subagent / swarm worker.
+    Subagent(super::subagents::SubagentEvent),
     Done {
         stop_reason: String,
     },
@@ -91,6 +97,28 @@ mod tests {
                     "expression": "curious",
                     "sentiment": 0.25,
                     "intensity": 0.75
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn thinking_delta_serializes_with_expected_wire_fields() {
+        let envelope = EventEnvelope {
+            run_id: "current-run",
+            seq: 2,
+            event: AgentEvent::ThinkingDelta {
+                text: "Checking the draft structure.".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            json!({
+                "runId": "current-run",
+                "seq": 2,
+                "event": {
+                    "type": "thinking_delta",
+                    "text": "Checking the draft structure."
                 }
             })
         );

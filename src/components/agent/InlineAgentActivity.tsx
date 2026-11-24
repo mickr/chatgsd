@@ -53,11 +53,37 @@ export function inlineActivity(conversation: Conversation, waiting: boolean, sta
   for (let index = conversation.items.length - 1; index >= 0; index--) {
     const item = conversation.items[index];
     if (item.type === "user" || item.type === "activity") break;
+    if (item.type === "swarm") {
+      const activeWorkers = item.workers.filter((w) =>
+        w.status === "spawning" || w.status === "running" || w.status === "checking" || w.status === "draining",
+      );
+      if (activeWorkers.length > 0) {
+        if (activeWorkers.some((w) => w.status === "checking"))
+          return { state: "thinking", label: "Checking on agents" };
+        if (activeWorkers.some((w) => w.status === "draining"))
+          return {
+            state: "thinking",
+            label: `Draining ${activeWorkers.length} ${activeWorkers.length === 1 ? "agent" : "agents"}`,
+          };
+        return {
+          state: "thinking",
+          label: `Coordinating ${activeWorkers.length} ${activeWorkers.length === 1 ? "agent" : "agents"}`,
+        };
+      }
+    }
     if (item.type === "tool" && item.ok === undefined && item.output === undefined) {
       if (["edit_document", "replace_selection", "edit_note"].includes(item.name))
         return { state: "editing", label: "Editing your note" };
       if (["research", "web_search", "web_fetch"].includes(item.name))
         return { state: "researching", label: "Researching" };
+      if (item.name === "shell_command" || item.name === "run_command")
+        return { state: "thinking", label: "Running command" };
+      if (item.name === "check_subagents")
+        return { state: "thinking", label: "Checking on agents" };
+      if (item.name === "drain_subagents")
+        return { state: "thinking", label: "Draining agents" };
+      if (item.name === "spawn_subagents")
+        return { state: "thinking", label: "Coordinating agents" };
       if (["read_document", "read_notes", "search_notes", "list_notes", "list_projects", "search_projects", "find_in_note", "note_links", "read_skill"].includes(item.name))
         return { state: "reading", label: "Reading" };
       return { state: "thinking", label: "Working" };

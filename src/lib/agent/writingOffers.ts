@@ -434,6 +434,27 @@ export function validateMemoryAnchor(editor: Editor, quote: unknown): void {
 }
 
 /**
+ * Locates a section anchor quote in the live note for a swarm worker's cursor.
+ * Accepts plain visible text directly, and also strips common leading markdown
+ * heading/list markers so a worker quoting a markdown heading still lands cleanly.
+ */
+export function locatePassage(editor: Editor, quote: unknown): { from: number; to: number } {
+  const raw = text(quote, 500, "The section anchor");
+  try {
+    return locate(editor.state.doc, raw).text;
+  } catch (firstError) {
+    const cleaned = raw
+      .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s+)/, "")
+      .replace(/[*_`~]+/g, "")
+      .trim();
+    if (cleaned && cleaned !== raw) {
+      return locate(editor.state.doc, cleaned).text;
+    }
+    throw firstError;
+  }
+}
+
+/**
  * Checks an offer against the note and anchors it there. Preparing is read-only:
  * it cannot select, focus, scroll, or edit the note. A fresh offer must quote
  * every note step exactly. With relocate, a map that already exists keeps a step

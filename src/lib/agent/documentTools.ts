@@ -13,7 +13,7 @@ import {
   setChangeMeta,
   type AgentChange,
 } from "../../components/editor/AgentChanges";
-import { validateMemoryAnchor } from "./writingOffers";
+import { locatePassage, validateMemoryAnchor } from "./writingOffers";
 import { documentChange, type NoteChange } from "./turnChanges";
 import type { AgentLineChange } from "../../components/editor/AgentChangeMarker";
 
@@ -438,6 +438,12 @@ function changeExcerpt(editor: Editor, doc: ProseMirrorNode, from: number, to: n
   });
 }
 
+export interface EditActor {
+  id: string;
+  label: string;
+  color?: string;
+}
+
 /**
  * Apply every target document in order as one transaction with one hunk per
  * step. Building the whole transaction before dispatching keeps a batch atomic:
@@ -448,6 +454,7 @@ export function applyTrackedDocuments(
   targets: ProseMirrorNode[],
   origin: AgentChange["origin"],
   runId: string | null,
+  actor?: EditActor,
 ): number {
   const tr = closeHistory(editor.state.tr);
   if (origin === "agent") {
@@ -485,7 +492,10 @@ export function applyTrackedDocuments(
       count++;
     }
     if (!range) return 0;
-    editor.view.dispatch(setChangeMeta(tr, { source: "agent", presence: { agent: range }, arrival, lineChanges }));
+    const presence = actor
+      ? { [actor.id]: { from: range.from, to: range.to, label: actor.label, color: actor.color, writing: true } }
+      : { agent: range };
+    editor.view.dispatch(setChangeMeta(tr, { source: "agent", presence, arrival, lineChanges }));
     // Keep subsequent typing in its own undo event, even at the same position.
     editor.view.dispatch(closeHistory(editor.state.tr).setMeta("addToHistory", false));
     return count;
@@ -593,7 +603,7 @@ export function releaseRunBinding(
   editor.view.dispatch(
     setChangeMeta(editor.state.tr, {
       releaseFocus: binding.focusRangeId ?? undefined,
-      clearPresence: keepPresence ? undefined : "agent",
+      clearPresence: keepPresence ? "all-workers" : "*",
       presence: keepPresence && caret !== undefined ? { agent: { from: caret, to: caret } } : undefined,
     }).setMeta("addToHistory", false),
   );
@@ -628,6 +638,21 @@ export async function executeDocumentTool(
       validateMemoryAnchor(editor, input.quote);
       return { ok: true, output: "Passage found." };
     }
+    if (name === "worker_presence") {
+      const workerId = typeof input.workerId === "string" ? input.workerId.trim() : "";
+      const label = typeof input.label === "string" && input.label.trim() ? input.label.trim() : workerId;
+      const color = typeof input.color === "string" && input.color.trim() ? input.color.trim() : undefined;
+      if (!workerId) throw new Error("workerId must be a nonempty string.");
+      const range = locatePassage(editor, input.quote);
+      editor.view.dispatch(
+        setChangeMeta(editor.state.tr, {
+          presence: {
+            [workerId]: { from: range.from, to: range.to, label, color, writing: true },
+          },
+        }).setMeta("addToHistory", false),
+      );
+      return { ok: true, output: "Worker cursor placed." };
+    }
     if (name === "read_document") {
       let selection = "none";
       const range = attachedRange(editor);
@@ -654,9 +679,19 @@ export async function executeDocumentTool(
     if (name === "edit_document") {
       if (!Array.isArray(input.edits))
         throw new Error("edits must be an array of replacements.");
+      const rawActor = input._actor && typeof input._actor === "object"
+        ? (input._actor as Record<string, unknown>)
+        : null;
+      const actor: EditActor | undefined = rawActor && typeof rawActor.id === "string" && rawActor.id.trim()
+        ? {
+            id: rawActor.id.trim(),
+            label: typeof rawActor.label === "string" && rawActor.label.trim() ? rawActor.label.trim() : rawActor.id.trim(),
+            color: typeof rawActor.color === "string" && rawActor.color.trim() ? rawActor.color.trim() : undefined,
+          }
+        : undefined;
       const before = serializeDocument(editor);
       const documents = editedDocuments(editor, before, input.edits as DocumentEdit[]);
-      applyTrackedDocuments(editor, documents, "agent", binding.runId);
+      applyTrackedDocuments(editor, documents, "agent", binding.runId, actor);
       return {
         ok: true,
         output: `Applied ${documents.length} edit(s).`,

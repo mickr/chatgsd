@@ -68,3 +68,29 @@ it("previews prose around UI specs without exposing their patches", () => {
     { id: "reply", type: "text", text: 'Here are the options.\n```spec\n{"op":"add","path":"/root","value":"card"}\n```\nThe first is cheaper.' },
   ])).toEqual({ turn: 1, text: "Here are the options. The first is cheaper." });
 });
+
+it("describes active swarm coordination, checking, and draining states", () => {
+  const swarm = (status: "running" | "checking" | "draining" | "completed"): TranscriptItem => ({
+    id: "run:swarm-1",
+    type: "swarm",
+    runId: "run",
+    swarmId: "swarm-1",
+    goal: "Review draft",
+    workers: [
+      { workerId: "w1", name: "Clarity", role: "Style", status, steps: 1, updatedAt: 1 },
+      { workerId: "w2", name: "Facts", role: "Claims", status: "completed", steps: 2, updatedAt: 1 },
+    ],
+  });
+  expect(inlineActivity(conversation([swarm("running")]), false, false, false).label).toBe("Coordinating 1 agent");
+  expect(inlineActivity(conversation([swarm("checking")]), false, false, false).label).toBe("Checking on agents");
+  expect(inlineActivity(conversation([swarm("draining")]), false, false, false).label).toBe("Draining 1 agent");
+  expect(inlineActivity(conversation([swarm("completed")]), false, false, false).label).toBe("Thinking");
+  expect(
+    inlineActivity(
+      conversation([{ id: "cmd", type: "tool", name: "shell_command", input: { command: "python3 test.py" } }]),
+      false,
+      false,
+      false,
+    ).label,
+  ).toBe("Running command");
+});

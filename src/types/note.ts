@@ -1,3 +1,5 @@
+import type { LightThemeId, DarkThemeId } from "../lib/themes";
+
 export interface NoteMetadata {
   id: string;
   title: string;
@@ -15,6 +17,8 @@ export interface Note {
 
 export interface ThemeSettings {
   mode: "light" | "dark" | "system";
+  lightTheme?: LightThemeId;
+  darkTheme?: DarkThemeId;
 }
 
 export type FontFamily = "system-sans" | "serif" | "monospace";

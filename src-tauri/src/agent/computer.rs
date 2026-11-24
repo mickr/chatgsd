@@ -1,14 +1,143 @@
-use super::computer_permissions::ComputerUnavailable;
+use super::{
+    computer_permissions::ComputerUnavailable,
+    events::{self, AgentEvent},
+    RunContext,
+};
 #[cfg(any(target_os = "macos", test))]
 use super::computer_permissions::ComputerPermission;
 use serde_json::{json, Value};
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{Mutex, MutexGuard},
     time::{timeout, Instant},
 };
+
+/// Provider-agnostic handle to a run's active CUA session.
+pub type SharedComputer = Arc<Mutex<ComputerSession>>;
+
+/// One validated base64 image returned by a CUA tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerImage {
+    pub data: String,
+    pub mime_type: String,
+}
+
+/// Provider-neutral result of executing a `cua_*` tool call, including
+/// ChatGSD's structured element forwarding and browser-refusal recovery hints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerObservation {
+    pub ok: bool,
+    pub text: String,
+    pub images: Vec<ComputerImage>,
+}
+
+/// Starts a private CUA session for an interactive run when `ctx.computer_access`
+/// is enabled. On permission or driver errors, emits `AgentEvent::ComputerUnavailable`
+/// and returns `None` so chat and note editing continue unaffected across all engines.
+pub async fn start_for_run(app: &tauri::AppHandle, ctx: &RunContext) -> Option<SharedComputer> {
+    if !ctx.computer_access || ctx.read_only {
+        return None;
+    }
+    match ComputerSession::start(&app.config().identifier).await {
+        Ok(session) => Some(Arc::new(Mutex::new(session))),
+        Err(issue) => {
+            events::emit(
+                app,
+                &ctx.run_id,
+                AgentEvent::ComputerUnavailable {
+                    message: issue.message,
+                    permissions: issue.permissions,
+                },
+            );
+            None
+        }
+    }
+}
+
+/// Gracefully shuts down a shared CUA session at the end of a run.
+pub async fn shutdown_shared(computer: Option<SharedComputer>) {
+    if let Some(session) = computer {
+        session.lock().await.shutdown().await;
+    }
+}
+
+/// Normalizes a raw CUA MCP tool response into provider-agnostic text and images,
+/// forwarding accessibility rows and browser-refusal recovery guidance identically
+/// for every model integration.
+pub fn format_call_result(name: &str, args: &Value, result: Value) -> ComputerObservation {
+    let observation = &result["structuredContent"];
+    let refused = observation["status"] == "refused";
+    let ok = result["isError"] != true && !refused;
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for block in result["content"].as_array().into_iter().flatten() {
+        match block["type"].as_str() {
+            Some("text") => {
+                if let Some(value) = block["text"].as_str() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(value);
+                }
+            }
+            Some("image") => {
+                if let (Some(data), Some(mime)) =
+                    (block["data"].as_str(), block["mimeType"].as_str())
+                {
+                    if matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+                        images.push(ComputerImage {
+                            data: data.to_owned(),
+                            mime_type: mime.to_owned(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if text.is_empty() {
+        text = result
+            .get("structuredContent")
+            .map(Value::to_string)
+            .unwrap_or_else(|| {
+                "Cua returned no textual observation. Observe before continuing.".into()
+            });
+    } else if name == "cua_get_window_state" {
+        // In elements mode the text says only "tree is in structuredContent".
+        // Forward the requested rows, including values and snapshot-bound tokens.
+        if let Some(elements) = observation.get("elements").filter(|rows| rows.is_array()) {
+            text.push_str(&format!("\nWindow elements: {elements}"));
+        }
+    }
+    // The MCP text is often just a summary. Retain the driver's specific
+    // refusal reason and give a next call that this host actually exposes.
+    if refused {
+        let refusal = &observation["refusal"];
+        if let Some(reason) = refusal["detail"]["reason"].as_str() {
+            text.push_str(&format!("\nDriver reason: {reason}"));
+        }
+        if matches!(name, "cua_get_browser_state" | "cua_browser_prepare")
+            && matches!(
+                refusal["code"].as_str(),
+                Some(
+                    "browser_consent_required"
+                        | "browser_requires_setup"
+                        | "background_unavailable"
+                        | "browser_wrong_target_refused"
+                )
+            )
+        {
+            if let (Some(pid), Some(window_id)) = (args["pid"].as_u64(), args["window_id"].as_u64())
+            {
+                let read = json!({"pid":pid, "window_id":window_id, "include_screenshot":false});
+                text.push_str(&format!("\nChatGSD background window inspection: cua_get_window_state({read}). Check the page identity and its accessibility controls before acting. Use fresh window element tokens for this route."));
+            }
+        }
+    }
+    ComputerObservation { ok, text, images }
+}
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -144,6 +273,17 @@ impl ComputerSession {
         if !args.is_object() { return Err("Computer tool arguments must be an object.".into()); }
         let tool = name.strip_prefix("cua_").ok_or("Invalid computer tool name")?;
         self.rpc("tools/call", json!({"name":tool,"arguments":args})).await
+    }
+
+    pub async fn call_formatted(&mut self, name: &str, args: Value) -> ComputerObservation {
+        match self.call(name, args.clone()).await {
+            Ok(result) => format_call_result(name, &args, result),
+            Err(error) => ComputerObservation {
+                ok: false,
+                text: error,
+                images: Vec::new(),
+            },
+        }
     }
 
     async fn send(&mut self, message: Value) -> Result<(), String> {
@@ -467,5 +607,40 @@ mod tests {
             "browser_upload", "close_app", "set_agent_cursor_enabled"] {
             assert!(!ALLOWED.contains(&tool), "{tool}");
         }
+    }
+
+    #[test]
+    fn format_call_result_preserves_images_window_rows_and_browser_recovery() {
+        let rows = json!([{"role":"AXTextField","value":"https://example.org/shared","element_token":"s7:12"}]);
+        let obs = format_call_result(
+            "cua_get_window_state",
+            &json!({}),
+            json!({
+                "content":[
+                    {"type":"text","text":"snapshot_id=s7"},
+                    {"type":"image","data":"AAAA","mimeType":"image/png"},
+                    {"type":"image","data":"BBBB","mimeType":"image/svg+xml"}
+                ],
+                "structuredContent":{"snapshot_id":"s7","elements":rows},
+            }),
+        );
+        assert!(obs.ok);
+        assert!(obs.text.contains(&rows.to_string()));
+        assert_eq!(obs.images, vec![ComputerImage { data: "AAAA".into(), mime_type: "image/png".into() }]);
+
+        let refused = format_call_result(
+            "cua_browser_prepare",
+            &json!({"pid":14,"window_id":27}),
+            json!({
+                "content":[{"type":"text","text":"Chrome's setup page did not become ready."}],
+                "structuredContent":{
+                    "status":"refused",
+                    "refusal":{"code":"background_unavailable","detail":{"reason":"requires_foreground"}}
+                }
+            }),
+        );
+        assert!(!refused.ok);
+        assert!(refused.text.contains("requires_foreground"));
+        assert!(refused.text.contains(r#"cua_get_window_state({"include_screenshot":false,"pid":14,"window_id":27})"#));
     }
 }

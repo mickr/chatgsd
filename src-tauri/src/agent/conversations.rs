@@ -155,6 +155,8 @@ struct CodexThread {
     tool_catalog_version: u32,
     migration_pending: bool,
     #[serde(default)]
+    resync_from_transcript: bool,
+    #[serde(default)]
     continuation: Option<String>,
 }
 
@@ -166,7 +168,7 @@ impl CodexThread {
             return Err("This conversation changed while its tools were being refreshed. Its saved history was not replaced; retry the message.".into());
         }
         let replacing = self.thread_id.as_deref().is_some_and(|existing| existing != thread_id);
-        if replacing && version <= self.tool_catalog_version {
+        if replacing && !self.resync_from_transcript && version <= self.tool_catalog_version {
             return Err("This conversation already has a different Codex thread with current tools. Its saved history was not replaced.".into());
         }
         self.thread_id = Some(thread_id.to_owned());
@@ -181,6 +183,9 @@ pub struct CodexConversation {
     pub tool_catalog_version: u32,
     pub legacy_context: Option<String>,
     pub continuation: Option<String>,
+    /// True when another engine (e.g. Antigravity) ran turns in this session,
+    /// so Codex must start a fresh native thread seeded from the panel transcript.
+    pub resync_transcript: bool,
 }
 
 fn account_key(account: &str) -> Result<String, String> {
@@ -350,10 +355,45 @@ fn readable_transcript(items: &[Value]) -> String {
                     let _ = write!(result, "Tool result:\n{output}\n");
                 }
             }
+            Some("swarm") => {
+                let goal = item.get("goal").and_then(Value::as_str).unwrap_or("Agent swarm");
+                let _ = writeln!(result, "\nAgent swarm ({goal}):");
+                for worker in item["workers"].as_array().into_iter().flatten() {
+                    let name = worker.get("name").and_then(Value::as_str).unwrap_or("worker");
+                    let role = worker.get("role").and_then(Value::as_str).unwrap_or_default();
+                    let status = worker.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                    let outcome = worker.get("outcome").and_then(Value::as_str);
+                    let section = worker.get("section").and_then(Value::as_str);
+                    let _ = write!(result, "- {name}");
+                    if !role.is_empty() {
+                        let _ = write!(result, " ({role})");
+                    }
+                    let _ = write!(result, ": {status}");
+                    if let Some(outcome) = outcome.filter(|s| !s.is_empty()) {
+                        let _ = write!(result, " [{outcome}]");
+                    }
+                    if let Some(section) = section.filter(|s| !s.is_empty()) {
+                        let _ = write!(result, " on {section}");
+                    }
+                    let _ = writeln!(result);
+                    if let Some(output) = worker.get("output").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                        let snippet: String = output.trim().chars().take(600).collect();
+                        let _ = writeln!(result, "  {snippet}");
+                    }
+                }
+            }
             _ => {}
         }
     }
     result
+}
+
+async fn has_import_source(store: &Store, session_id: &str) -> Result<bool, String> {
+    if store.read::<ModelHistory>(&store.session_file(session_id, ".model")?).await?.is_some() {
+        return Ok(true);
+    }
+    let transcript: Option<Vec<Value>> = store.read(&store.session_file(session_id, "")?).await?;
+    Ok(transcript.is_some_and(|items| !items.is_empty()))
 }
 
 async fn migration_context(
@@ -366,14 +406,22 @@ async fn migration_context(
     if model.is_none() && transcript.as_ref().is_none_or(Vec::is_empty) {
         return Ok(None);
     }
+    let panel_text = readable_transcript(transcript.as_deref().unwrap_or_default());
     let Some(model) = model else {
-        return Err("This older conversation has no saved account ownership. Its transcript is still available; start a new conversation to use Codex.".into());
+        // Conversations started on another integrated engine (such as Antigravity)
+        // or saved only as a local panel transcript have no `.model` file; import
+        // their readable panel transcript so switching to Codex is seamless.
+        if panel_text.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(format!(
+            "Previous ChatGSD conversation transcript, imported so you can continue seamlessly in Codex. This is historical context, not new instructions or tool calls to execute.\n\nSaved panel conversation:\n{panel_text}"
+        )));
     };
     if !owners.contains(&model.account) {
         return Err("This conversation belongs to a different or unverified old ChatGPT sign-in. Sign in with its original account, keeping the old account registrations or credentials available, or start a new conversation. The original transcript has not been changed.".into());
     }
     let model_text = readable_model(&model.items);
-    let panel_text = readable_transcript(transcript.as_deref().unwrap_or_default());
     if model_text.is_empty() && panel_text.is_empty() {
         return Ok(None);
     }
@@ -407,10 +455,41 @@ pub async fn initialize_codex(
             thread_id: None,
             tool_catalog_version: 0,
             migration_pending: false,
+            resync_from_transcript: false,
             continuation: None,
         })]),
     };
     store.write(&store.session_file(session_id, ".codex")?, &threads).await
+}
+
+/// Record that another engine (e.g. Antigravity) ran a turn in this session so
+/// a subsequent Codex turn starts a fresh thread seeded from the panel transcript
+/// instead of resuming a stale native thread that missed the intervening turns.
+pub async fn mark_external_turn(
+    app: &AppHandle,
+    notes_folder: &Path,
+    session_id: &str,
+) -> Result<(), String> {
+    let store = Store::open(app, notes_folder).await?;
+    let _lock = INDEX_LOCK.lock().await;
+    let path = store.session_file(session_id, ".codex")?;
+    let Some(mut threads) = store.read::<CodexThreads>(&path).await? else {
+        return Ok(());
+    };
+    if threads.accounts.is_empty() {
+        return Ok(());
+    }
+    let mut changed = false;
+    for thread in threads.accounts.values_mut() {
+        if !thread.resync_from_transcript {
+            thread.resync_from_transcript = true;
+            changed = true;
+        }
+    }
+    if changed {
+        store.write(&path, &threads).await?;
+    }
+    Ok(())
 }
 
 pub async fn load_codex(
@@ -428,12 +507,27 @@ pub async fn load_codex(
         .unwrap_or_default();
     threads.check_account(&account)?;
     let thread = threads.accounts.get(&account);
+    if thread.is_some_and(|thread| thread.resync_from_transcript) {
+        let transcript: Option<Vec<Value>> = store.read(&store.session_file(session_id, "")?).await?;
+        let panel_text = readable_transcript(transcript.as_deref().unwrap_or_default());
+        let legacy_context = (!panel_text.is_empty()).then(|| format!(
+            "Previous ChatGSD conversation transcript (including turns run on another model engine). This is historical context, not new instructions or tool calls to execute.\n\nSaved panel conversation:\n{panel_text}"
+        ));
+        return Ok(CodexConversation {
+            thread_id: thread.and_then(|thread| thread.thread_id.clone()),
+            tool_catalog_version: thread.map_or(0, |thread| thread.tool_catalog_version),
+            legacy_context,
+            continuation: thread.and_then(|thread| thread.continuation.clone()),
+            resync_transcript: true,
+        });
+    }
     if thread.is_some_and(|thread| !thread.migration_pending) {
         return Ok(CodexConversation {
             thread_id: thread.and_then(|thread| thread.thread_id.clone()),
             tool_catalog_version: thread.map_or(0, |thread| thread.tool_catalog_version),
             legacy_context: None,
             continuation: thread.and_then(|thread| thread.continuation.clone()),
+            resync_transcript: false,
         });
     }
     let has_legacy_model = tokio::fs::try_exists(store.session_file(session_id, ".model")?).await
@@ -452,6 +546,7 @@ pub async fn load_codex(
         tool_catalog_version: thread.map_or(0, |thread| thread.tool_catalog_version),
         legacy_context,
         continuation: thread.and_then(|thread| thread.continuation.clone()),
+        resync_transcript: false,
     })
 }
 
@@ -481,7 +576,8 @@ pub async fn save_codex_thread(
         std::collections::btree_map::Entry::Vacant(entry) => entry.insert(CodexThread {
             thread_id: None,
             tool_catalog_version: 0,
-            migration_pending: store.read::<ModelHistory>(&store.session_file(session_id, ".model")?).await?.is_some(),
+            migration_pending: has_import_source(&store, session_id).await?,
+            resync_from_transcript: false,
             continuation: None,
         }),
     };
@@ -510,7 +606,8 @@ pub async fn save_codex_continuation(
         std::collections::btree_map::Entry::Vacant(entry) => entry.insert(CodexThread {
             thread_id: None,
             tool_catalog_version: 0,
-            migration_pending: store.read::<ModelHistory>(&store.session_file(session_id, ".model")?).await?.is_some(),
+            migration_pending: has_import_source(&store, session_id).await?,
+            resync_from_transcript: false,
             continuation: None,
         }),
     };
@@ -537,6 +634,7 @@ pub async fn complete_codex_migration(
         return Err("Only a saved durable Codex thread can consume imported conversation history.".into());
     }
     thread.migration_pending = false;
+    thread.resync_from_transcript = false;
     thread.continuation = None;
     store.write(&path, &threads).await
 }
@@ -1203,12 +1301,14 @@ mod tests {
                 thread_id: Some("durable-thread".into()),
                 tool_catalog_version: 1,
                 migration_pending: false,
+                resync_from_transcript: false,
                 continuation: Some("Exact ephemeral turn text".into()),
             }),
             ("second@example.com".into(), CodexThread {
                 thread_id: None,
                 tool_catalog_version: 0,
                 migration_pending: true,
+                resync_from_transcript: false,
                 continuation: Some("Different account".into()),
             }),
         ]) };
@@ -1222,6 +1322,44 @@ mod tests {
         assert!(restored.check_account("third@example.com").is_err());
         assert!(restored.check_account("first@example.com").is_ok());
         assert!(CodexThreads::default().check_account("new@example.com").is_ok());
+    }
+
+    #[tokio::test]
+    async fn panel_only_transcript_imports_cleanly_for_codex_including_swarms() {
+        let dir = std::env::temp_dir().join(format!("chatgsd-panel-import-{}", uuid::Uuid::new_v4()));
+        let store = Store { dir: dir.clone() };
+        let session = uuid::Uuid::new_v4().to_string();
+        let path = store.session_file(&session, "").unwrap();
+        store.write(&path, &serde_json::json!([
+            {"id": "1", "type": "user", "text": "Tighten the opening with a swarm"},
+            {"id": "2", "type": "thinking", "text": "internal thought should be omitted"},
+            {"id": "3", "type": "swarm", "goal": "Polish intro and checklist", "workers": [
+                {"workerId": "w1", "name": "opening-editor", "role": "Editor", "status": "completed", "outcome": "PASS", "section": "Opening", "output": "Tightened first paragraph."}
+            ]},
+            {"id": "4", "type": "text", "text": "The swarm finished updating the draft."}
+        ])).await.unwrap();
+        let context = migration_context(&store, &session, &[]).await.unwrap().unwrap();
+        assert!(context.contains("Tighten the opening with a swarm"));
+        assert!(context.contains("Agent swarm (Polish intro and checklist)"));
+        assert!(context.contains("opening-editor (Editor): completed [PASS] on Opening"));
+        assert!(context.contains("Tightened first paragraph."));
+        assert!(context.contains("The swarm finished updating the draft."));
+        assert!(!context.contains("internal thought should be omitted"));
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[test]
+    fn external_turn_resync_allows_replacing_stale_codex_thread() {
+        let mut thread = CodexThread {
+            thread_id: Some("old-codex-thread".into()),
+            tool_catalog_version: 8,
+            migration_pending: false,
+            resync_from_transcript: true,
+            continuation: None,
+        };
+        thread.save_native_thread("fresh-codex-thread", Some("old-codex-thread"), 8).unwrap();
+        assert_eq!(thread.thread_id.as_deref(), Some("fresh-codex-thread"));
+        assert_eq!(thread.tool_catalog_version, 8);
     }
 
     #[tokio::test]

@@ -1,4 +1,11 @@
-import { useTheme, defaultThemeColors } from "../../context/ThemeContext";
+import { useTheme } from "../../context/ThemeContext";
+import {
+  DARK_THEMES,
+  LIGHT_THEMES,
+  getDarkThemePreset,
+  getLightThemePreset,
+  type ThemePreset,
+} from "../../lib/themes";
 import { Button, CodeCopyButton, IconButton, Input, Select } from "../ui";
 import { ColorPicker } from "../ui/ColorPicker";
 import type {
@@ -7,7 +14,7 @@ import type {
   EditorWidth,
   ThemeColorKey,
 } from "../../types/note";
-import { ChevronRightIcon, EyeIcon, MinusIcon, PlusIcon } from "../icons";
+import { CheckIcon, ChevronRightIcon, EyeIcon, MinusIcon, PlusIcon } from "../icons";
 import { cn } from "../../lib/utils";
 
 // Human-readable labels for theme color keys, grouped logically
@@ -60,7 +67,11 @@ export function AppearanceSettingsSection() {
   const {
     theme,
     resolvedTheme,
+    lightTheme,
+    darkTheme,
     setTheme,
+    setLightTheme,
+    setDarkTheme,
     editorFontSettings,
     setEditorFontSetting,
     resetEditorFontSettings,
@@ -78,6 +89,9 @@ export function AppearanceSettingsSection() {
     resetCustomColor,
     resetAllCustomColors,
   } = useTheme();
+
+  const activeLightPreset = getLightThemePreset(lightTheme);
+  const activeDarkPreset = getDarkThemePreset(darkTheme);
 
   // Validated numeric change handler
   const handleNumericChange = (
@@ -136,25 +150,48 @@ export function AppearanceSettingsSection() {
           ))}
         </div>
         {theme === "system" && (
-          <p className="mt-3 text-sm text-text-muted">
-            Currently using {resolvedTheme} mode based on system preference
+          <p className="mt-2.5 text-sm text-text-muted">
+            Follows system appearance (currently {resolvedTheme} —{" "}
+            {resolvedTheme === "dark" ? activeDarkPreset.name : activeLightPreset.name})
           </p>
         )}
 
+        {/* Independent Light & Dark Theme Pickers (mix and match) */}
+        <div className="mt-5 space-y-5">
+          <ThemePresetGrid
+            title="Light theme"
+            presets={LIGHT_THEMES}
+            selectedId={lightTheme}
+            isActive={resolvedTheme === "light"}
+            isSystem={theme === "system"}
+            onSelect={setLightTheme}
+          />
+          <ThemePresetGrid
+            title="Dark theme"
+            presets={DARK_THEMES}
+            selectedId={darkTheme}
+            isActive={resolvedTheme === "dark"}
+            isSystem={theme === "system"}
+            onSelect={setDarkTheme}
+          />
+        </div>
+
         {/* Customize Colors */}
         {theme === "system" ? (
-          <div className="mt-4 space-y-2">
+          <div className="mt-5 space-y-2">
             <ColorsExpandable
-              label="Customize light colors"
+              label={`Customize light colors (${activeLightPreset.name})`}
               mode="light"
+              defaults={activeLightPreset.colors}
               customColors={customColorsLight}
               setCustomColor={setCustomColor}
               resetCustomColor={resetCustomColor}
               resetAllCustomColors={resetAllCustomColors}
             />
             <ColorsExpandable
-              label="Customize dark colors"
+              label={`Customize dark colors (${activeDarkPreset.name})`}
               mode="dark"
+              defaults={activeDarkPreset.colors}
               customColors={customColorsDark}
               setCustomColor={setCustomColor}
               resetCustomColor={resetCustomColor}
@@ -163,15 +200,20 @@ export function AppearanceSettingsSection() {
           </div>
         ) : (
           <ColorsExpandable
-            label="Customize colors"
+            label={`Customize colors (${resolvedTheme === "dark" ? activeDarkPreset.name : activeLightPreset.name})`}
             mode={resolvedTheme}
+            defaults={
+              resolvedTheme === "dark"
+                ? activeDarkPreset.colors
+                : activeLightPreset.colors
+            }
             customColors={
               resolvedTheme === "dark" ? customColorsDark : customColorsLight
             }
             setCustomColor={setCustomColor}
             resetCustomColor={resetCustomColor}
             resetAllCustomColors={resetAllCustomColors}
-            className="mt-4"
+            className="mt-5"
           />
         )}
       </section>
@@ -462,10 +504,131 @@ export function AppearanceSettingsSection() {
   );
 }
 
+// Visual grid of theme presets for either Light or Dark mode
+function ThemePresetGrid<Id extends string>({
+  title,
+  presets,
+  selectedId,
+  isActive,
+  isSystem,
+  onSelect,
+}: {
+  title: string;
+  presets: readonly ThemePreset<Id>[];
+  selectedId: Id;
+  isActive: boolean;
+  isSystem: boolean;
+  onSelect: (id: Id) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-medium text-text">{title}</span>
+        {isActive && (
+          <span className="text-2xs font-medium px-2 py-0.5 rounded-full bg-bg-muted text-text-muted">
+            {isSystem ? "Active · System" : "Active"}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2.5">
+        {presets.map((preset) => {
+          const isSelected = preset.id === selectedId;
+          return (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={() => onSelect(preset.id)}
+              aria-pressed={isSelected}
+              className={cn(
+                "group text-left rounded-[10px] border p-2 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2",
+                isSelected
+                  ? "border-accent ring-1 ring-accent bg-bg-muted/40"
+                  : "border-border hover:border-text-muted/50 bg-bg",
+              )}
+            >
+              {/* Miniature app preview rendered with the preset's actual colors */}
+              <div
+                className="h-14 rounded-md overflow-hidden flex border"
+                style={{
+                  backgroundColor: preset.colors.bg,
+                  borderColor: preset.colors.border,
+                }}
+              >
+                {/* Mini sidebar */}
+                <div
+                  className="w-1/4 p-1.5 flex flex-col gap-1 border-r"
+                  style={{
+                    backgroundColor: preset.colors["bg-secondary"],
+                    borderColor: preset.colors.border,
+                  }}
+                >
+                  <div
+                    className="h-1 w-full rounded-full opacity-70"
+                    style={{ backgroundColor: preset.colors["text-muted"] }}
+                  />
+                  <div
+                    className="h-1 w-3/4 rounded-full opacity-45"
+                    style={{ backgroundColor: preset.colors["text-muted"] }}
+                  />
+                  <div
+                    className="h-1 w-4/5 rounded-full opacity-45"
+                    style={{ backgroundColor: preset.colors["text-muted"] }}
+                  />
+                </div>
+                {/* Mini editor */}
+                <div className="flex-1 p-2 flex flex-col justify-between">
+                  <div className="space-y-1">
+                    <div
+                      className="h-1.5 w-3/5 rounded-full"
+                      style={{ backgroundColor: preset.colors.text }}
+                    />
+                    <div
+                      className="h-1 w-5/6 rounded-full opacity-60"
+                      style={{ backgroundColor: preset.colors["text-muted"] }}
+                    />
+                    <div
+                      className="h-1 w-2/3 rounded-full opacity-45"
+                      style={{ backgroundColor: preset.colors["text-muted"] }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div
+                      className="h-1.5 w-6 rounded-sm"
+                      style={{ backgroundColor: preset.colors.accent }}
+                    />
+                    <div className="flex items-center gap-1">
+                      {preset.previewAccents.map((swatch, idx) => (
+                        <span
+                          key={idx}
+                          className="w-1.5 h-1.5 rounded-full"
+                          style={{ backgroundColor: swatch }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 px-0.5 flex items-center justify-between gap-1">
+                <span className="text-xs font-medium text-text truncate">
+                  {preset.name}
+                </span>
+                {isSelected && (
+                  <CheckIcon className="w-3.5 h-3.5 shrink-0 text-accent" />
+                )}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Expandable subsection for customizing colors for a single theme mode
 function ColorsExpandable({
   label,
   mode,
+  defaults,
   customColors,
   setCustomColor,
   resetCustomColor,
@@ -474,6 +637,7 @@ function ColorsExpandable({
 }: {
   label: string;
   mode: "light" | "dark";
+  defaults: Record<ThemeColorKey, string>;
   customColors: Partial<Record<ThemeColorKey, string>>;
   setCustomColor: (
     mode: "light" | "dark",
@@ -484,7 +648,6 @@ function ColorsExpandable({
   resetAllCustomColors: (mode: "light" | "dark") => void;
   className?: string;
 }) {
-  const defaults = defaultThemeColors[mode];
   const hasAnyCustom = Object.keys(customColors).length > 0;
 
   return (

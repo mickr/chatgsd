@@ -1,21 +1,49 @@
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 use super::{transport::{self, Server}, AgentStatus, ChatGptAccount};
 
 static AUTH_LOCK: Mutex<()> = Mutex::const_new(());
+static CACHED_EMAIL: Mutex<Option<(String, Instant)>> = Mutex::const_new(None);
+const EMAIL_CACHE_TTL: Duration = Duration::from_secs(300);
 static LOGIN_CANCEL: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
 pub(super) static ACCOUNT_CHANGED: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
 
 fn changed(sender: &watch::Sender<u64>) { sender.send_modify(|generation| *generation = generation.wrapping_add(1)); }
 
-pub(super) async fn read(server: &mut Server) -> Result<Option<String>, String> {
-    let _guard = AUTH_LOCK.lock().await;
-    read_unlocked(server).await
+pub(super) async fn invalidate_cache() {
+    *CACHED_EMAIL.lock().await = None;
+    transport::clear_pool().await;
 }
 
-async fn read_unlocked(server: &mut Server) -> Result<Option<String>, String> {
-    let result = server.rpc("account/read", json!({"refreshToken":true})).await?;
+/// Fast path for interactive runs & parallel swarm workers: avoids serializing
+/// every turn/worker behind a network `refreshToken: true` round-trip.
+pub(super) async fn read_cached(server: &mut Server) -> Result<Option<String>, String> {
+    if let Some((email, cached_at)) = CACHED_EMAIL.lock().await.as_ref() {
+        if cached_at.elapsed() < EMAIL_CACHE_TTL {
+            return Ok(Some(email.clone()));
+        }
+    }
+    let _guard = AUTH_LOCK.lock().await;
+    if let Some((email, cached_at)) = CACHED_EMAIL.lock().await.as_ref() {
+        if cached_at.elapsed() < EMAIL_CACHE_TTL {
+            return Ok(Some(email.clone()));
+        }
+    }
+    let email = read_unlocked(server, false).await?;
+    let email = match email {
+        Some(email) => Some(email),
+        None => read_unlocked(server, true).await?,
+    };
+    if let Some(ref email) = email {
+        *CACHED_EMAIL.lock().await = Some((email.clone(), Instant::now()));
+    }
+    Ok(email)
+}
+
+async fn read_unlocked(server: &mut Server, refresh_token: bool) -> Result<Option<String>, String> {
+    let result = server.rpc("account/read", json!({"refreshToken":refresh_token})).await?;
     let Some(account) = result.get("account").filter(|value| !value.is_null()) else { return Ok(None); };
     if account["type"] != "chatgpt" { return Err("Sign in with a ChatGPT account, not an API key, to use ChatGSD.".into()); }
     account["email"].as_str().filter(|email| !email.is_empty()).map(|email| Some(email.to_owned()))
@@ -36,13 +64,23 @@ async fn account(app: &tauri::AppHandle, email: String) -> Result<ChatGptAccount
 pub async fn status(app: &tauri::AppHandle) -> AgentStatus {
     let result = async {
         let mut server = Server::start(app).await?;
-        match read(&mut server).await? {
-            Some(email) => Ok(Some(account(app, email).await?)),
-            None => Ok(None),
+        let _guard = AUTH_LOCK.lock().await;
+        match read_unlocked(&mut server, true).await? {
+            Some(email) => {
+                *CACHED_EMAIL.lock().await = Some((email.clone(), Instant::now()));
+                Ok(Some(account(app, email).await?))
+            }
+            None => {
+                *CACHED_EMAIL.lock().await = None;
+                Ok(None)
+            }
         }
     }.await;
     match result {
-        Ok(Some(account)) => AgentStatus { status: "ready".into(), detail: None, account: Some(account) },
+        Ok(Some(account)) => {
+            transport::warm_pool(app);
+            AgentStatus { status: "ready".into(), detail: None, account: Some(account) }
+        }
         Ok(None) => AgentStatus { status: "signed_out".into(), detail: Some("Sign in with ChatGPT to use Codex in ChatGSD.".into()), account: None },
         Err(error) => AgentStatus { status: "error".into(), detail: Some(error), account: None },
     }
@@ -50,9 +88,9 @@ pub async fn status(app: &tauri::AppHandle) -> AgentStatus {
 
 /// Refresh through Codex, then read only its app-owned bearer credential.
 pub(super) async fn decisions_token(app: &tauri::AppHandle) -> Result<(String, String), String> {
-    let mut server = Server::start(app).await?;
+    let mut server = Server::acquire(app, false).await?;
     let _guard = AUTH_LOCK.lock().await;
-    let email = read_unlocked(&mut server).await?
+    let email = read_unlocked(&mut server, true).await?
         .ok_or("Sign in with ChatGPT to classify inline requests.")?;
     if !account(app, email.clone()).await?.plan_notice_seen {
         return Err("Confirm ChatGPT plan use in the sidebar first.".into());
@@ -109,8 +147,11 @@ pub async fn chatgpt_sign_in(app: tauri::AppHandle) -> Result<ChatGptAccount, St
             if message["params"]["success"] != true {
                 return Err(message["params"]["error"].as_str().unwrap_or("ChatGPT sign-in did not complete").into());
             }
-            let email = read_unlocked(&mut server).await?.ok_or("Codex did not save the signed-in account")?;
+            let email = read_unlocked(&mut server, true).await?.ok_or("Codex did not save the signed-in account")?;
+            *CACHED_EMAIL.lock().await = Some((email.clone(), Instant::now()));
             changed(&ACCOUNT_CHANGED);
+            transport::clear_pool().await;
+            transport::warm_pool(&app);
             return account(&app, email).await;
         }
         if message.get("id").is_some() { server.reject(&message).await?; }
@@ -127,6 +168,7 @@ pub async fn chatgpt_cancel_sign_in() -> Result<(), String> {
 pub async fn chatgpt_sign_out(app: tauri::AppHandle) -> Result<(), String> {
     changed(&LOGIN_CANCEL);
     changed(&ACCOUNT_CHANGED);
+    invalidate_cache().await;
     let _guard = AUTH_LOCK.lock().await;
     let mut server = Server::start(&app).await?;
     server.rpc("account/logout", Value::Null).await?;
@@ -137,7 +179,7 @@ pub async fn chatgpt_sign_out(app: tauri::AppHandle) -> Result<(), String> {
 pub async fn chatgpt_ack_plan_notice(app: tauri::AppHandle) -> Result<(), String> {
     let _guard = AUTH_LOCK.lock().await;
     let mut server = Server::start(&app).await?;
-    let email = read_unlocked(&mut server).await?.ok_or("Sign in with ChatGPT first")?;
+    let email = read_unlocked(&mut server, true).await?.ok_or("Sign in with ChatGPT first")?;
     let path = transport::home(&app)?.join("plan-notices.json");
     let mut seen: Vec<String> = match tokio::fs::read(&path).await {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,

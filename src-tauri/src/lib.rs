@@ -67,6 +67,10 @@ pub struct ThemeColors {
 #[serde(rename_all = "camelCase")]
 pub struct ThemeSettings {
     pub mode: String, // "light" | "dark" | "system"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark_theme: Option<String>,
     pub custom_light_colors: Option<ThemeColors>,
     pub custom_dark_colors: Option<ThemeColors>,
 }
@@ -75,10 +79,20 @@ impl Default for ThemeSettings {
     fn default() -> Self {
         Self {
             mode: "system".to_string(),
+            light_theme: None,
+            dark_theme: None,
             custom_light_colors: None,
             custom_dark_colors: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemeUpdateEvent {
+    theme: ThemeSettings,
+    custom_colors_light: Option<std::collections::HashMap<String, String>>,
+    custom_colors_dark: Option<std::collections::HashMap<String, String>>,
 }
 
 // Editor font settings (simplified)
@@ -1815,6 +1829,7 @@ fn get_settings(state: State<AppState>) -> Settings {
 #[tauri::command]
 fn update_settings(
     new_settings: Settings,
+    app: AppHandle,
     state: State<AppState>,
 ) -> Result<(), String> {
     let folder = {
@@ -1829,6 +1844,14 @@ fn update_settings(
 
     let settings = state.settings.read().expect("settings read lock");
     save_settings(&folder, &settings).map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "theme-updated",
+        ThemeUpdateEvent {
+            theme: settings.theme.clone(),
+            custom_colors_light: settings.custom_colors_light.clone(),
+            custom_colors_dark: settings.custom_colors_dark.clone(),
+        },
+    );
 
     Ok(())
 }
@@ -3403,6 +3426,10 @@ pub fn run() {
             agent::agent_steer_run,
             agent::agent_cancel_run,
             agent::agent_tool_respond,
+            agent::subagents::agent_stop_subagent,
+            agent::subagents::agent_stop_all_subagents,
+            agent::subagents::agent_drain_subagents,
+            agent::subagents::agent_cleanup_subagents,
             agent::agent_research_brief_default,
             agent::profile::agent_profile,
             agent::profile::agent_set_profile,
@@ -3605,5 +3632,27 @@ mod save_tests {
         assert!(checked_write(&path, &renamed, "rename", Some(&hash)).await.unwrap().is_some());
         assert!(!renamed.exists());
         fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[test]
+    fn theme_settings_deserializes_legacy_and_mix_and_match_presets() {
+        let legacy: ThemeSettings = serde_json::from_str(r#"{"mode":"system"}"#).unwrap();
+        assert_eq!(legacy.mode, "system");
+        assert_eq!(legacy.light_theme, None);
+        assert_eq!(legacy.dark_theme, None);
+
+        let mixed = ThemeSettings {
+            mode: "system".to_string(),
+            light_theme: Some("alucard".to_string()),
+            dark_theme: Some("catppuccin-mocha".to_string()),
+            custom_light_colors: None,
+            custom_dark_colors: None,
+        };
+        let json = serde_json::to_string(&mixed).unwrap();
+        assert!(json.contains(r#""lightTheme":"alucard""#));
+        assert!(json.contains(r#""darkTheme":"catppuccin-mocha""#));
+        let round_trip: ThemeSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.light_theme.as_deref(), Some("alucard"));
+        assert_eq!(round_trip.dark_theme.as_deref(), Some("catppuccin-mocha"));
     }
 }

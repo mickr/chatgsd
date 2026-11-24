@@ -16,6 +16,7 @@ pub mod mcp;
 mod reading;
 pub mod skills;
 pub mod skills_sh;
+pub mod subagents;
 pub mod tools;
 mod web;
 pub mod webdav;
@@ -47,6 +48,9 @@ pub struct RunContext {
     pub ui_guide: String,
     /// The skill the user invoked with `/name`, loaded into their request.
     pub skill: Option<String>,
+    /// Parent run's model and service tier, inherited by subagents when unset.
+    pub model: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,7 +150,7 @@ struct Run {
 pub struct AgentState {
     runs: Mutex<HashMap<String, Run>>,
     bridge: bridge::ToolBridge,
-    
+    pub subagents: subagents::SubagentManager,
 }
 impl AgentState {
     fn context(&self, run_id: &str) -> Option<RunContext> {
@@ -155,6 +159,62 @@ impl AgentState {
             .expect("agent runs mutex")
             .get(run_id)
             .map(|r| r.context.clone())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApprovalDecision {
+    AllowOnce,
+    AllowSession,
+    Deny,
+}
+
+/// Routes a native harness execution permission request (Codex shell command or
+/// Antigravity tool call) to ChatGSD's approval card in the panel.
+pub(super) async fn request_command_approval(
+    app: &tauri::AppHandle,
+    run_id: &str,
+    question: String,
+    server: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> ApprovalDecision {
+    const ALLOW_ONCE: &str = "Allow once";
+    const ALLOW_SESSION: &str = "Allow for this chat";
+    const DENY: &str = "Deny";
+    let answer = app
+        .state::<AgentState>()
+        .bridge
+        .execute(
+            app,
+            run_id,
+            "mcp_approval",
+            serde_json::json!({
+                "question": question,
+                "options": [ALLOW_ONCE, ALLOW_SESSION, DENY],
+                "form": null,
+                "call": {
+                    "server": server,
+                    "tool": tool,
+                    "arguments": arguments,
+                },
+                "preview": null,
+            }),
+            None,
+        )
+        .await;
+    if !answer.ok {
+        return ApprovalDecision::Deny;
+    }
+    let choice = answer
+        .text
+        .strip_prefix("The user answered: ")
+        .unwrap_or(&answer.text)
+        .trim();
+    match choice {
+        ALLOW_ONCE => ApprovalDecision::AllowOnce,
+        ALLOW_SESSION => ApprovalDecision::AllowSession,
+        _ => ApprovalDecision::Deny,
     }
 }
 
@@ -231,6 +291,9 @@ pub async fn agent_start_run(
     let notes_folder = notes_folder(&app).await?;
     document_path(&app, &notes_folder, &request.context.note_id).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
+    let model = request.model.filter(|m| !m.is_empty());
+    let effort = request.effort.filter(|e| !e.is_empty());
+    let service_tier = request.service_tier.filter(|tier| !tier.is_empty());
     let ctx = RunContext {
         run_id: run_id.clone(),
         note_id: request.context.note_id,
@@ -249,13 +312,12 @@ pub async fn agent_start_run(
             .skill
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty() && !request.read_only),
+        model: model.clone(),
+        service_tier: service_tier.clone(),
         notes_folder,
     };
     let task_ctx = ctx.clone();
     let task_app = app.clone();
-    let model = request.model.filter(|m| !m.is_empty());
-    let effort = request.effort.filter(|e| !e.is_empty());
-    let service_tier = request.service_tier.filter(|tier| !tier.is_empty());
     let use_antigravity = antigravity::is_model(model.as_deref());
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     // The gate ensures tools cannot arrive before the run and its context are registered.
@@ -265,14 +327,15 @@ pub async fn agent_start_run(
         if ready.await.is_err() {
             return;
         }
+        let computer = computer::start_for_run(&task_app, &task_ctx).await;
         let result = if use_antigravity {
             antigravity::run(
                 task_app.clone(),
                 task_ctx.clone(),
-                model,
-                effort,
+                antigravity::TurnOptions { model, effort },
                 request.session_id,
                 request.prompt,
+                computer.clone(),
                 cancel_rx,
             )
             .await
@@ -287,10 +350,12 @@ pub async fn agent_start_run(
                 },
                 request.session_id,
                 request.prompt,
+                computer.clone(),
                 steered,
             )
             .await
         };
+        computer::shutdown_shared(computer).await;
         let state = task_app.state::<AgentState>();
         // Removing under the same lock as cancellation chooses exactly one terminal owner.
         let removed = state
@@ -301,6 +366,7 @@ pub async fn agent_start_run(
         if removed.is_none() {
             return;
         }
+        state.subagents.cleanup_run(&task_app, &task_ctx.run_id);
         state.bridge.cleanup(&task_ctx.run_id);
         let event = match result {
             Ok(()) => AgentEvent::Done {
@@ -354,6 +420,7 @@ pub fn agent_cancel_run(app: tauri::AppHandle, run_id: String, state: State<'_, 
         } else {
             run.task.abort();
         }
+        state.subagents.cleanup_run(&app, &run_id);
         state.bridge.cleanup(&run_id);
         emit(
             &app,

@@ -77,14 +77,43 @@ export interface AgentExpression {
 }
 export type ComputerPermission = "accessibility" | "screen_recording";
 export interface ComputerUnavailable { message: string; permissions: ComputerPermission[] }
+export type SubagentStatus =
+  | "spawning"
+  | "running"
+  | "checking"
+  | "draining"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "cleaned_up";
+export interface SubagentEvent {
+  swarmId: string;
+  goal?: string | null;
+  workerId: string;
+  name: string;
+  role: string;
+  color?: string;
+  canEdit?: boolean;
+  section?: string | null;
+  model?: string | null;
+  status: SubagentStatus;
+  activity?: string | null;
+  outcome?: string | null;
+  output?: string | null;
+  steps: number;
+  checkedAt?: number | null;
+  updatedAt: number;
+}
 export type AgentEvent =
   | ({ type: "computer_unavailable" } & ComputerUnavailable)
   | { type: "session"; sessionId: string }
   | { type: "text_delta"; text: string }
+  | { type: "thinking_delta"; text: string }
   | ({ type: "expression" } & AgentExpression)
   | { type: "tool_call"; callId: string; name: string; input: unknown }
   | { type: "tool_result"; callId: string; ok: boolean; output: string }
   | ({ type: "skill_offer" } & SkillOffer)
+  | ({ type: "subagent" } & SubagentEvent)
   | { type: "done"; stopReason: "completed" | "cancelled" }
   | { type: "error"; kind: AgentErrorKind; message: string };
 export interface AgentEventPayload {
@@ -248,6 +277,14 @@ export const steerRun = (runId: string, text: string) =>
   invoke<void>("agent_steer_run", { runId, text });
 export const cancelRun = (runId: string) =>
   invoke<void>("agent_cancel_run", { runId });
+export const stopSubagent = (runId: string, workerId: string) =>
+  invoke<boolean>("agent_stop_subagent", { runId, workerId });
+export const stopAllSubagents = (runId: string) =>
+  invoke<number>("agent_stop_all_subagents", { runId });
+export const drainSubagents = (runId: string) =>
+  invoke<number>("agent_drain_subagents", { runId });
+export const cleanupSubagents = (runId: string) =>
+  invoke<number>("agent_cleanup_subagents", { runId });
 export const toolRespond = (requestId: string, ok: boolean, output: string) =>
   invoke<void>("agent_tool_respond", { requestId, ok, output });
 export const researchBriefDefault = () =>

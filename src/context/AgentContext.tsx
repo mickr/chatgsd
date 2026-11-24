@@ -50,7 +50,7 @@ import {
   type WritingOutcome,
   type WritingRequest,
 } from "../lib/agent/writingOffers";
-import { clearAgentPresence, scrollPositionIntoView } from "../components/editor/AgentChanges";
+import { clearAgentPresence, clearAllWorkerPresence, clearWorkerPresence, scrollPositionIntoView } from "../components/editor/AgentChanges";
 import { argumentMapFor, argumentMapState, offerPassageState, setArgumentMap, setOfferPassage } from "../components/editor/ArgumentMap";
 import { noteEditChange, type NoteChange } from "../lib/agent/turnChanges";
 import {
@@ -60,8 +60,33 @@ import {
   type RunBinding,
 } from "../lib/agent/documentTools";
 
+export interface SwarmWorker {
+  workerId: string;
+  name: string;
+  role: string;
+  color?: string;
+  canEdit?: boolean;
+  section?: string | null;
+  model?: string | null;
+  status: agent.SubagentStatus;
+  activity?: string | null;
+  outcome?: string | null;
+  output?: string | null;
+  steps: number;
+  checkedAt?: number | null;
+  updatedAt: number;
+}
+export interface SwarmItem {
+  id: string;
+  type: "swarm";
+  runId: string;
+  swarmId: string;
+  goal: string | null;
+  workers: SwarmWorker[];
+}
 export type TranscriptItem =
   | { id: string; type: "text"; text: string }
+  | { id: string; type: "thinking"; text: string }
   | {
       id: string;
       type: "user";
@@ -92,6 +117,7 @@ export type TranscriptItem =
   | { id: string; type: "activity"; text: string }
   | { id: string; type: "changes"; change: NoteChange }
   | TraceRecord
+  | SwarmItem
   | ({ id: string; type: "skill_offer"; dismissed?: boolean } & agent.SkillOffer);
 export type QuestionItem = Extract<TranscriptItem, { type: "question" }>;
 export type SkillOfferItem = Extract<TranscriptItem, { type: "skill_offer" }>;
@@ -178,8 +204,8 @@ const emptyConversation = (): Conversation => ({
   cancelled: false,
 });
 const TRANSCRIPT_TYPES: Record<string, true> = {
-  user: true, text: true, tool: true, question: true, activity: true, changes: true,
-  trace: true, skill_offer: true,
+  user: true, text: true, thinking: true, tool: true, question: true, activity: true, changes: true,
+  trace: true, skill_offer: true, swarm: true,
 };
 /** An offer card reads all of these; a saved item missing any is not shown. */
 const isSkillOffer = (item: Record<string, unknown>) =>
@@ -188,6 +214,10 @@ const isSkillOffer = (item: Record<string, unknown>) =>
   ) &&
   Array.isArray(item.files) &&
   typeof item.archive === "boolean";
+const isSwarmItem = (item: Record<string, unknown>) =>
+  typeof item.swarmId === "string" &&
+  typeof item.runId === "string" &&
+  Array.isArray(item.workers);
 /** A saved transcript, keeping only items this version knows how to show. */
 function parseTranscript(value: unknown): TranscriptItem[] {
   if (!Array.isArray(value)) return [];
@@ -199,6 +229,7 @@ function parseTranscript(value: unknown): TranscriptItem[] {
       typeof item.type === "string" && TRANSCRIPT_TYPES[item.type] === true &&
       (item.type !== "tool" || item.name !== "set_expression") &&
       (item.type !== "trace" || isTraceRecord(item)) &&
+      (item.type !== "swarm" || isSwarmItem(item)) &&
       (item.type !== "skill_offer" || isSkillOffer(item)),
   );
 }
@@ -318,6 +349,14 @@ export interface AgentContextValue {
   /** Redirects the working agent with a message, without stopping it. False if there was nothing to steer. */
   steer: (text: string) => Promise<boolean>;
   stop: () => Promise<void>;
+  /** Stops one running subagent worker in the current run. */
+  stopSubagent: (runId: string, workerId: string) => Promise<void>;
+  /** Stops all running subagent workers in the current run. */
+  stopAllSubagents: (runId: string) => Promise<void>;
+  /** Drains an active swarm immediately, returning completed results to the coordinator. */
+  drainSubagents: (runId: string) => Promise<void>;
+  /** Cleans up finished or stopped subagent workers in the current swarm. */
+  cleanupSubagents: (runId: string, swarmId?: string) => Promise<void>;
   /** The agent is following the user's edits in the open note. */
   coediting: boolean;
   /** An earlier edit request may continue when the user edits. */
@@ -958,6 +997,19 @@ export function AgentProvider({
           return { ...conversation, computerUnavailable: { message: event.message, permissions: event.permissions } };
         if (event.type === "session")
           return { ...conversation, sessionId: event.sessionId };
+        if (event.type === "thinking_delta") {
+          const items = [...conversation.items];
+          const last = items[items.length - 1];
+          if (last?.type === "thinking")
+            items[items.length - 1] = { ...last, text: last.text + event.text };
+          else
+            items.push({
+              id: crypto.randomUUID(),
+              type: "thinking",
+              text: event.text,
+            });
+          return { ...conversation, items };
+        }
         if (event.type === "text_delta") {
           const items = [...conversation.items];
           const last = items[items.length - 1];
@@ -1003,6 +1055,61 @@ export function AgentProvider({
             ? noteEditChange(tool.input) : null;
           if (change && !items.some((item) => item.id === `${toolId}:changes`))
             items.push({ id: `${toolId}:changes`, type: "changes", change });
+          return { ...conversation, items };
+        }
+        if (event.type === "subagent") {
+          const itemId = `${payload.runId}:${event.swarmId}`;
+          const worker: SwarmWorker = {
+            workerId: event.workerId,
+            name: event.name,
+            role: event.role,
+            color: event.color,
+            canEdit: event.canEdit,
+            section: event.section ?? null,
+            model: event.model ?? null,
+            status: event.status,
+            activity: event.activity ?? null,
+            outcome: event.outcome ?? null,
+            output: event.output ?? null,
+            steps: event.steps,
+            checkedAt: event.checkedAt ?? null,
+            updatedAt: event.updatedAt,
+          };
+          if (
+            event.status === "completed" ||
+            event.status === "failed" ||
+            event.status === "stopped" ||
+            event.status === "cleaned_up"
+          ) {
+            clearWorkerPresence(editorRef.current, event.workerId);
+          }
+          const existingIndex = conversation.items.findIndex(
+            (item) => item.type === "swarm" && item.id === itemId,
+          );
+          if (existingIndex === -1) {
+            const swarm: SwarmItem = {
+              id: itemId,
+              type: "swarm",
+              runId: payload.runId,
+              swarmId: event.swarmId,
+              goal: event.goal ?? null,
+              workers: [worker],
+            };
+            return { ...conversation, items: [...conversation.items, swarm] };
+          }
+          const items = conversation.items.map((item, idx) => {
+            if (idx !== existingIndex || item.type !== "swarm") return item;
+            const workerIdx = item.workers.findIndex((w) => w.workerId === worker.workerId);
+            const workers =
+              workerIdx === -1
+                ? [...item.workers, worker]
+                : item.workers.map((w, i) => (i === workerIdx ? worker : w));
+            return {
+              ...item,
+              goal: event.goal ?? item.goal,
+              workers,
+            };
+          });
           return { ...conversation, items };
         }
         if (event.type === "skill_offer") {
@@ -1448,6 +1555,58 @@ export function AgentProvider({
       toast.error(`Couldn't stop the agent: ${agent.errorMessage(error)}`);
     }
   }, [currentNote, editorRef, updateConversation]);
+  const stopSubagent = useCallback(async (runId: string, workerId: string) => {
+    clearWorkerPresence(editorRef.current, workerId);
+    try {
+      await agent.stopSubagent(runId, workerId);
+    } catch (error) {
+      toast.error(`Couldn't stop subagent: ${agent.errorMessage(error)}`);
+    }
+  }, [editorRef]);
+  const stopAllSubagents = useCallback(async (runId: string) => {
+    clearAllWorkerPresence(editorRef.current);
+    try {
+      await agent.stopAllSubagents(runId);
+    } catch (error) {
+      toast.error(`Couldn't stop subagents: ${agent.errorMessage(error)}`);
+    }
+  }, [editorRef]);
+  const drainSubagents = useCallback(async (runId: string) => {
+    clearAllWorkerPresence(editorRef.current);
+    try {
+      await agent.drainSubagents(runId);
+    } catch (error) {
+      toast.error(`Couldn't drain subagents: ${agent.errorMessage(error)}`);
+    }
+  }, [editorRef]);
+  const cleanupSubagents = useCallback(async (runId: string, swarmId?: string) => {
+    clearAllWorkerPresence(editorRef.current);
+    try {
+      await agent.cleanupSubagents(runId);
+    } catch (error) {
+      toast.error(`Couldn't clean up subagents: ${agent.errorMessage(error)}`);
+      return;
+    }
+    if (currentNote) {
+      const now = Date.now();
+      updateConversation(currentNote.id, (conversation) => ({
+        ...conversation,
+        items: conversation.items.map((item) => {
+          if (item.type !== "swarm" || item.runId !== runId) return item;
+          if (swarmId && item.swarmId !== swarmId) return item;
+          return {
+            ...item,
+            workers: item.workers.map((worker) =>
+              worker.status === "cleaned_up"
+                ? worker
+                : { ...worker, status: "cleaned_up", activity: "Cleaned up", updatedAt: now },
+            ),
+          };
+        }),
+      }));
+      saveConversation(currentNote.id);
+    }
+  }, [currentNote, saveConversation, updateConversation]);
   const setComputerAccess = useCallback((enabled: boolean) => {
     updateComputerAccess(enabled);
     persist({ agentComputerAccess: enabled });
@@ -2399,6 +2558,10 @@ export function AgentProvider({
       send,
       steer,
       stop,
+      stopSubagent,
+      stopAllSubagents,
+      drainSubagents,
+      cleanupSubagents,
       newConversation,
       history,
       openConversation,
@@ -2492,6 +2655,10 @@ export function AgentProvider({
       send,
       steer,
       stop,
+      stopSubagent,
+      stopAllSubagents,
+      drainSubagents,
+      cleanupSubagents,
       newConversation,
       history,
       openConversation,

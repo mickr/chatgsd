@@ -67,7 +67,7 @@ async fn shell_path() -> Option<OsString> {
 
 /// Where the user's shell looks for programs. An app opened from Finder is
 /// given only the system's folders, without the ones `npx` or `uvx` live in.
-async fn search_path() -> &'static OsString {
+pub(in crate::agent) async fn search_path() -> &'static OsString {
     static SEARCH_PATH: tokio::sync::OnceCell<OsString> = tokio::sync::OnceCell::const_new();
     SEARCH_PATH.get_or_init(|| async {
         match shell_path().await {

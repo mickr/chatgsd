@@ -4,11 +4,25 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
+  useRef,
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getSettings, updateSettings } from "../services/notes";
 import { SIDEBAR_MIN_PX, SIDEBAR_MAX_PX } from "../lib/sidebar";
+import {
+  DEFAULT_DARK_THEME,
+  DEFAULT_LIGHT_THEME,
+  getDarkThemePreset,
+  getLightThemePreset,
+  isDarkThemeId,
+  isLightThemeId,
+  type DarkThemeId,
+  type LightThemeId,
+  type ThemePreset,
+} from "../lib/themes";
 import type {
   ThemeSettings,
   EditorFontSettings,
@@ -19,7 +33,7 @@ import type {
   ThemeColorKey,
 } from "../types/note";
 
-type ThemeMode = "light" | "dark" | "system";
+export type ThemeMode = "light" | "dark" | "system";
 
 // Font family CSS values
 const fontFamilyMap: Record<FontFamily, string> = {
@@ -51,28 +65,8 @@ const defaultEditorFontSettings: Required<EditorFontSettings> = {
 
 // Default theme colors (must match App.css :root / .dark values)
 const defaultThemeColors: Record<"light" | "dark", Record<ThemeColorKey, string>> = {
-  light: {
-    bg: "#ffffff",
-    "bg-secondary": "#fafaf9",
-    "bg-muted": "rgba(28, 25, 23, 0.06)",
-    "bg-emphasis": "rgba(28, 25, 23, 0.09)",
-    text: "#1c1917",
-    "text-muted": "#78716c",
-    border: "rgba(28, 25, 23, 0.08)",
-    accent: "#1c1917",
-    selection: "rgba(250, 204, 21, 0.4)",
-  },
-  dark: {
-    bg: "rgb(22, 20, 19)",
-    "bg-secondary": "rgb(14, 12, 11)",
-    "bg-muted": "rgba(250, 249, 249, 0.05)",
-    "bg-emphasis": "rgba(250, 249, 249, 0.08)",
-    text: "#fafaf9",
-    "text-muted": "#a8a29e",
-    border: "rgba(250, 249, 249, 0.07)",
-    accent: "#fafaf9",
-    selection: "rgba(253, 224, 71, 0.35)",
-  },
+  light: getLightThemePreset(DEFAULT_LIGHT_THEME).colors,
+  dark: getDarkThemePreset(DEFAULT_DARK_THEME).colors,
 };
 
 export { defaultThemeColors };
@@ -92,10 +86,21 @@ function parseCssColorToRgb(value: string): [number, number, number] | null {
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
+interface ThemeUpdatePayload {
+  theme?: ThemeSettings;
+  customColorsLight?: CustomColors;
+  customColorsDark?: CustomColors;
+}
+
 interface ThemeContextType {
   theme: ThemeMode;
   resolvedTheme: "light" | "dark";
+  lightTheme: LightThemeId;
+  darkTheme: DarkThemeId;
+  activeThemePreset: ThemePreset;
   setTheme: (theme: ThemeMode) => void;
+  setLightTheme: (themeId: LightThemeId) => void;
+  setDarkTheme: (themeId: DarkThemeId) => void;
   cycleTheme: () => void;
   editorFontSettings: Required<EditorFontSettings>;
   setEditorFontSetting: <K extends keyof EditorFontSettings>(
@@ -180,8 +185,26 @@ function isTextDirection(value: unknown): value is TextDirection {
   return value === "auto" || value === "ltr" || value === "rtl";
 }
 
+function isThemeMode(value: unknown): value is ThemeMode {
+  return value === "light" || value === "dark" || value === "system";
+}
+
+const THEME_COLOR_KEYS: readonly ThemeColorKey[] = [
+  "bg",
+  "bg-secondary",
+  "bg-muted",
+  "bg-emphasis",
+  "text",
+  "text-muted",
+  "border",
+  "accent",
+  "selection",
+];
+
 export function ThemeProvider({ children }: ThemeProviderProps) {
   const [theme, setThemeState] = useState<ThemeMode>("system");
+  const [lightTheme, setLightThemeState] = useState<LightThemeId>(DEFAULT_LIGHT_THEME);
+  const [darkTheme, setDarkThemeState] = useState<DarkThemeId>(DEFAULT_DARK_THEME);
   const [editorFontSettings, setEditorFontSettings] = useState<
     Required<EditorFontSettings>
   >(defaultEditorFontSettings);
@@ -196,22 +219,51 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   const [customColorsDark, setCustomColorsDarkState] = useState<CustomColors>({});
   const [isInitialized, setIsInitialized] = useState(false);
 
+  // Refs keep the latest theme selections for race-free persistence across rapid clicks
+  const themeRef = useRef<ThemeMode>(theme);
+  const lightThemeRef = useRef<LightThemeId>(lightTheme);
+  const darkThemeRef = useRef<DarkThemeId>(darkTheme);
+  themeRef.current = theme;
+  lightThemeRef.current = lightTheme;
+  darkThemeRef.current = darkTheme;
+
   const [systemTheme, setSystemTheme] = useState<"light" | "dark">(() => {
     return window.matchMedia("(prefers-color-scheme: dark)").matches
       ? "dark"
       : "light";
   });
 
+  const applyLoadedThemeFields = useCallback((payload: ThemeUpdatePayload) => {
+    if (payload.theme) {
+      if (isThemeMode(payload.theme.mode)) {
+        themeRef.current = payload.theme.mode;
+        setThemeState(payload.theme.mode);
+      }
+      const nextLight = isLightThemeId(payload.theme.lightTheme)
+        ? payload.theme.lightTheme
+        : DEFAULT_LIGHT_THEME;
+      lightThemeRef.current = nextLight;
+      setLightThemeState(nextLight);
+
+      const nextDark = isDarkThemeId(payload.theme.darkTheme)
+        ? payload.theme.darkTheme
+        : DEFAULT_DARK_THEME;
+      darkThemeRef.current = nextDark;
+      setDarkThemeState(nextDark);
+    }
+    setCustomColorsLightState(payload.customColorsLight ?? {});
+    setCustomColorsDarkState(payload.customColorsDark ?? {});
+  }, []);
+
   // Function to load settings from backend
   const loadSettingsFromBackend = useCallback(async () => {
     try {
       const settings = await getSettings();
-      if (settings.theme) {
-        const mode = settings.theme.mode as ThemeMode;
-        if (mode === "light" || mode === "dark" || mode === "system") {
-          setThemeState(mode);
-        }
-      }
+      applyLoadedThemeFields({
+        theme: settings.theme,
+        customColorsLight: settings.customColorsLight,
+        customColorsDark: settings.customColorsDark,
+      });
       if (settings.editorFont) {
         // Filter out null/undefined values to preserve defaults
         const fontSettings = Object.fromEntries(
@@ -254,16 +306,10 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       ) {
         setSidebarWidthPxState(settings.sidebarWidthPx);
       }
-      if (settings.customColorsLight) {
-        setCustomColorsLightState(settings.customColorsLight);
-      }
-      if (settings.customColorsDark) {
-        setCustomColorsDarkState(settings.customColorsDark);
-      }
     } catch {
       // If settings can't be loaded, use defaults
     }
-  }, []);
+  }, [applyLoadedThemeFields]);
 
   // Reload settings from backend (exposed to context consumers)
   const reloadSettings = useCallback(async () => {
@@ -277,6 +323,28 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     });
   }, [loadSettingsFromBackend]);
 
+  // Sync theme changes across windows (e.g. main window -> open preview windows)
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    try {
+      listen<ThemeUpdatePayload>("theme-updated", (event) => {
+        applyLoadedThemeFields(event.payload);
+      })
+        .then((fn) => {
+          if (cancelled) fn();
+          else unlisten = fn;
+        })
+        .catch(() => {});
+    } catch {
+      // Ignore outside Tauri runtime (e.g. unit tests)
+    }
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [applyLoadedThemeFields]);
+
   // Listen for system theme changes
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -287,10 +355,17 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     return () => mediaQuery.removeEventListener("change", handler);
   }, []);
 
-  // Resolve the actual theme to use
+  // Resolve the actual light/dark mode and active preset to use
   const resolvedTheme = theme === "system" ? systemTheme : theme;
+  const activeThemePreset = useMemo<ThemePreset>(
+    () =>
+      resolvedTheme === "dark"
+        ? getDarkThemePreset(darkTheme)
+        : getLightThemePreset(lightTheme),
+    [resolvedTheme, lightTheme, darkTheme],
+  );
 
-  // Apply theme to document (just toggle dark class)
+  // Apply light/dark class to document
   useEffect(() => {
     const root = document.documentElement;
     if (resolvedTheme === "dark") {
@@ -300,26 +375,61 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     }
   }, [resolvedTheme]);
 
-  // Save theme mode to backend
-  const saveThemeSettings = useCallback(async (newMode: ThemeMode) => {
-    try {
-      const settings = await getSettings();
-      const themeSettings: ThemeSettings = {
-        mode: newMode,
-      };
-      await updateSettings({
-        ...settings,
-        theme: themeSettings,
-      });
-    } catch (error) {
-      console.error("Failed to save theme settings:", error);
-    }
-  }, []);
+  // Save current theme selections to backend
+  const saveThemeSettings = useCallback(
+    async (options?: { clearCustomColorsMode?: "light" | "dark" }) => {
+      try {
+        const settings = await getSettings();
+        const themeSettings: ThemeSettings = {
+          ...settings.theme,
+          mode: themeRef.current,
+          lightTheme: lightThemeRef.current,
+          darkTheme: darkThemeRef.current,
+        };
+        const updated = {
+          ...settings,
+          theme: themeSettings,
+        };
+        if (options?.clearCustomColorsMode === "light") {
+          updated.customColorsLight = undefined;
+        } else if (options?.clearCustomColorsMode === "dark") {
+          updated.customColorsDark = undefined;
+        }
+        await updateSettings(updated);
+      } catch (error) {
+        console.error("Failed to save theme settings:", error);
+      }
+    },
+    [],
+  );
 
   const setTheme = useCallback(
     (newTheme: ThemeMode) => {
+      themeRef.current = newTheme;
       setThemeState(newTheme);
-      saveThemeSettings(newTheme);
+      void saveThemeSettings();
+    },
+    [saveThemeSettings]
+  );
+
+  const setLightTheme = useCallback(
+    (newLightTheme: LightThemeId) => {
+      if (lightThemeRef.current === newLightTheme) return;
+      lightThemeRef.current = newLightTheme;
+      setLightThemeState(newLightTheme);
+      setCustomColorsLightState({});
+      void saveThemeSettings({ clearCustomColorsMode: "light" });
+    },
+    [saveThemeSettings]
+  );
+
+  const setDarkTheme = useCallback(
+    (newDarkTheme: DarkThemeId) => {
+      if (darkThemeRef.current === newDarkTheme) return;
+      darkThemeRef.current = newDarkTheme;
+      setDarkThemeState(newDarkTheme);
+      setCustomColorsDarkState({});
+      void saveThemeSettings({ clearCustomColorsMode: "dark" });
     },
     [saveThemeSettings]
   );
@@ -509,23 +619,36 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     }
   }, []);
 
-  // Apply custom color CSS variable overrides whenever theme or colors change
+  // Apply active theme preset + custom color overrides whenever theme or colors change
   useEffect(() => {
     const root = document.documentElement;
     const activeColors = resolvedTheme === "dark" ? customColorsDark : customColorsLight;
-    const defaults = defaultThemeColors[resolvedTheme];
-    const keys: ThemeColorKey[] = [
-      "bg", "bg-secondary", "bg-muted", "bg-emphasis",
-      "text", "text-muted", "border", "accent", "selection",
-    ];
-    for (const key of keys) {
-      const value = activeColors[key] ?? defaults[key];
+    const presetColors = activeThemePreset.colors;
+
+    root.dataset.theme = activeThemePreset.id;
+
+    for (const key of THEME_COLOR_KEYS) {
+      const value = activeColors[key] ?? presetColors[key];
       root.style.setProperty(`--color-${key}`, value);
     }
+    root.style.setProperty("--color-text-inverse", activeThemePreset.textInverse);
+
+    // Apply syntax highlighting & inline code colors for the active preset
+    const { syntax } = activeThemePreset;
+    root.style.setProperty("--color-syntax-keyword", syntax.keyword);
+    root.style.setProperty("--color-syntax-string", syntax.string);
+    root.style.setProperty("--color-syntax-number", syntax.number);
+    root.style.setProperty("--color-syntax-comment", syntax.comment);
+    root.style.setProperty("--color-syntax-function", syntax.function);
+    root.style.setProperty("--color-syntax-variable", syntax.variable);
+    root.style.setProperty("--color-syntax-type", syntax.type);
+    root.style.setProperty("--color-syntax-operator", syntax.operator);
+    root.style.setProperty("--color-syntax-attr", syntax.attr);
+    root.style.setProperty("--color-code", syntax.code);
 
     // Sync the Windows title bar to match bg-secondary (no-op on other OSes).
     const captionColor =
-      activeColors["bg-secondary"] ?? defaults["bg-secondary"];
+      activeColors["bg-secondary"] ?? presetColors["bg-secondary"];
     const rgb = parseCssColorToRgb(captionColor);
     if (rgb) {
       invoke("set_title_bar_theme", {
@@ -535,7 +658,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
         b: rgb[2],
       }).catch(() => {});
     }
-  }, [resolvedTheme, customColorsLight, customColorsDark]);
+  }, [resolvedTheme, activeThemePreset, customColorsLight, customColorsDark]);
 
   // Set a single custom color for a given mode
   const setCustomColor = useCallback(
@@ -554,7 +677,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     [],
   );
 
-  // Reset a single custom color back to theme default
+  // Reset a single custom color back to theme preset default
   const resetCustomColor = useCallback(
     async (mode: "light" | "dark", key: ThemeColorKey) => {
       const setter = mode === "light" ? setCustomColorsLightState : setCustomColorsDarkState;
@@ -612,7 +735,12 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       value={{
         theme,
         resolvedTheme,
+        lightTheme,
+        darkTheme,
+        activeThemePreset,
         setTheme,
+        setLightTheme,
+        setDarkTheme,
         cycleTheme,
         editorFontSettings,
         setEditorFontSetting,

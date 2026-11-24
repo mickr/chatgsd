@@ -740,11 +740,15 @@ export function AgentPanel({
                       running &&
                       turnIndex === turns.length - 1 &&
                       index === turn.items.length - 1 &&
-                      item.type === "text"
+                      (item.type === "text" || item.type === "thinking")
                     }
                     pendingQuestionId={pendingQuestion?.id ?? null}
                     onAnswer={answer}
                     onDismissOffer={agent.dismissSkillOffer}
+                    onStopSubagent={(runId, workerId) => void agent.stopSubagent(runId, workerId)}
+                    onStopAllSubagents={(runId) => void agent.stopAllSubagents(runId)}
+                    onDrainSubagents={(runId) => void agent.drainSubagents(runId)}
+                    onCleanupSubagents={(runId, swarmId) => void agent.cleanupSubagents(runId, swarmId)}
                   />
                   </div>
                 ))}

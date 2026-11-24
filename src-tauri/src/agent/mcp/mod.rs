@@ -15,6 +15,7 @@ mod config;
 mod discover;
 pub(crate) mod oauth;
 mod stdio;
+pub(in crate::agent) use stdio::search_path;
 mod store;
 #[cfg(test)]
 mod tests;
