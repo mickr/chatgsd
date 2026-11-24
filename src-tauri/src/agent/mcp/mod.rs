@@ -89,6 +89,9 @@ pub struct ServerConfig {
     /// An OAuth client the user registered, for services without dynamic registration.
     #[serde(default)]
     pub client_id: Option<String>,
+    /// The loopback port that client was registered with, when it isn't ChatGSD's own.
+    #[serde(default)]
+    pub callback_port: Option<u16>,
     /// How a server that runs on this Mac is started. Read from `mcp.json`
     /// each time and never saved with the rest.
     #[serde(skip)]
@@ -127,7 +130,7 @@ impl ServerConfig {
     /// A program `mcp.json` defines, as first seen: on, with nothing known about it yet.
     fn program(id: String) -> Self {
         Self {
-            id, name: String::new(), url: String::new(), enabled: true, local: true, auto_name: false, client_id: None,
+            id, name: String::new(), url: String::new(), enabled: true, local: true, auto_name: false, client_id: None, callback_port: None,
             launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -245,6 +248,11 @@ pub struct ServerView {
     enabled: bool,
     local: bool,
     client_id: Option<String>,
+    callback_port: Option<u16>,
+    /// A secret is saved for that client. The secret itself stays in the backend.
+    client_secret: bool,
+    /// Sign-in is waiting on an OAuth client the user has to create at the service.
+    needs_client: bool,
     /// How ChatGSD signs in: `oauth`, `token` (pasted by the user) or `none`.
     auth: &'static str,
     status: Connection,
@@ -264,6 +272,7 @@ fn view(server: &ServerConfig, credentials: Option<&store::Credentials>, status:
         Err(Failure::Other(message)) => Status { connection: Connection::Error, detail: Some(message) },
         _ => status,
     };
+    let needs_client = server.enabled && status.detail.as_deref() == Some(oauth::NEEDS_CLIENT);
     ServerView {
         id: server.id.clone(),
         name: server.name.clone(),
@@ -274,6 +283,9 @@ fn view(server: &ServerConfig, credentials: Option<&store::Credentials>, status:
         enabled: server.enabled,
         local: server.local,
         client_id: server.client_id.clone(),
+        callback_port: server.callback_port,
+        client_secret: credentials.is_some_and(|credentials| credentials.client_secret.is_some()),
+        needs_client,
         auth,
         status: if server.enabled { status.connection } else { Connection::Disconnected },
         detail: status.detail.filter(|_| server.enabled),
@@ -546,7 +558,11 @@ async fn authorize_in(root: &Path, id: &str, open_page: impl FnOnce(&str) -> Res
         local: server.local,
         server: &url,
         challenge,
-        client_id: server.client_id.as_deref(),
+        preset: server.client_id.as_deref().map(|client_id| oauth::Preset {
+            client_id,
+            client_secret: store.credentials.get(id).and_then(|credentials| credentials.client_secret.as_deref()),
+            callback_port: server.callback_port,
+        }),
         saved: store.credentials.get(id).and_then(|credentials| credentials.client.clone()),
     }, open_page).await?;
     store::update(root, |store| {
@@ -576,6 +592,20 @@ pub struct ServerInput {
     /// updating: left out keeps the saved one, empty removes it.
     token: Option<String>,
     client_id: Option<String>,
+    /// The secret of that client. When updating: left out keeps the saved
+    /// one, empty removes it.
+    client_secret: Option<String>,
+    /// The port that client's redirect address was registered with. Left out,
+    /// ChatGSD's own is used.
+    callback_port: Option<u16>,
+}
+
+/// A port a hand-made client can be registered with: one this app may listen on.
+fn callback_port(port: Option<u16>, has_client: bool) -> Result<Option<u16>, String> {
+    match port.filter(|_| has_client) {
+        Some(port) if port < 1024 => Err("The callback port must be 1024 or higher".into()),
+        port => Ok(port),
+    }
 }
 
 async fn one_view(app: &tauri::AppHandle, id: &str) -> Result<ServerView, String> {
@@ -599,6 +629,9 @@ pub async fn mcp_add_server(app: tauri::AppHandle, request: ServerInput) -> Resu
     let host = url.host_str().unwrap_or("server").to_owned();
     let name = clean(request.name, MAX_NAME_CHARS);
     let token = clean(request.token, MAX_TOKEN_CHARS);
+    let client_id = clean(request.client_id, 400);
+    let client_secret = clean(request.client_secret, MAX_TOKEN_CHARS).filter(|_| client_id.is_some());
+    let callback_port = callback_port(request.callback_port, client_id.is_some())?;
     let id = uuid::Uuid::new_v4().to_string();
     store::update(&store::root(&app)?, |store| {
         if store.servers.iter().any(|server| server.url == url.as_str()) {
@@ -614,15 +647,16 @@ pub async fn mcp_add_server(app: tauri::AppHandle, request: ServerInput) -> Resu
             enabled: true,
             local,
             auto_name: name.is_none(),
-            client_id: clean(request.client_id, 400),
+            client_id,
+            callback_port,
             launch: None,
             hint: None,
             tools: Vec::new(),
             policies: HashMap::new(),
             added_at: chrono::Utc::now().timestamp_millis(),
         });
-        if token.is_some() {
-            store.credentials.insert(id.clone(), store::Credentials { token, ..Default::default() });
+        if token.is_some() || client_secret.is_some() {
+            store.credentials.insert(id.clone(), store::Credentials { token, client_secret, ..Default::default() });
         }
         Ok(())
     }).await?;
@@ -723,7 +757,7 @@ pub async fn mcp_add_found_server(app: tauri::AppHandle, id: String) -> Result<S
     match found.source {
         discover::Source::Program(launch) => add_program(&app, found.name, launch).await,
         discover::Source::Address(url) => {
-            mcp_add_server(app, ServerInput { url, name: Some(found.name), token: None, client_id: None }).await
+            mcp_add_server(app, ServerInput { url, name: Some(found.name), token: None, client_id: None, client_secret: None, callback_port: None }).await
         }
     }
 }
@@ -747,7 +781,9 @@ pub async fn mcp_update_server(app: tauri::AppHandle, id: String, request: Serve
     let (url, local) = server_address(&request.url).await?;
     let name = clean(request.name, MAX_NAME_CHARS);
     let client_id = clean(request.client_id, 400);
+    let callback_port = callback_port(request.callback_port, client_id.is_some())?;
     let token = request.token.map(|token| clean(Some(token), MAX_TOKEN_CHARS));
+    let client_secret = request.client_secret.map(|secret| clean(Some(secret), MAX_TOKEN_CHARS));
     let reconnect = store::update(&store::root(&app)?, |store| {
         if store.servers.iter().any(|server| server.id != id && server.url == url.as_str()) {
             return Err("Another server already uses this address".into());
@@ -755,20 +791,30 @@ pub async fn mcp_update_server(app: tauri::AppHandle, id: String, request: Serve
         let renamed = name.as_deref().map(|name| unique_name(&store.servers, name, Some(&id)));
         let server = store.server_mut(&id)?;
         let moved = server.url != url.as_str();
-        let sign_in_changed = moved || server.client_id != client_id;
+        let other_client = server.client_id != client_id;
+        let client_changed = other_client || server.callback_port != callback_port;
         if let Some(name) = renamed.filter(|name| name != &server.name) {
             server.name = name;
             server.auto_name = false;
         }
         server.url = url.to_string();
         server.local = local;
+        let has_client = client_id.is_some();
         server.client_id = client_id;
+        server.callback_port = callback_port;
         if moved {
             server.tools.clear();
             server.policies.clear();
         }
         let enabled = server.enabled;
         let credentials = store.credentials.entry(id.clone()).or_default();
+        // A secret belongs to its client: it goes when the client does.
+        let client_secret = match client_secret {
+            Some(secret) => secret,
+            None => credentials.client_secret.clone().filter(|_| !other_client),
+        }.filter(|_| has_client);
+        let sign_in_changed = moved || client_changed || client_secret != credentials.client_secret;
+        credentials.client_secret = client_secret;
         // A sign-in belongs to the address and client it was granted to.
         if sign_in_changed {
             credentials.client = None;
@@ -1249,7 +1295,7 @@ mod unit {
     fn server(name: &str, tools: Vec<Tool>) -> ServerConfig {
         ServerConfig {
             id: format!("id-{name}"), name: name.into(), url: format!("https://{}.example.com/mcp", slug(name)),
-            enabled: true, local: false, auto_name: false, client_id: None, launch: None, hint: None, tools, policies: HashMap::new(), added_at: 0,
+            enabled: true, local: false, auto_name: false, client_id: None, callback_port: None, launch: None, hint: None, tools, policies: HashMap::new(), added_at: 0,
         }
     }
 

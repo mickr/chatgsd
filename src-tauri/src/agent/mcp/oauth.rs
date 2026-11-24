@@ -31,8 +31,37 @@ pub const PRESET_PORT: u16 = 47823;
 /// Refresh this long before a token runs out.
 const EXPIRY_MARGIN_SECS: i64 = 60;
 
+/// Sign-in can't start until the user creates an OAuth client at the service
+/// and enters it here. Settings shows its client form for exactly this message.
+pub const NEEDS_CLIENT: &str = "This service doesn't register apps on its own. Create an OAuth client for ChatGSD there, then add its client ID, and its secret if it has one, to this server.";
+
 pub fn redirect_uri(port: u16) -> String {
     format!("http://127.0.0.1:{port}{CALLBACK_PATH}")
+}
+
+/// An OAuth client the user entered by hand.
+#[derive(Clone, Copy)]
+pub struct Preset<'a> {
+    pub client_id: &'a str,
+    /// For services whose clients must have one.
+    pub client_secret: Option<&'a str>,
+    /// The loopback port the client was registered with elsewhere, to reuse a
+    /// client made for another app. Such clients are registered the way those
+    /// apps listen, as `http://localhost:<port>/callback`.
+    pub callback_port: Option<u16>,
+}
+
+impl Preset<'_> {
+    fn port(&self) -> u16 {
+        self.callback_port.unwrap_or(PRESET_PORT)
+    }
+
+    fn redirect(&self) -> String {
+        match self.callback_port {
+            Some(port) => format!("http://localhost:{port}{CALLBACK_PATH}"),
+            None => redirect_uri(PRESET_PORT),
+        }
+    }
 }
 
 /// What a server's `WWW-Authenticate: Bearer …` header asks for.
@@ -112,6 +141,9 @@ struct AuthorizationServer {
     authorization_endpoint: Url,
     token_endpoint: Url,
     registration_endpoint: Option<Url>,
+    /// Its metadata lists no way for a client without a secret to get a token.
+    /// Some services (Slack) accept one anyway, so this only explains a refusal.
+    needs_secret: bool,
 }
 
 struct Discovery {
@@ -204,12 +236,16 @@ async fn discover(fetcher: Fetcher, local: bool, server: &Url, challenge: &Chall
         Some(metadata) => metadata["registration_endpoint"].as_str().map(|address| endpoint(address, local)).transpose()?,
         None => Some(field("registration_endpoint", "/register")?),
     };
+    let needs_secret = found.as_ref()
+        .and_then(|metadata| metadata["token_endpoint_auth_methods_supported"].as_array())
+        .is_some_and(|methods| !methods.iter().any(|method| method == "none"));
     Ok(Discovery {
         server: AuthorizationServer {
             issuer: issuer.to_string(),
             authorization_endpoint: field("authorization_endpoint", "/authorize")?,
             token_endpoint: field("token_endpoint", "/token")?,
             registration_endpoint,
+            needs_secret,
         },
         resource,
         scope,
@@ -262,28 +298,31 @@ async fn bind(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await
 }
 
-/// The registration to sign in with, and the loopback listener its redirect
-/// address points at.
-async fn client_for(fetcher: Fetcher, discovery: &Discovery, preset: Option<&str>, saved: Option<Client>) -> Result<(TcpListener, Client), String> {
+/// The registration to sign in with, the loopback listener its redirect
+/// address points at, and that address.
+async fn client_for(fetcher: Fetcher, discovery: &Discovery, preset: Option<Preset<'_>>, saved: Option<Client>) -> Result<(TcpListener, Client, String), String> {
     let issuer = discovery.server.issuer.clone();
-    if let Some(client_id) = preset {
-        let listener = bind(PRESET_PORT).await
-            .map_err(|_| format!("Port {PRESET_PORT} is in use, so sign-in can't finish. Close what's using it and try again."))?;
-        return Ok((listener, Client { issuer, client_id: client_id.to_owned(), client_secret: None, redirect_port: PRESET_PORT, registered: false }));
+    if let Some(preset) = preset {
+        let port = preset.port();
+        let listener = bind(port).await
+            .map_err(|_| format!("Port {port} is in use, so sign-in can't finish. Close what's using it and try again."))?;
+        let client = Client { issuer, client_id: preset.client_id.to_owned(), client_secret: preset.client_secret.map(str::to_owned), redirect_port: port, registered: false };
+        return Ok((listener, client, preset.redirect()));
     }
     // A redirect address is registered with its port, so reuse it while the port is free.
     if let Some(saved) = saved.filter(|saved| saved.registered && saved.issuer == issuer) {
         if let Ok(listener) = bind(saved.redirect_port).await {
-            return Ok((listener, saved));
+            let redirect = redirect_uri(saved.redirect_port);
+            return Ok((listener, saved, redirect));
         }
     }
     let Some(registration) = &discovery.server.registration_endpoint else {
-        return Err("This service doesn't register apps on its own. Create an OAuth client for ChatGSD there and add its client ID to this server.".into());
+        return Err(NEEDS_CLIENT.into());
     };
     let listener = bind(0).await.map_err(|error| format!("Couldn't listen for the sign-in: {error}"))?;
     let redirect_port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let (client_id, client_secret) = register(fetcher, registration, &redirect_uri(redirect_port)).await?;
-    Ok((listener, Client { issuer, client_id, client_secret, redirect_port, registered: true }))
+    Ok((listener, Client { issuer, client_id, client_secret, redirect_port, registered: true }, redirect_uri(redirect_port)))
 }
 
 /// The request target of an HTTP request, read from its first line.
@@ -404,9 +443,9 @@ pub struct Request<'a> {
     pub local: bool,
     pub server: &'a Url,
     pub challenge: Challenge,
-    /// A client ID the user registered by hand, for services without
-    /// dynamic registration.
-    pub client_id: Option<&'a str>,
+    /// A client the user registered by hand, for services without dynamic
+    /// registration.
+    pub preset: Option<Preset<'a>>,
     pub saved: Option<Client>,
 }
 
@@ -418,10 +457,9 @@ pub struct Grant {
 /// Runs the whole sign-in. `open` shows the authorization page to the user;
 /// this returns once their browser comes back with a code and it is exchanged.
 pub async fn authorize(request: Request<'_>, open: impl FnOnce(&str) -> Result<(), String>) -> Result<Grant, String> {
-    let Request { fetcher, local, server, challenge, client_id, saved } = request;
+    let Request { fetcher, local, server, challenge, preset, saved } = request;
     let discovery = discover(fetcher, local, server, &challenge).await?;
-    let (listener, client) = client_for(fetcher, &discovery, client_id, saved).await?;
-    let redirect = redirect_uri(client.redirect_port);
+    let (listener, client, redirect) = client_for(fetcher, &discovery, preset, saved).await?;
     let random = || uuid::Uuid::new_v4().simple().to_string();
     let verifier = format!("{}{}", random(), random());
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -455,7 +493,11 @@ pub async fn authorize(request: Request<'_>, open: impl FnOnce(&str) -> Result<(
         form.push(("client_secret", secret));
     }
     let endpoint = &discovery.server.token_endpoint;
-    let reply = token_request(fetcher, endpoint, &form).await.map_err(|error| format!("Sign-in didn't finish: {error}"))?;
+    let reply = token_request(fetcher, endpoint, &form).await.map_err(|error| match error {
+        // The likeliest reason, and the one the user can act on.
+        TokenError::Rejected(_) if client.client_secret.is_none() && !client.registered && discovery.server.needs_secret => NEEDS_CLIENT.to_owned(),
+        error => format!("Sign-in didn't finish: {error}"),
+    })?;
     let tokens = tokens(&reply, endpoint, &client.client_id, client.client_secret.as_deref(), &discovery.resource, None);
     Ok(Grant { client, tokens })
 }

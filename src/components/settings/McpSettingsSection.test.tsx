@@ -39,7 +39,7 @@ let container: HTMLDivElement;
 const tracker: McpServer = {
   id: "s1", name: "Tracker", key: "tracker", url: "https://mcp.tracker.example/mcp", command: null, transport: "http",
   enabled: true, local: false,
-  clientId: null, auth: "oauth", status: "connected", detail: null, hint: null,
+  clientId: null, callbackPort: null, clientSecret: false, needsClient: false, auth: "oauth", status: "connected", detail: null, hint: null,
   tools: [
     { name: "search_issues", title: null, description: "Find issues", readOnly: true, policy: "allow" },
     { name: "create_issue", title: null, description: "Open an issue", readOnly: false, policy: "ask" },
@@ -148,7 +148,7 @@ it("edits a server without touching a saved token left blank", async () => {
   await act(async () => { button("Save", form).click(); });
   await settle();
   expect(mcp.updateServer).toHaveBeenCalledWith("s1", {
-    url: "https://mcp.tracker.example/mcp", name: "Work tracker", token: undefined, clientId: "",
+    url: "https://mcp.tracker.example/mcp", name: "Work tracker", token: undefined, clientId: "", clientSecret: undefined,
   });
   expect(container.querySelector('form[aria-label="Edit Tracker"]')).toBeNull();
 
@@ -156,6 +156,30 @@ it("edits a server without touching a saved token left blank", async () => {
   await act(async () => { button("Remove saved token").click(); });
   await settle();
   expect(vi.mocked(mcp.updateServer).mock.calls[1][1].token).toBe("");
+});
+
+it("asks for the client ID and secret a service like Box needs, then signs in with them", async () => {
+  vi.mocked(mcp.updateServer).mockImplementation(async () => ({ ...tracker, clientId: "abc", clientSecret: true }));
+  await render([{ ...tracker, auth: "none", status: "needs_auth", needsClient: true, detail: "This service doesn't register apps on its own." }]);
+  const form = container.querySelector<HTMLFormElement>('form[aria-label="OAuth client for Tracker"]')!;
+  expect(form.textContent).toContain("http://127.0.0.1:47823/callback");
+  // The plain Sign in button would only fail the same way again.
+  expect(button("Sign in")).toBeUndefined();
+  expect(button("Save and sign in", form).disabled).toBe(true);
+
+  type(form.querySelector<HTMLInputElement>("#mcp-client-s1-client")!, " abc ");
+  // Some services issue clients without a secret.
+  expect(button("Save and sign in", form).disabled).toBe(false);
+  type(form.querySelector<HTMLInputElement>("#mcp-client-s1-secret")!, "s3cret");
+  // A client made for another app: its port changes the address to register.
+  type(form.querySelector<HTMLInputElement>("#mcp-client-s1-port")!, "3118x");
+  expect(form.textContent).toContain("http://localhost:3118/callback");
+  await act(async () => { button("Save and sign in", form).click(); });
+  await settle();
+  expect(mcp.updateServer).toHaveBeenCalledWith("s1", {
+    url: "https://mcp.tracker.example/mcp", name: "Tracker", clientId: " abc ", clientSecret: "s3cret", callbackPort: 3118,
+  });
+  expect(mcp.authorizeServer).toHaveBeenCalledWith("s1");
 });
 
 it("removes a server only after confirming", async () => {
@@ -170,7 +194,7 @@ it("removes a server only after confirming", async () => {
 
 const files: McpServer = {
   id: "program-1", name: "files", key: "files", url: "", command: "npx -y files-server ~/Documents", transport: "stdio",
-  enabled: true, local: true, clientId: null, auth: "none", status: "connected", detail: null, hint: null,
+  enabled: true, local: true, clientId: null, callbackPort: null, clientSecret: false, needsClient: false, auth: "none", status: "connected", detail: null, hint: null,
   tools: [{ name: "read_file", title: null, description: "Read a file", readOnly: true, policy: "allow" }],
 };
 

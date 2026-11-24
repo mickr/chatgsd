@@ -33,6 +33,12 @@ export interface McpServer {
   /** On this Mac or its network. */
   local: boolean;
   clientId: string | null;
+  /** The loopback port that client was registered with, when it isn't ChatGSD's own. */
+  callbackPort: number | null;
+  /** A secret is saved for that client. The secret itself stays in the backend. */
+  clientSecret: boolean;
+  /** Sign-in is waiting on an OAuth client the user has to create at the service. */
+  needsClient: boolean;
   /** How ChatGSD signs in: OAuth, a token the user pasted, or not at all. */
   auth: "oauth" | "token" | "none";
   status: McpConnection;
@@ -48,6 +54,10 @@ export interface McpServerInput {
   /** When updating: left out keeps the saved token, empty removes it. */
   token?: string;
   clientId?: string;
+  /** When updating: left out keeps the saved secret, empty removes it. */
+  clientSecret?: string;
+  /** The port that client's redirect address was registered with. Left out, ChatGSD's own is used. */
+  callbackPort?: number;
 }
 /** A server that runs on this Mac, as typed in settings and saved to `mcp.json`. */
 export interface McpLocalServerInput {

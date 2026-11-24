@@ -714,7 +714,7 @@ pub async fn authorize_and_sync(
             local: remote.local,
             server: &url,
             challenge,
-            client_id: None,
+            preset: None,
             saved: saved_client,
         },
         |page| open::that(page).map_err(|error| format!("Couldn't open browser: {error}")),

@@ -22,6 +22,9 @@ pub struct Credentials {
     /// This app's OAuth registration with the server's authorization server.
     #[serde(default)]
     pub client: Option<oauth::Client>,
+    /// The secret of the OAuth client the user created and entered by ID.
+    #[serde(default)]
+    pub client_secret: Option<String>,
     #[serde(default)]
     pub oauth: Option<oauth::Tokens>,
 }
@@ -142,7 +145,7 @@ mod tests {
     fn server(id: &str) -> ServerConfig {
         ServerConfig {
             id: id.into(), name: "Tracker".into(), url: "https://mcp.example.com/mcp".into(), enabled: true,
-            local: false, auto_name: false, client_id: None, launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: 1,
+            local: false, auto_name: false, client_id: None, callback_port: None, launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: 1,
         }
     }
 

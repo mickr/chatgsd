@@ -25,8 +25,14 @@ interface Draft {
   name: string;
   token: string;
   clientId: string;
+  clientSecret: string;
+  /** Digits, or empty for ChatGSD's own port. */
+  callbackPort: string;
 }
-const emptyDraft: Draft = { url: "", name: "", token: "", clientId: "" };
+const emptyDraft: Draft = { url: "", name: "", token: "", clientId: "", clientSecret: "", callbackPort: "" };
+
+/** The typed port as a number, or undefined when the field is empty. */
+const portOf = (text: string) => (text.trim() ? Number(text.trim()) : undefined);
 
 /** Opens the browser sign-in; the row shows progress, so only failure is announced. */
 function signIn(server: Pick<McpServer, "id" | "name">) {
@@ -57,6 +63,77 @@ const quietLink = "text-xs text-text-muted hover:text-text";
 const textArea =
   "block w-full resize-y rounded-md border border-border bg-bg px-3 py-2 text-sm text-text placeholder:text-text-muted focus-visible:outline-none focus-visible:border-accent";
 
+/** An OAuth client the user made at the service: its ID, its secret, and the redirect address to give it. */
+function ClientFields({
+  idPrefix,
+  draft,
+  onChange,
+  redirectUri,
+  savedSecret,
+  required = false,
+}: {
+  idPrefix: string;
+  draft: Pick<Draft, "clientId" | "clientSecret" | "callbackPort">;
+  onChange: (change: Partial<Draft>) => void;
+  redirectUri: string;
+  savedSecret: boolean;
+  required?: boolean;
+}) {
+  // A client made for another app is registered the way that app listens.
+  const port = draft.callbackPort.trim();
+  const address = port ? `http://localhost:${port}/callback` : redirectUri;
+  return (
+    <>
+      <div className="space-y-1.5">
+        <label htmlFor={`${idPrefix}-client`} className={fieldLabel}>OAuth client ID</label>
+        <Input
+          id={`${idPrefix}-client`}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          value={draft.clientId}
+          placeholder={required ? "" : "Usually not needed"}
+          onChange={(event) => onChange({ clientId: event.target.value })}
+          aria-describedby={`${idPrefix}-client-hint`}
+          className="h-8.25"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label htmlFor={`${idPrefix}-secret`} className={fieldLabel}>OAuth client secret</label>
+        <Input
+          id={`${idPrefix}-secret`}
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          value={draft.clientSecret}
+          placeholder={savedSecret ? "Saved. Type a new one to replace it." : required ? "" : "Only if the service gave you one"}
+          onChange={(event) => onChange({ clientSecret: event.target.value })}
+          className="h-8.25"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label htmlFor={`${idPrefix}-port`} className={fieldLabel}>Callback port</label>
+        <Input
+          id={`${idPrefix}-port`}
+          inputMode="numeric"
+          value={draft.callbackPort}
+          placeholder="Only to reuse a client made for another app"
+          onChange={(event) => onChange({ callbackPort: event.target.value.replace(/\D/g, "").slice(0, 5) })}
+          aria-describedby={`${idPrefix}-client-hint`}
+          className="h-8.25"
+        />
+        <p id={`${idPrefix}-client-hint`} className={fieldHint}>
+          {required
+            ? "Create an OAuth app for ChatGSD at the service with this redirect address, then paste its client ID, and its secret if it has one. To reuse a client another app already has, enter its ID and the callback port it was registered with. Redirect address: "
+            : "ChatGSD registers itself with most services. If one asks you to create an app first, enter its client ID and secret here, or reuse another app's client with its callback port. Redirect address: "}
+          <code className="font-mono bg-bg-muted px-1 py-0.5 rounded select-all">{address}</code>
+          {" "}The secret is kept on this Mac.
+        </p>
+      </div>
+    </>
+  );
+}
+
 /** The optional fields: a name, a pasted token, and a hand-made OAuth client. */
 function OptionalFields({
   idPrefix,
@@ -64,12 +141,14 @@ function OptionalFields({
   onChange,
   redirectUri,
   savedToken,
+  savedSecret,
 }: {
   idPrefix: string;
   draft: Draft;
   onChange: (change: Partial<Draft>) => void;
   redirectUri: string;
   savedToken: boolean;
+  savedSecret: boolean;
 }) {
   return (
     <div className="space-y-3">
@@ -101,26 +180,59 @@ function OptionalFields({
           Sent to this server as a bearer token and kept on this Mac. Leave it empty to sign in through your browser.
         </p>
       </div>
-      <div className="space-y-1.5">
-        <label htmlFor={`${idPrefix}-client`} className={fieldLabel}>OAuth client ID</label>
-        <Input
-          id={`${idPrefix}-client`}
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          value={draft.clientId}
-          placeholder="Usually not needed"
-          onChange={(event) => onChange({ clientId: event.target.value })}
-          aria-describedby={`${idPrefix}-client-hint`}
-          className="h-8.25"
-        />
-        <p id={`${idPrefix}-client-hint`} className={fieldHint}>
-          ChatGSD registers itself with most services. If one asks you to create an app first, enter its client ID
-          here and give the service this redirect address:{" "}
-          <code className="font-mono bg-bg-muted px-1 py-0.5 rounded select-all">{redirectUri}</code>
-        </p>
-      </div>
+      <ClientFields idPrefix={idPrefix} draft={draft} onChange={onChange} redirectUri={redirectUri} savedSecret={savedSecret} />
     </div>
+  );
+}
+
+/**
+ * Shown on a server whose service registers no apps itself (Box, Slack):
+ * the two values sign-in is waiting on, saved and followed straight by the sign-in.
+ */
+function ClientSetup({ server, redirectUri }: { server: McpServer; redirectUri: string }) {
+  const [draft, setDraft] = useState({ clientId: server.clientId ?? "", clientSecret: "", callbackPort: server.callbackPort?.toString() ?? "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Some services (Slack) issue clients without a secret, so only the ID is required.
+  const ready = draft.clientId.trim() !== "";
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving || !ready) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await mcp.updateServer(server.id, {
+        url: server.url,
+        name: server.name,
+        clientId: draft.clientId,
+        clientSecret: draft.clientSecret.trim() || undefined,
+        callbackPort: portOf(draft.callbackPort),
+      });
+      signIn(saved);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form className="space-y-3" onSubmit={(event) => void save(event)} aria-label={`OAuth client for ${server.name}`}>
+      <p className="text-xs text-text-muted leading-relaxed">
+        {server.name} only signs in apps you've registered with it.
+      </p>
+      <ClientFields
+        idPrefix={`mcp-client-${server.id}`}
+        draft={draft}
+        onChange={(change) => setDraft((current) => ({ ...current, ...change }))}
+        redirectUri={redirectUri}
+        savedSecret={server.clientSecret}
+        required
+      />
+      {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+      <Button type="submit" variant="outline" size="md" disabled={saving || !ready}>
+        {saving ? "Saving…" : "Save and sign in"}
+      </Button>
+    </form>
   );
 }
 
@@ -165,7 +277,7 @@ const ToolRow = memo(function ToolRow({ serverId, serverName, tool }: { serverId
 });
 
 function EditServer({ server, redirectUri, onDone }: { server: McpServer; redirectUri: string; onDone: () => void }) {
-  const [draft, setDraft] = useState<Draft>({ url: server.url, name: server.name, token: "", clientId: server.clientId ?? "" });
+  const [draft, setDraft] = useState<Draft>({ url: server.url, name: server.name, token: "", clientId: server.clientId ?? "", clientSecret: "", callbackPort: server.callbackPort?.toString() ?? "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const save = async (event: FormEvent, removeToken = false) => {
@@ -180,6 +292,9 @@ function EditServer({ server, redirectUri, onDone }: { server: McpServer; redire
         // An empty field keeps the saved token; only Remove clears it.
         token: removeToken ? "" : draft.token.trim() || undefined,
         clientId: draft.clientId,
+        // An empty field keeps the saved secret; clearing the client ID removes it.
+        clientSecret: draft.clientSecret.trim() || undefined,
+        callbackPort: portOf(draft.callbackPort),
       });
       onDone();
     } catch (reason) {
@@ -211,6 +326,7 @@ function EditServer({ server, redirectUri, onDone }: { server: McpServer; redire
         onChange={(change) => setDraft((current) => ({ ...current, ...change }))}
         redirectUri={redirectUri}
         savedToken={server.auth === "token"}
+        savedSecret={server.clientSecret}
       />
       {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
       <div className="flex items-center gap-2">
@@ -331,7 +447,8 @@ const ServerRow = memo(function ServerRow({
           />
         </label>
       </div>
-      {server.enabled && server.detail && (
+      {server.needsClient && !editing && <ClientSetup server={server} redirectUri={redirectUri} />}
+      {server.enabled && server.detail && !server.needsClient && (
         <p role="alert" className={`text-xs leading-relaxed ${server.status === "error" ? "text-red-500" : "text-text-muted"}`}>
           {server.detail}
         </p>
@@ -343,7 +460,7 @@ const ServerRow = memo(function ServerRow({
             : "Sign in to let the agent use this server. Your browser opens to the service's own sign-in page."}
         </p>
       )}
-      {server.enabled && (server.status === "needs_auth" || server.status === "authorizing") && (
+      {server.enabled && !server.needsClient && (server.status === "needs_auth" || server.status === "authorizing") && (
         <div className="flex items-center gap-3">
           {server.status === "authorizing" ? (
             <>
@@ -534,6 +651,8 @@ function AddServer({ redirectUri, onAdded }: { redirectUri: string; onAdded: () 
         name: draft.name.trim() || undefined,
         token: draft.token.trim() || undefined,
         clientId: draft.clientId.trim() || undefined,
+        clientSecret: draft.clientSecret.trim() || undefined,
+        callbackPort: portOf(draft.callbackPort),
       });
       setDraft(emptyDraft);
       setOptions(false);
@@ -584,6 +703,7 @@ function AddServer({ redirectUri, onAdded }: { redirectUri: string; onAdded: () 
               onChange={(change) => setDraft((current) => ({ ...current, ...change }))}
               redirectUri={redirectUri}
               savedToken={false}
+              savedSecret={false}
             />
           </div>
         )}

@@ -16,6 +16,12 @@ struct Fixture {
     code_challenge: String,
     redirect_uri: String,
     issued: u32,
+    /// Set, the service registers no apps itself (like Box and Slack): it knows
+    /// only this client ID and secret, made there by the user.
+    preset: Option<(&'static str, &'static str)>,
+    /// The port that client was registered with for another app, as
+    /// `http://localhost:<port>/callback`.
+    callback_port: Option<u16>,
 }
 
 struct Server {
@@ -111,7 +117,8 @@ fn token(fixture: &Mutex<Fixture>, mut request: tiny_http::Request) {
         }
         _ => false,
     };
-    if !granted || !field("resource").ends_with("/mcp") {
+    let authenticated = fixture.preset.is_none_or(|(id, secret)| field("client_id") == id && field("client_secret") == secret);
+    if !granted || !authenticated || !field("resource").ends_with("/mcp") {
         drop(fixture);
         respond_json(request, 400, json!({"error":"invalid_grant","error_description":"The grant is no longer valid"}), Vec::new());
         return;
@@ -139,10 +146,18 @@ fn serve() -> Server {
                 ("GET", "/.well-known/oauth-protected-resource/mcp") => respond_json(request, 200, json!({
                     "resource": format!("{base}/mcp"), "authorization_servers": [base], "scopes_supported": ["issues.read", "issues.write"],
                 }), Vec::new()),
-                ("GET", "/.well-known/oauth-authorization-server") => respond_json(request, 200, json!({
-                    "issuer": base, "authorization_endpoint": format!("{base}/authorize"), "token_endpoint": format!("{base}/token"),
-                    "registration_endpoint": format!("{base}/register"), "code_challenge_methods_supported": ["S256"],
-                }), Vec::new()),
+                ("GET", "/.well-known/oauth-authorization-server") => {
+                    let mut metadata = json!({
+                        "issuer": base, "authorization_endpoint": format!("{base}/authorize"), "token_endpoint": format!("{base}/token"),
+                        "code_challenge_methods_supported": ["S256"],
+                    });
+                    if fixture.lock().unwrap().preset.is_some() {
+                        metadata["token_endpoint_auth_methods_supported"] = json!(["client_secret_post"]);
+                    } else {
+                        metadata["registration_endpoint"] = json!(format!("{base}/register"));
+                    }
+                    respond_json(request, 200, metadata, Vec::new());
+                }
                 ("POST", "/register") => {
                     let mut body = String::new();
                     request.as_reader().read_to_string(&mut body).unwrap();
@@ -157,7 +172,15 @@ fn serve() -> Server {
                 ("GET", "/authorize") => {
                     let query: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
                     let mut state = fixture.lock().unwrap();
-                    let expected = query["client_id"] == format!("client-{}", state.registrations)
+                    if let Some((id, _)) = state.preset {
+                        state.registrations = 1;
+                        state.redirect_uri = match state.callback_port {
+                            Some(port) => format!("http://localhost:{port}/callback"),
+                            None => oauth::redirect_uri(oauth::PRESET_PORT),
+                        };
+                        assert_eq!(query["client_id"], id);
+                    }
+                    let expected = (state.preset.is_some() || query["client_id"] == format!("client-{}", state.registrations))
                         && query["response_type"] == "code" && query["code_challenge_method"] == "S256"
                         && query["redirect_uri"] == state.redirect_uri && query["resource"] == format!("{base}/mcp")
                         && query["scope"] == "issues.read issues.write";
@@ -186,7 +209,7 @@ impl Home {
         store::update(&root, |store| {
             store.servers.push(ServerConfig {
                 id: id.clone(), name: "127.0.0.1".into(), url: url.into(), enabled: true, local, auto_name: true,
-                client_id: None, launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: 0,
+                client_id: None, callback_port: None, launch: None, hint: None, tools: Vec::new(), policies: HashMap::new(), added_at: 0,
             });
             Ok(())
         }).await.unwrap();
@@ -265,6 +288,65 @@ async fn signs_in_from_the_address_alone_then_survives_lapsed_sessions_and_token
     authorize_in(&home.0, &id, browser).await.unwrap();
     connect_in(&state, &home.0, &id).await.unwrap();
     assert_eq!(fixture.fixture.lock().unwrap().registrations, 1, "signing in again reuses the app's registration");
+}
+
+/// Box and Slack: no registration endpoint, and a token endpoint that wants a
+/// client secret. Sign-in says what's missing, then works once the user's own
+/// client is entered.
+#[tokio::test]
+async fn a_service_that_registers_no_apps_signs_in_with_the_users_client_and_secret() {
+    let fixture = serve();
+    fixture.fixture.lock().unwrap().preset = Some(("made-by-hand", "s3cret"));
+    let (home, id) = Home::with_server(&format!("{}/mcp", fixture.base), true).await;
+    let never_opened = |_: &str| -> Result<(), String> { panic!("the browser opened for a sign-in that can't finish") };
+
+    assert_eq!(authorize_in(&home.0, &id, never_opened).await.unwrap_err(), oauth::NEEDS_CLIENT);
+
+    // The ID alone is tried, since some services take clients without a secret.
+    // This one refuses the code, and the refusal asks for the secret.
+    store::update(&home.0, |store| { store.server_mut("server-1")?.client_id = Some("made-by-hand".into()); Ok(()) }).await.unwrap();
+    assert_eq!(authorize_in(&home.0, &id, browser).await.unwrap_err(), oauth::NEEDS_CLIENT);
+    assert_eq!(home.access_token(&id).await, None);
+
+    store::update(&home.0, |store| {
+        store.credentials.entry("server-1".into()).or_default().client_secret = Some("s3cret".into());
+        Ok(())
+    }).await.unwrap();
+    authorize_in(&home.0, &id, browser).await.unwrap();
+    assert_eq!(home.access_token(&id).await.as_deref(), Some("access-1"));
+
+    // Renewing sends the secret too.
+    let state = McpState::default();
+    connect_in(&state, &home.0, &id).await.unwrap();
+    fixture.fixture.lock().unwrap().valid.clear();
+    let server = home.server(&id).await;
+    invoke(&state, &home.0, &server, "search_issues", &json!({"text":"x"})).await.unwrap();
+    assert_eq!(home.access_token(&id).await.as_deref(), Some("access-2"));
+}
+
+/// A client made for another app is registered with that app's port. Signing
+/// in with it has to listen there and name the same redirect address.
+#[tokio::test]
+async fn a_client_registered_for_another_app_signs_in_on_its_callback_port() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let fixture = serve();
+    {
+        let mut fixture = fixture.fixture.lock().unwrap();
+        fixture.preset = Some(("made-for-another-app", ""));
+        fixture.callback_port = Some(port);
+    }
+    let (home, id) = Home::with_server(&format!("{}/mcp", fixture.base), true).await;
+    store::update(&home.0, |store| {
+        let server = store.server_mut("server-1")?;
+        server.client_id = Some("made-for-another-app".into());
+        server.callback_port = Some(port);
+        Ok(())
+    }).await.unwrap();
+
+    authorize_in(&home.0, &id, browser).await.unwrap();
+    assert_eq!(home.access_token(&id).await.as_deref(), Some("access-1"));
+    assert_eq!(callback_port(Some(80), true).unwrap_err(), "The callback port must be 1024 or higher");
+    assert_eq!(callback_port(Some(port), false).unwrap(), None, "a port means nothing without a client");
 }
 
 #[tokio::test]
