@@ -29,6 +29,7 @@ import { AgentFollow } from "./AgentFollow";
 import {
   clearDocumentHistory,
   minimalDocumentDiff,
+  normalizeMarks,
   parseDocument,
   serializeDocument,
   trimTrailingEmptyParagraph,
@@ -1301,7 +1302,7 @@ export function Editor({
         const manager = currentEditor.storage.markdown?.manager;
         if (manager && typeof manager.parse === "function") {
           try {
-            const parsed = manager.parse(text);
+            const parsed = normalizeMarks(currentEditor.schema, manager.parse(text));
             if (parsed) {
               currentEditor.commands.insertContent(parsed);
               return true;
@@ -1574,7 +1575,7 @@ export function Editor({
         const manager = editor.storage.markdown?.manager;
         if (manager) {
           try {
-            const parsed = manager.parse(currentNote.content);
+            const parsed = normalizeMarks(editor.schema, manager.parse(currentNote.content));
             editor.commands.setContent(parsed);
           } catch {
             editor.commands.setContent(currentNote.content);
@@ -1611,7 +1612,8 @@ export function Editor({
     const manager = editor.storage.markdown?.manager;
     if (manager) {
       try {
-        const parsed = manager.parse(currentNote.content);
+        // Same folding as agent edits, so the live note and their parses agree.
+        const parsed = normalizeMarks(editor.schema, manager.parse(currentNote.content));
         editor.commands.setContent(parsed);
       } catch {
         // Fallback to plain text if parsing fails

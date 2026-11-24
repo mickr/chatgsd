@@ -1,8 +1,10 @@
 import type { Editor, JSONContent } from "@tiptap/core";
 import {
   Fragment,
+  Mark,
   Slice,
   type Node as ProseMirrorNode,
+  type Schema,
 } from "@tiptap/pm/model";
 import { closeHistory, history } from "@tiptap/pm/history";
 import type { Transaction } from "@tiptap/pm/state";
@@ -107,13 +109,33 @@ export function serializeDocument(editor: Editor): string {
     .split(EMPTY_CELL_MARKER)
     .join(" ");
 }
+/**
+ * The markdown parser turns nested emphasis (`**a **b** c**`, `__**x**__`)
+ * into a text node carrying the same mark twice, which ProseMirror rejects as
+ * an invalid document. Doubled emphasis looks the same as single emphasis, so
+ * each node's marks are folded the way ProseMirror adds them: a mark whose
+ * type excludes itself replaces the earlier one. Rewrites `json` in place.
+ */
+export function normalizeMarks(schema: Schema, json: JSONContent): JSONContent {
+  const marks = json.marks;
+  if (marks && marks.length > 1 && new Set(marks.map((mark) => mark.type)).size < marks.length) {
+    json.marks = marks
+      .reduce<readonly Mark[]>((set, mark) => schema.markFromJSON(mark).addToSet(set), Mark.none)
+      .map((mark) => mark.toJSON());
+  }
+  json.content?.forEach((child) => normalizeMarks(schema, child));
+  return json;
+}
+
 export function parseDocument(
   editor: Editor,
   markdown: string,
 ): ProseMirrorNode {
   const manager = editor.storage.markdown?.manager;
   if (!manager) throw new Error("The markdown editor is not ready.");
-  const parsed = editor.schema.nodeFromJSON(manager.parse(markdown));
+  const parsed = editor.schema.nodeFromJSON(
+    normalizeMarks(editor.schema, manager.parse(markdown)),
+  );
   const doc = parsed.content.size
     ? parsed
     : editor.schema.topNodeType.createAndFill();
@@ -295,7 +317,12 @@ function editBlocks(
     : doc.type.createAndFill();
   if (!target)
     throw new Error("The markdown could not be represented in this editor.");
-  target.check();
+  // Validate what this edit produced and how the blocks fit together, not the
+  // untouched blocks: a defect already elsewhere in the live note (such as a
+  // doubled mark loaded before normalizeMarks) must not block every edit.
+  if (!target.type.validContent(target.content))
+    throw new Error("The markdown could not be represented in this editor.");
+  nodes.forEach((node) => node.check());
   return {
     doc: target,
     markdown: next,

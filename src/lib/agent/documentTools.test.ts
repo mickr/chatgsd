@@ -144,6 +144,51 @@ describe("trimTrailingEmptyParagraph", () => {
   });
 });
 
+describe("nested emphasis", () => {
+  // The parser doubles the mark for `**a **b** c**`, an invalid document that
+  // made every edit to such a note fail with "Invalid collection of marks".
+  const boldMarks = (doc: ReturnType<typeof parseDocument>) => {
+    const counts: number[] = [];
+    doc.descendants((node) => {
+      if (node.isText) counts.push(node.marks.filter((m) => m.type.name === "bold").length);
+    });
+    return counts;
+  };
+
+  it("parses doubled emphasis as single emphasis without losing text", () => {
+    const editor = openNote("");
+    const doc = parseDocument(editor, "**a **b** c** and __**x**__ and ****y****");
+    expect(doc.textContent).toBe("a b c and x and y");
+    expect(Math.max(...boldMarks(doc))).toBe(1);
+  });
+
+  // openNote loads without normalizeMarks, like notes opened before it
+  // existed, so these live notes already hold the doubled marks.
+  it("edits far from a doubled mark already in the live note", async () => {
+    const editor = openNote(
+      "Intro **a **b** c** end.\n\n| **k **v** w** | z |\n| --- | --- |\n| r | s |\n\nMiddle.\n\nMore.\n\nSecond paragraph.",
+    );
+    const far = await edit(editor, [{ old_text: "Second paragraph.", new_text: "Second line." }]);
+    expect(far).toMatchObject({ ok: true });
+    const near = await edit(editor, [{ old_text: "end.", new_text: "finish." }]);
+    expect(near).toMatchObject({ ok: true });
+    const text = editor.state.doc.textContent;
+    expect(text).toContain("Intro a b c finish.");
+    expect(text).toContain("k v w");
+    expect(text).toContain("Second line.");
+  });
+
+  it("applies an agent's own edit that nests emphasis", async () => {
+    const editor = openNote("Plain intro.\n\nPlain end.");
+    const result = await edit(editor, [
+      { old_text: "Plain intro.", new_text: "**Rollout **must** stay staged.**" },
+    ]);
+    expect(result).toMatchObject({ ok: true });
+    expect(editor.state.doc.textContent).toBe("Rollout must stay staged.Plain end.");
+    expect(() => editor.state.doc.check()).not.toThrow();
+  });
+});
+
 describe("edit_document", () => {
   it("keeps table-cell changes in one gutter marker outside the scrolling table", async () => {
     const editor = openNote("| Day | Plan |\n| --- | --- |\n| Friday | Walk |");
